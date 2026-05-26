@@ -14,12 +14,12 @@ import {
 } from 'lucide-react'
 import logoIcon from '@/assets/icons/icons.png'
 
+type UpdatePhase = 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
+
 interface UpdateInfo {
-  hasUpdate: boolean
-  currentVersion: string
-  latestVersion: string
-  releaseUrl?: string
-  error?: string
+  phase: UpdatePhase
+  latestVersion: string | null
+  error: string | null
 }
 
 interface DownloadProgress {
@@ -41,39 +41,70 @@ export function About() {
     }
   }, [])
 
-  const [appUpdateStatus, setAppUpdateStatus] = useState<{
-    checking: boolean
-    result?: UpdateInfo
-  }>({ checking: false })
-
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo>({ phase: 'idle', latestVersion: null, error: null })
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
-  const [isDownloading, setIsDownloading] = useState(false)
-  const [isDownloaded, setIsDownloaded] = useState(false)
-  const [downloadError, setDownloadError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!window.electronAPI?.app) return
 
-    const unsubscribeProgress = window.electronAPI.app.onUpdateProgress((progress: DownloadProgress) => {
-      setDownloadProgress(progress)
-      setIsDownloading(true)
-      setDownloadError(null)
+    const unsubscribeChecking = window.electronAPI.app.onUpdateChecking(() => {
+      setUpdateInfo((current) => ({
+        ...current,
+        phase: 'checking',
+        error: null,
+      }))
+      setDownloadProgress(null)
     })
 
-    const unsubscribeDownloaded = window.electronAPI.app.onUpdateDownloaded(() => {
-      setIsDownloading(false)
-      setIsDownloaded(true)
+    const unsubscribeAvailable = window.electronAPI.app.onUpdateAvailable((info) => {
+      setUpdateInfo({
+        phase: 'available',
+        latestVersion: info?.version || null,
+        error: null,
+      })
       setDownloadProgress(null)
-      setDownloadError(null)
+    })
+
+    const unsubscribeNotAvailable = window.electronAPI.app.onUpdateNotAvailable((info) => {
+      setUpdateInfo({
+        phase: 'not-available',
+        latestVersion: info?.version || null,
+        error: null,
+      })
+      setDownloadProgress(null)
+    })
+
+    const unsubscribeProgress = window.electronAPI.app.onUpdateProgress((progress: DownloadProgress) => {
+      setDownloadProgress(progress)
+      setUpdateInfo((current) => ({
+        ...current,
+        phase: 'downloading',
+        error: null,
+      }))
+    })
+
+    const unsubscribeDownloaded = window.electronAPI.app.onUpdateDownloaded((info) => {
+      setUpdateInfo({
+        phase: 'downloaded',
+        latestVersion: info?.version || null,
+        error: null,
+      })
+      setDownloadProgress(null)
     })
 
     const unsubscribeError = window.electronAPI.app.onUpdateError((error: any) => {
-      setIsDownloading(false)
       setDownloadProgress(null)
-      setDownloadError(error?.message || 'Download failed')
+      setUpdateInfo((current) => ({
+        ...current,
+        phase: 'error',
+        error: typeof error === 'string' ? error : error?.message || 'Update failed',
+      }))
     })
 
     return () => {
+      unsubscribeChecking()
+      unsubscribeAvailable()
+      unsubscribeNotAvailable()
       unsubscribeProgress()
       unsubscribeDownloaded()
       unsubscribeError()
@@ -92,37 +123,60 @@ export function About() {
     return `${formatBytes(bytesPerSecond)}/s`
   }
 
+  const getUpdateErrorMessage = (error: unknown, fallback: string): string => {
+    if (typeof error === 'string') return error
+    return error instanceof Error ? error.message : fallback
+  }
+
   const handleCheckAppUpdate = async () => {
-    setAppUpdateStatus({ checking: true })
-    setDownloadError(null)
-    setIsDownloaded(false)
+    setUpdateInfo((current) => ({
+      ...current,
+      phase: 'checking',
+      error: null,
+    }))
+    setDownloadProgress(null)
     try {
-      const result = await window.electronAPI.app.checkUpdate()
-      setAppUpdateStatus({
-        checking: false,
-        result,
+      const status = await window.electronAPI.app.checkUpdate()
+      setUpdateInfo({
+        phase: status.error
+          ? 'error'
+          : status.checking
+            ? 'checking'
+            : status.downloaded
+              ? 'downloaded'
+              : status.downloading
+                ? 'downloading'
+                : status.available
+                  ? 'available'
+                  : 'not-available',
+        latestVersion: status.version || null,
+        error: status.error,
       })
     } catch (error) {
-      setAppUpdateStatus({
-        checking: false,
-        result: {
-          hasUpdate: false,
-          currentVersion: appVersion,
-          latestVersion: appVersion,
-          error: String(error),
-        },
+      setUpdateInfo((current) => ({
+        ...current,
+        phase: 'error',
+        error: getUpdateErrorMessage(error, 'Update check failed'),
       })
     }
   }
 
   const handleDownloadUpdate = async () => {
     try {
-      setIsDownloading(true)
-      setDownloadError(null)
+      setUpdateInfo((current) => ({
+        ...current,
+        phase: 'downloading',
+        error: null,
+      }))
+      setDownloadProgress(null)
       await window.electronAPI.app.downloadUpdate()
     } catch (error) {
-      setIsDownloading(false)
-      setDownloadError(error instanceof Error ? error.message : 'Download failed')
+      setDownloadProgress(null)
+      setUpdateInfo((current) => ({
+        ...current,
+        phase: 'error',
+        error: getUpdateErrorMessage(error, 'Download failed'),
+      }))
     }
   }
 
@@ -130,7 +184,11 @@ export function About() {
     try {
       await window.electronAPI.app.installUpdate()
     } catch (error) {
-      setDownloadError(error instanceof Error ? error.message : 'Install failed')
+      setUpdateInfo((current) => ({
+        ...current,
+        phase: 'error',
+        error: getUpdateErrorMessage(error, 'Install failed'),
+      }))
     }
   }
 
@@ -237,37 +295,48 @@ export function About() {
               <p className="text-xs text-[var(--text-muted)]">
                 {t('settings.currentVersion')}:{' '}
                 <span className="text-[var(--text-primary)] font-mono ml-1">
-                  {appUpdateStatus.result?.currentVersion || appVersion}
+                  {appVersion}
                 </span>
               </p>
             </div>
 
             <div className="flex items-center gap-3">
-              {appUpdateStatus.checking ? (
+              {updateInfo.phase === 'checking' ? (
                 <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-[var(--glass-bg)] border border-[var(--glass-border)] text-[var(--text-muted)]">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span className="text-sm font-medium">{t('settings.checking')}</span>
                 </div>
-              ) : isDownloading && downloadProgress ? (
+              ) : updateInfo.phase === 'downloading' ? (
                 <div className="flex flex-col gap-2 min-w-[200px]">
                   <div className="flex items-center justify-between text-xs text-[var(--text-muted)]">
                     <span>{t('settings.downloadingUpdate')}</span>
-                    <span className="font-mono">{downloadProgress.percent.toFixed(1)}%</span>
+                    {downloadProgress && (
+                      <span className="font-mono">{downloadProgress.percent.toFixed(1)}%</span>
+                    )}
                   </div>
-                  <div className="w-full h-2 bg-[var(--bg-tertiary)] rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-[var(--accent-primary)] transition-all duration-300"
-                      style={{ width: `${downloadProgress.percent}%` }}
-                    />
-                  </div>
-                  <div className="flex items-center justify-between text-xs text-[var(--text-dim)]">
-                    <span>{formatSpeed(downloadProgress.bytesPerSecond)}</span>
-                    <span>
-                      {formatBytes(downloadProgress.transferred)} / {formatBytes(downloadProgress.total)}
-                    </span>
-                  </div>
+                  {downloadProgress ? (
+                    <>
+                      <div className="w-full h-2 bg-[var(--bg-tertiary)] rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-[var(--accent-primary)] transition-all duration-300"
+                          style={{ width: `${downloadProgress.percent}%` }}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-[var(--text-dim)]">
+                        <span>{formatSpeed(downloadProgress.bytesPerSecond)}</span>
+                        <span>
+                          {formatBytes(downloadProgress.transferred)} / {formatBytes(downloadProgress.total)}
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex items-center gap-2 text-xs text-[var(--text-dim)]">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>{t('settings.downloadingUpdate')}</span>
+                    </div>
+                  )}
                 </div>
-              ) : isDownloaded ? (
+              ) : updateInfo.phase === 'downloaded' ? (
                 <div className="flex items-center gap-3">
                   <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[var(--success)]/10 shadow-[0_0_8px_var(--success)]">
                     <CheckCircle2 className="w-3.5 h-3.5 text-[var(--success)]" />
@@ -283,7 +352,7 @@ export function About() {
                     {t('settings.restartAndInstall')}
                   </button>
                 </div>
-              ) : downloadError ? (
+              ) : updateInfo.phase === 'error' ? (
                 <div className="flex items-center gap-3">
                   <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[var(--accent-error)]/10">
                     <AlertCircle className="w-3.5 h-3.5 text-[var(--accent-error)]" />
@@ -299,7 +368,7 @@ export function About() {
                     {t('settings.retry')}
                   </button>
                 </div>
-              ) : appUpdateStatus.result && !appUpdateStatus.result.error && appUpdateStatus.result.hasUpdate ? (
+              ) : updateInfo.phase === 'available' ? (
                 <div className="flex items-center gap-3">
                   <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[var(--success)]/10 shadow-[0_0_8px_var(--success)]">
                     <span className="relative flex h-2 w-2">
@@ -307,7 +376,8 @@ export function About() {
                       <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--success)]"></span>
                     </span>
                     <span className="text-xs font-medium text-[var(--success)]">
-                      {t('settings.updateAvailable')} v{appUpdateStatus.result.latestVersion}
+                      {t('settings.updateAvailable')}
+                      {updateInfo.latestVersion ? ` v${updateInfo.latestVersion}` : ''}
                     </span>
                   </div>
                   <button
@@ -330,14 +400,16 @@ export function About() {
             </div>
           </div>
 
-          {appUpdateStatus.result && !appUpdateStatus.checking && !isDownloading && !isDownloaded && (
+          {(updateInfo.phase === 'error' || updateInfo.phase === 'not-available') && (
             <div className="mt-4 pt-4 border-t border-[var(--glass-border)]">
-              {appUpdateStatus.result.error ? (
+              {updateInfo.phase === 'error' ? (
                 <div className="flex items-center gap-2 text-[var(--accent-error)]">
                   <AlertCircle className="w-4 h-4" />
-                  <span className="text-sm font-medium">{t('settings.updateCheckFailed')}</span>
+                  <span className="text-sm font-medium">
+                    {updateInfo.error || t('settings.updateCheckFailed')}
+                  </span>
                 </div>
-              ) : !appUpdateStatus.result.hasUpdate ? (
+              ) : updateInfo.phase === 'not-available' ? (
                 <div className="flex items-center gap-2 text-[var(--accent-success)]">
                   <CheckCircle2 className="w-4 h-4" />
                   <span className="text-sm font-medium">{t('settings.upToDate')}</span>
