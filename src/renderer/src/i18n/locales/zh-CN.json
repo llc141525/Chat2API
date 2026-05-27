@@ -315,7 +315,7 @@
   },
   "zai": {
     "name": "Z.ai",
-    "description": "Z.ai - 免费AI聊天机器人，由 GLM-5 和 GLM-4.7 驱动",
+    "description": "Z.ai - 免费AI聊天机器人，由 GLM-5.1、GLM-5 和 GLM-4.7 驱动",
     "token": "访问令牌",
     "tokenPlaceholder": "请输入 Z.ai JWT Token",
     "tokenHelp": "从Z.ai 网页版获取token，可在浏览器开发者工具 Application -> Cookie 中找到，以\"eyJ...\"为开头"

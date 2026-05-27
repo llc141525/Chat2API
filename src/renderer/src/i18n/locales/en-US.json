@@ -315,7 +315,7 @@
   },
   "zai": {
     "name": "Z.ai",
-    "description": "Z.ai - Free AI Chatbot powered by GLM-5 and GLM-4.7",
+    "description": "Z.ai - Free AI Chatbot powered by GLM-5.1, GLM-5, and GLM-4.7",
     "token": "Access Token",
     "tokenPlaceholder": "Enter Z.ai JWT Token",
     "tokenHelp": "Get token from Z.ai web version, found in browser DevTools Application -> Cookie, starts with \"eyJ...\""
