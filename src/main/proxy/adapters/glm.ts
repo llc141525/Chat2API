@@ -12,7 +12,6 @@ import { createParser } from 'eventsource-parser'
 import FormData from 'form-data'
 import mime from 'mime-types'
 import path from 'path'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected } from '../utils/tools'
 import { parseToolCallsFromText } from '../utils/toolParser'
 import { 
   createBaseChunk,
@@ -423,36 +422,9 @@ export class GLMAdapter {
 
     // Clone messages to avoid modifying original request
     const messages = [...request.messages]
-
-    // Check if tool prompt has already been injected by client
-    const toolPromptExists = hasToolPromptInjected(messages)
-
-    // Inject tools definition into prompt if tools are provided and not already injected
+    // Let ToolCallingEngine handle tool prompt injection centrally
+    // Avoid duplicate injection that causes format conflicts (managed XML vs bracket)
     let toolsPrompt = ''
-    if (request.tools && request.tools.length > 0 && !toolPromptExists) {
-      const glmStrictHint = `
-
-GLM STRICT RULES:
-- If user asks to create/modify code or files, you MUST call tools instead of replying with plain text.
-- You MUST output ONLY one [function_calls] block when calling tools.
-- Use exact tool names from list, case-sensitive, do not rename.`
-      toolsPrompt = toolsToSystemPrompt(request.tools) + glmStrictHint
-
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') {
-          const currentContent = messages[i].content
-          if (typeof currentContent === 'string') {
-            messages[i] = { ...messages[i], content: currentContent + TOOL_WRAP_HINT }
-          } else if (Array.isArray(currentContent)) {
-            messages[i] = {
-              ...messages[i],
-              content: [...currentContent, { type: 'text', text: TOOL_WRAP_HINT }],
-            }
-          }
-          break
-        }
-      }
-    }
 
     // Extract and upload files
     const { fileUrls, imageUrls } = this.extractFileUrls(messages)
