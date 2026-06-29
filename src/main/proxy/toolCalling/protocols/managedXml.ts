@@ -23,6 +23,7 @@ export const managedXmlProtocol: ToolProtocolAdapter = {
     return `## Available Tools
 You can invoke the following developer tools. Tool names are case-sensitive.
 Use only the exact tool names listed below. Do not rename, camelCase, translate, shorten, or invent tool names.
+Include ALL required parameters listed in the JSON schema for each tool.
 
 ${renderToolList(tools)}
 
