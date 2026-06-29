@@ -558,19 +558,23 @@ export class RequestForwarder {
       }
 
       // Create bracket-format tool plan for GLM's own [function_calls] format
-      const tools = request.tools || []
-      const toolNames = new Set(tools.map((t: any) => t.function?.name || t.name))
-      const glmPlan = tools.length > 0 ? {
+      const glmTools = (request.tools || []).map((t: any) => ({
+        name: t.function?.name || t.name,
+        description: t.function?.description || t.description || '',
+        parameters: t.function?.parameters || t.parameters || {},
+      }))
+      const glmToolNames = new Set(glmTools.map((t: any) => t.name))
+      const glmPlan = glmTools.length > 0 ? {
         mode: 'managed' as const,
         protocol: 'managed_bracket' as const,
         clientAdapterId: 'standard-openai-tools' as const,
         providerId: provider.id,
-        tools,
+        tools: glmTools,
         shouldInjectPrompt: false,
         shouldParseResponse: true,
         toolChoiceMode: 'auto' as const,
-        allowedToolNames: toolNames,
-        diagnostics: { requestId: '', clientAdapterId: 'standard-openai-tools', providerId: provider.id, model: request.model, actualModel, toolSource: 'openai', mode: 'managed', protocol: 'managed_bracket', toolCount: tools.length, injected: false, reason: 'managed_auto', toolChoiceMode: 'auto', allowedToolNames: [...toolNames] } as any,
+        allowedToolNames: glmToolNames,
+        diagnostics: { requestId: '', clientAdapterId: 'standard-openai-tools', providerId: provider.id, model: request.model, actualModel, toolSource: 'openai', mode: 'managed', protocol: 'managed_bracket', toolCount: glmTools.length, injected: false, reason: 'managed_auto', toolChoiceMode: 'auto', allowedToolNames: [...glmToolNames] } as any,
       } : undefined
 
       const handler = new GLMStreamHandler(actualModel, undefined, undefined, glmPlan as any)
@@ -855,8 +859,12 @@ export class RequestForwarder {
       }
 
       // Create bracket-format tool plan for Qwen's own [function_calls] format
-      const qwenTools = request.tools || []
-      const qwenToolNames = new Set(qwenTools.map((t: any) => t.function?.name || t.name))
+      const qwenTools = (request.tools || []).map((t: any) => ({
+        name: t.function?.name || t.name,
+        description: t.function?.description || t.description || '',
+        parameters: t.function?.parameters || t.parameters || {},
+      }))
+      const qwenToolNames = new Set(qwenTools.map((t: any) => t.name))
       const qwenPlan = qwenTools.length > 0 ? {
         mode: 'managed' as const,
         protocol: 'managed_bracket' as const,
