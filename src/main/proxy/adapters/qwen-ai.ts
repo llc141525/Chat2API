@@ -51,7 +51,6 @@ interface QwenAiMessage {
 
 interface ChatCompletionRequest {
   model: string
-  /** Original model name before mapping (used for feature detection like thinking mode) */
   originalModel?: string
   messages: QwenAiMessage[]
   stream?: boolean
@@ -59,6 +58,7 @@ interface ChatCompletionRequest {
   enable_thinking?: boolean
   thinking_budget?: number
   chatId?: string
+  tools?: any[]
 }
 
 function uuid(): string {
@@ -309,26 +309,24 @@ export class QwenAiAdapter {
     if (request.tools && request.tools.length > 0) {
       const toolDefs = request.tools.map(t => {
         const fn = t.function || t
-        const params = JSON.stringify(fn.parameters || {})
         const required = (fn.parameters as any)?.required
         const reqStr = (Array.isArray(required) && required.length > 0)
-          ? `\nRequired: ${required.join(', ')}`
+          ? `\n  MANDATORY PARAMS: ${required.join(', ')}`
           : ''
-        return `\`${fn.name}\`: ${fn.description || 'No description'}.${reqStr}\n  JSON: ${params}`
+        return `\`${fn.name}\`: ${fn.description || 'No description'}.${reqStr}\n  Schema: ${JSON.stringify(fn.parameters || {})}`
       }).join('\n\n')
 
       userContent += `\n\n## Available Tools
 ${toolDefs}
 
-STRICT RULES:
-- You MUST use the exact tool names listed above, case-sensitive. Do not rename.
-- When calling tools, respond ONLY with a [function_calls] block:
+CRITICAL RULES:
+- Use EXACT tool names from above. Do NOT rename, shorten, or invent names.
+- EVERY tool call MUST include ALL parameters listed in MANDATORY PARAMS.
+- When calling tools, output ONLY a [function_calls] block, NO other text:
   [function_calls]
   [call:TOOL_NAME]{"arg": "value"}[/call]
   [/function_calls]
-- JSON arguments MUST be on ONE LINE, no line breaks.
-- Do NOT output any text before or after the [function_calls] block when calling tools.
-- Include ALL required parameters for each tool.`
+- JSON args MUST be compact on ONE LINE. No newlines, no pretty print.`
     }
 
     const fid = uuid()
