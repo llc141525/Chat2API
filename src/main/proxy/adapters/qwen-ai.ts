@@ -264,23 +264,32 @@ export class QwenAiAdapter {
 
     const messages = request.messages
     
-    // Extract system message and user message
+    // Build conversation preserving full history
     let systemContent = ''
-    let userContent = ''
-    
-    // Single-turn mode: extract all messages
+    let allContent = ''
+
     for (const msg of messages) {
       if (msg.role === 'system') {
-        systemContent += (systemContent ? '\n\n' : '') + msg.content
+        systemContent += (systemContent ? '\n\n' : '') + (typeof msg.content === 'string' ? msg.content : '')
       } else if (msg.role === 'user') {
-        userContent = msg.content
+        const text = typeof msg.content === 'string' ? msg.content : (Array.isArray(msg.content) ? msg.content.find((p: any) => p.type === 'text')?.text || '' : '')
+        allContent += (allContent ? '\n\n' : '') + `User: ${text}`
+      } else if (msg.role === 'assistant') {
+        if (msg.content) {
+          allContent += (allContent ? '\n\n' : '') + `Assistant: ${msg.content}`
+        }
+        if (msg.tool_calls) {
+          for (const tc of msg.tool_calls) {
+            allContent += `\n[Tool Call: ${tc.function.name}(${tc.function.arguments})]`
+          }
+        }
+      } else if (msg.role === 'tool') {
+        allContent += `\n[Tool Result: ${(msg as any).content || ''}]`
       }
     }
     
-    // If system prompt exists, prepend it to user content
-    if (systemContent) {
-      userContent = `${systemContent}\n\nUser: ${userContent}`
-    }
+    // If system prompt exists, prepend to content
+    const userContent = systemContent ? `${systemContent}\n\n${allContent}` : allContent
 
     const fid = uuid()
     const childId = uuid()

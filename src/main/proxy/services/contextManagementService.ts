@@ -224,10 +224,45 @@ export class TokenLimitStrategy {
         `[TokenLimitStrategy] System messages already exceed token limit ` +
           `(${systemTokens} > ${this.config.maxTokens})`
       )
+      // Instead of dropping all user messages, trim system messages to fit
+      // Keep the last part of system prompt (usually more relevant) + last user message
+      const reserveForUser = Math.min(this.config.maxTokens * 0.3, this.config.maxTokens)
+      const systemMax = this.config.maxTokens - reserveForUser
+      
+      const trimmedSystem = systemMessages.map(msg => {
+        if (typeof msg.content === 'string') {
+          return { ...msg, content: msg.content.slice(-systemMax) }
+        }
+        return msg
+      })
+      
+      const keptNonSystem: ChatMessage[] = []
+      let usedTokens = reserveForUser > 0 ? systemMax : 0
+      for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
+        const msg = nonSystemMessages[i]
+        const msgTokens = estimateTokens(msg.content)
+        if (usedTokens + msgTokens <= this.config.maxTokens) {
+          keptNonSystem.unshift(msg)
+          usedTokens += msgTokens
+        } else if (keptNonSystem.length === 0 && nonSystemMessages.length > 0) {
+          // Always keep at least the last user message
+          keptNonSystem.unshift(nonSystemMessages[nonSystemMessages.length - 1])
+          break
+        } else {
+          break
+        }
+      }
+      
+      const result = [...trimmedSystem, ...keptNonSystem]
+      console.log(
+        `[TokenLimitStrategy] System exceeded limit - kept ${result.length} messages ` +
+          `(trimmed system + ${keptNonSystem.length} non-system)`
+      )
+      
       return {
-        messages: systemMessages,
+        messages: result,
         originalCount,
-        processedCount: systemMessages.length,
+        processedCount: result.length,
         strategyName: 'tokenLimit',
         trimmed: true,
       }

@@ -47,9 +47,9 @@ Tool results will be provided as Chat2API XML result blocks:
     const toolCalls = []
 
     parseBlocks(parseable, {
-      blockPattern: /<\|CHAT2API\|tool_calls>([\s\S]*?)<\/\|CHAT2API\|tool_calls>/g,
-      invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|invoke>/g,
-      parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|parameter>/g,
+      blockPattern: /<\|CHAT2API\|tool_calls>([\s\S]*?)<\/\|CHAT[^|]*\|tool_calls>/g,
+      invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT[^|]*\|invoke>/g,
+      parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT[^|]*\|parameter>/g,
       rawMatches,
       invalidToolNames,
       allowedNames,

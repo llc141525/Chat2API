@@ -924,6 +924,18 @@ export class RequestForwarder {
 
       if (response.status >= 400) {
         let errorMessage = `HTTP ${response.status}`
+        try {
+          const chunks: Buffer[] = []
+          response.data.on('data', (chunk: Buffer) => chunks.push(chunk))
+          await new Promise<void>((resolve) => {
+            response.data.on('end', () => resolve())
+            response.data.on('error', () => resolve())
+          })
+          const errorBody = Buffer.concat(chunks).toString('utf8')
+          if (errorBody) {
+            errorMessage += ` - ${errorBody.slice(0, 500)}`
+          }
+        } catch {}
         return {
           success: false,
           status: response.status,

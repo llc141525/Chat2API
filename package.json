@@ -7,7 +7,7 @@
     "name": "Chat2API Team",
     "email": "support@chat2api.com"
   },
-  "homepage": "https://github.com/llc141525/Chat2API",
+  "homepage": "https://github.com/chat2api/Chat2API-Manager",
   "license": "GPL-3.0",
   "scripts": {
     "dev": "bash scripts/dev.sh",
@@ -80,7 +80,7 @@
     "@vitejs/plugin-react": "^4.3.3",
     "autoprefixer": "^10.4.20",
     "canvas": "^3.2.1",
-    "electron": "^33.0.2",
+    "electron": "^33.4.11",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
     "postcss": "^8.4.47",
@@ -240,7 +240,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "llc141525",
+      "owner": "xiaoY233",
       "repo": "Chat2API"
     }
   }
