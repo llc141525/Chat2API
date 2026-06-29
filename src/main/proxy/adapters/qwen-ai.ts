@@ -264,11 +264,25 @@ export class QwenAiAdapter {
 
     const messages = request.messages
     
+    // Strip rawText from tool_calls to prevent Qwen API from detecting them as duplicates
+    const cleanMessages = messages.map(msg => {
+      if (msg.role === 'assistant' && (msg as any).tool_calls) {
+        return {
+          ...msg,
+          tool_calls: (msg as any).tool_calls.map((tc: any) => {
+            const { rawText, ...clean } = tc
+            return clean
+          })
+        }
+      }
+      return msg
+    })
+    
     // Build conversation preserving full history
     let systemContent = ''
     let allContent = ''
 
-    for (const msg of messages) {
+    for (const msg of cleanMessages) {
       if (msg.role === 'system') {
         systemContent += (systemContent ? '\n\n' : '') + (typeof msg.content === 'string' ? msg.content : '')
       } else if (msg.role === 'user') {
@@ -280,11 +294,11 @@ export class QwenAiAdapter {
         }
         if (msg.tool_calls) {
           for (const tc of msg.tool_calls) {
-            allContent += `\n[Tool Call: ${tc.function.name}(${tc.function.arguments})]`
+            allContent += `\n(Used tool: ${tc.function.name})`
           }
         }
       } else if (msg.role === 'tool') {
-        allContent += `\n[Tool Result: ${(msg as any).content || ''}]`
+        allContent += `\n(Tool result: ${(msg as any).content || ''})`
       }
     }
     
