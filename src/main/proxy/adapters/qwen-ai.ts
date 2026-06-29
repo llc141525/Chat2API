@@ -303,7 +303,33 @@ export class QwenAiAdapter {
     }
     
     // If system prompt exists, prepend to content
-    const userContent = systemContent ? `${systemContent}\n\n${allContent}` : allContent
+    let userContent = systemContent ? `${systemContent}\n\n${allContent}` : allContent
+
+    // Inject tool prompt using bracket format if tools provided
+    if (request.tools && request.tools.length > 0) {
+      const toolDefs = request.tools.map(t => {
+        const fn = t.function || t
+        const params = JSON.stringify(fn.parameters || {})
+        const required = (fn.parameters as any)?.required
+        const reqStr = (Array.isArray(required) && required.length > 0)
+          ? `\nRequired: ${required.join(', ')}`
+          : ''
+        return `\`${fn.name}\`: ${fn.description || 'No description'}.${reqStr}\n  JSON: ${params}`
+      }).join('\n\n')
+
+      userContent += `\n\n## Available Tools
+${toolDefs}
+
+STRICT RULES:
+- You MUST use the exact tool names listed above, case-sensitive. Do not rename.
+- When calling tools, respond ONLY with a [function_calls] block:
+  [function_calls]
+  [call:TOOL_NAME]{"arg": "value"}[/call]
+  [/function_calls]
+- JSON arguments MUST be on ONE LINE, no line breaks.
+- Do NOT output any text before or after the [function_calls] block when calling tools.
+- Include ALL required parameters for each tool.`
+    }
 
     const fid = uuid()
     const childId = uuid()

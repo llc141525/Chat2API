@@ -813,16 +813,17 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
+      // Qwen uses its own [function_calls] bracket format - skip unified tool engine
+      // to avoid format conflicts with managed XML protocol
       const adapter = new QwenAiAdapter(provider, account)
       const { response, chatId, parentId } = await adapter.chatCompletion({
         model: actualModel,
         originalModel: request.model,
-        messages: transformed.messages as any,
+        messages: request.messages,
         stream: request.stream,
         temperature: request.temperature,
         enable_thinking: !!request.reasoning_effort,
+        tools: request.tools,
       })
 
       const latency = Date.now() - startTime
@@ -837,7 +838,7 @@ export class RequestForwarder {
         }
       }
 
-      const handler = new QwenAiStreamHandler(actualModel, undefined, transformed.plan)
+      const handler = new QwenAiStreamHandler(actualModel, undefined, undefined)
       handler.setChatId(chatId)
 
       if (request.stream) {
@@ -866,7 +867,7 @@ export class RequestForwarder {
 
       const result = await handler.handleNonStream(response.data)
 
-      this.applyToolCallsToResponse(result, transformed)
+      // Qwen adapter handles tool call parsing internally
 
       if (shouldDeleteSession()) {
         await adapter.deleteChat(chatId)
