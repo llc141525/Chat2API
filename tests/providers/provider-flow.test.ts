@@ -15,6 +15,7 @@ import { qwenAiConfig } from '../../src/main/providers/builtin/qwen-ai.ts'
 import { zaiConfig } from '../../src/main/providers/builtin/zai.ts'
 import {
   DEEPSEEK_PRIMARY_MODELS,
+  DEFAULT_SESSION_CONFIG,
   DEFAULT_DEEPSEEK_MODEL_MAPPINGS,
   createDefaultModelMappings,
   isDefaultModelMapping,
@@ -126,6 +127,21 @@ test('DeepSeek feature aliases are seeded as global model mappings', () => {
   assert.equal(DEFAULT_DEEPSEEK_MODEL_MAPPINGS['deepseek-reasoner'], undefined)
   assert.equal(DEFAULT_DEEPSEEK_MODEL_MAPPINGS['DeepSeek-R1'], undefined)
   assert.equal(DEFAULT_DEEPSEEK_MODEL_MAPPINGS['DeepSeek-R1-Search'], undefined)
+})
+
+test('runtime defaults mirror extracted running instance session settings', () => {
+  assert.deepEqual(DEFAULT_SESSION_CONFIG, {
+    sessionTimeout: 30,
+    maxMessagesPerSession: 50,
+    deleteAfterTimeout: true,
+    maxSessionsPerAccount: 3,
+  })
+
+  const sessionManagementSource = readFileSync(
+    join(root, 'src/renderer/src/components/proxy/SessionManagement.tsx'),
+    'utf8',
+  )
+  assert.match(sessionManagementSource, /deleteAfterTimeout: true/)
 })
 
 test('built-in model mappings are restored and cannot be replaced by custom config', () => {

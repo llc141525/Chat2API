@@ -48,9 +48,9 @@ export const DEFAULT_TOOL_CALLING_CONFIG: ToolCallingConfig = {
   enabled: true,
   mode: 'auto',
   clientAdapterId: 'standard-openai-tools',
-  diagnosticsEnabled: false,
+  diagnosticsEnabled: true,
   advanced: {
-    promptPreviewEnabled: false,
+    promptPreviewEnabled: true,
     customPromptTemplate: undefined,
   },
 }

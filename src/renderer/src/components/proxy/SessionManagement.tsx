@@ -21,7 +21,7 @@ export function SessionManagement() {
     mode: 'single',
     sessionTimeout: 30,
     maxMessagesPerSession: 50,
-    deleteAfterTimeout: false,
+    deleteAfterTimeout: true,
     maxSessionsPerAccount: 3,
   })
 

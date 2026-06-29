@@ -13,9 +13,9 @@ test('v2 tool calling defaults use managed standard OpenAI tools', () => {
     enabled: true,
     mode: 'auto',
     clientAdapterId: 'standard-openai-tools',
-    diagnosticsEnabled: false,
+    diagnosticsEnabled: true,
     advanced: {
-      promptPreviewEnabled: false,
+      promptPreviewEnabled: true,
       customPromptTemplate: undefined,
     },
   })

@@ -656,7 +656,7 @@ export interface StoreSchema {
 export const DEFAULT_SESSION_CONFIG: SessionConfig = {
   sessionTimeout: 30,
   maxMessagesPerSession: 50,
-  deleteAfterTimeout: false,
+  deleteAfterTimeout: true,
   maxSessionsPerAccount: 3,
 }
 
