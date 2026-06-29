@@ -519,23 +519,19 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
-
+      // GLM uses its own [function_calls] bracket format - skip unified tool engine
+      // to avoid format conflicts with managed XML protocol
       const adapter = new GLMAdapter(provider, account)
       const { response, conversationId } = await adapter.chatCompletion({
         model: actualModel,
         originalModel: request.model,
-        messages: transformedRequest.messages,
-        stream: transformedRequest.stream,
-        temperature: transformedRequest.temperature,
-        web_search: transformedRequest.web_search,
-        reasoning_effort: transformedRequest.reasoning_effort,
-        deep_research: transformedRequest.deep_research,
+        messages: request.messages,
+        stream: request.stream,
+        temperature: request.temperature,
+        web_search: request.web_search,
+        reasoning_effort: request.reasoning_effort,
+        deep_research: request.deep_research,
+        tools: request.tools,
       })
 
       const latency = Date.now() - startTime
@@ -561,7 +557,7 @@ export class RequestForwarder {
         }
       }
 
-      const handler = new GLMStreamHandler(actualModel, undefined, undefined, transformed.plan)
+      const handler = new GLMStreamHandler(actualModel, undefined, undefined, undefined)
       
       if (request.stream) {
         const transformedStream = await handler.handleStream(response.data)
@@ -593,8 +589,8 @@ export class RequestForwarder {
 
       const result = await handler.handleNonStream(response.data)
       
-      this.applyToolCallsToResponse(result, transformed)
-      
+      // GLM adapter handles tool call parsing internally
+
       if (shouldDeleteSession()) {
         const convId = handler.getConversationId()
         if (convId) {
