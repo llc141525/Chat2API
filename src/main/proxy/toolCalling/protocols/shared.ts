@@ -132,7 +132,11 @@ export function renderToolList(tools: NormalizedToolDefinition[]): string {
   return tools
     .map((tool) => {
       const parameters = JSON.stringify(tool.parameters ?? {})
-      return `Tool \`${tool.name}\`: ${tool.description || 'No description'}. Arguments JSON schema: ${parameters}`
+      const required = (tool.parameters as any)?.required
+      const requiredStr = (Array.isArray(required) && required.length > 0)
+        ? `\n  Required parameters: ${required.join(', ')}`
+        : ''
+      return `Tool \`${tool.name}\`: ${tool.description || 'No description'}.${requiredStr}\n  JSON schema: ${parameters}`
     })
     .join('\n')
 }
