@@ -1035,9 +1035,7 @@ export class GLMStreamHandler {
                 if (partReasoning) fullReasoning += (fullReasoning.length > 0 ? '\n' : '') + partReasoning
               })
 
-              const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-                ? { content: fullText, toolCalls: [] }
-                : parseToolCallsFromText(fullText, 'glm')
+              const { content: cleanContent, toolCalls } = parseToolCallsFromText(fullText, 'glm')
 
               resolve({
                 id: this.conversationId,
