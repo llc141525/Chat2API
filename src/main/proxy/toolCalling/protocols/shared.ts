@@ -77,6 +77,20 @@ export function normalizeArguments(args: unknown): string {
     try {
       return JSON.stringify(JSON.parse(trimmed))
     } catch {
+      // Try to fix common Qwen JSON errors:
+      // 1. Comma-separated objects missing array brackets: {"a":1}, {"b":2} -> [{"a":1}, {"b":2}]
+      if (trimmed.startsWith('{') && trimmed.includes('},')) {
+        try {
+          return JSON.stringify(JSON.parse(`[${trimmed}]`))
+        } catch { /* fall through */ }
+      }
+      // 2. Trailing comma in arrays/objects
+      if (trimmed.endsWith(',}') || trimmed.endsWith(',]')) {
+        try {
+          return JSON.stringify(JSON.parse(trimmed.slice(0, -2) + trimmed.slice(-1)))
+        } catch { /* fall through */ }
+      }
+
       return trimmed
     }
   }
@@ -91,6 +105,13 @@ export function parseJsonValue(value: string): unknown {
   try {
     return JSON.parse(trimmed)
   } catch {
+    // Try to fix common model JSON errors:
+    if (trimmed.startsWith('{') && trimmed.includes('},')) {
+      try { return JSON.parse(`[${trimmed}]`) } catch { /* ok */ }
+    }
+    if (trimmed.endsWith(',}') || trimmed.endsWith(',]')) {
+      try { return JSON.parse(trimmed.slice(0, -2) + trimmed.slice(-1)) } catch { /* ok */ }
+    }
     return decodeXml(trimmed)
   }
 }
