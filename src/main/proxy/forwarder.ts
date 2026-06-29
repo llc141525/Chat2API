@@ -557,7 +557,23 @@ export class RequestForwarder {
         }
       }
 
-      const handler = new GLMStreamHandler(actualModel, undefined, undefined, undefined)
+      // Create bracket-format tool plan for GLM's own [function_calls] format
+      const tools = request.tools || []
+      const toolNames = new Set(tools.map((t: any) => t.function?.name || t.name))
+      const glmPlan = tools.length > 0 ? {
+        mode: 'managed' as const,
+        protocol: 'managed_bracket' as const,
+        clientAdapterId: 'standard-openai-tools' as const,
+        providerId: provider.id,
+        tools,
+        shouldInjectPrompt: false,
+        shouldParseResponse: true,
+        toolChoiceMode: 'auto' as const,
+        allowedToolNames: toolNames,
+        diagnostics: { requestId: '', clientAdapterId: 'standard-openai-tools', providerId: provider.id, model: request.model, actualModel, toolSource: 'openai', mode: 'managed', protocol: 'managed_bracket', toolCount: tools.length, injected: false, reason: 'managed_auto', toolChoiceMode: 'auto', allowedToolNames: [...toolNames] } as any,
+      } : undefined
+
+      const handler = new GLMStreamHandler(actualModel, undefined, undefined, glmPlan as any)
       
       if (request.stream) {
         const transformedStream = await handler.handleStream(response.data)
@@ -838,7 +854,23 @@ export class RequestForwarder {
         }
       }
 
-      const handler = new QwenAiStreamHandler(actualModel, undefined, undefined)
+      // Create bracket-format tool plan for Qwen's own [function_calls] format
+      const qwenTools = request.tools || []
+      const qwenToolNames = new Set(qwenTools.map((t: any) => t.function?.name || t.name))
+      const qwenPlan = qwenTools.length > 0 ? {
+        mode: 'managed' as const,
+        protocol: 'managed_bracket' as const,
+        clientAdapterId: 'standard-openai-tools' as const,
+        providerId: provider.id,
+        tools: qwenTools,
+        shouldInjectPrompt: false,
+        shouldParseResponse: true,
+        toolChoiceMode: 'auto' as const,
+        allowedToolNames: qwenToolNames,
+        diagnostics: { requestId: '', clientAdapterId: 'standard-openai-tools', providerId: provider.id, model: request.model, actualModel, toolSource: 'openai', mode: 'managed', protocol: 'managed_bracket', toolCount: qwenTools.length, injected: false, reason: 'managed_auto', toolChoiceMode: 'auto', allowedToolNames: [...qwenToolNames] } as any,
+      } : undefined
+
+      const handler = new QwenAiStreamHandler(actualModel, undefined, qwenPlan as any)
       handler.setChatId(chatId)
 
       if (request.stream) {
