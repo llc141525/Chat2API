@@ -841,7 +841,7 @@ export class RequestForwarder {
         }
       }
 
-      const handler = new QwenAiStreamHandler(actualModel)
+      const handler = new QwenAiStreamHandler(actualModel, undefined, transformed.plan)
       handler.setChatId(chatId)
 
       if (request.stream) {
@@ -942,7 +942,7 @@ export class RequestForwarder {
           }
         : undefined
 
-      const handler = new ZaiStreamHandler(actualModel, deleteChatCallback)
+      const handler = new ZaiStreamHandler(actualModel, deleteChatCallback, transformed.plan)
       handler.setChatId(chatId)
       
       if (request.stream === true) {
@@ -1007,6 +1007,7 @@ export class RequestForwarder {
         messages: transformed.messages as any,
         stream: request.stream,
         temperature: request.temperature,
+        toolCallingPlan: transformed.plan,
       })
 
       const latency = Date.now() - startTime
@@ -1068,6 +1069,26 @@ export class RequestForwarder {
           status: response.status,
           headers: this.extractHeaders(response.headers),
           body: response.data,
+          latency,
+          providerSessionId: chatId,
+        }
+      }
+
+      if (stream) {
+        const handler = new MiniMaxStreamHandler(actualModel, deleteChatCallback, transformed.plan)
+        handler.setChatId(chatId)
+        const result = await handler.handleNonStream(stream.stream)
+        this.applyToolCallsToResponse(result, transformed)
+
+        if (deleteChatCallback) {
+          await deleteChatCallback(chatId)
+        }
+
+        return {
+          success: true,
+          status: 200,
+          headers: {},
+          body: result,
           latency,
           providerSessionId: chatId,
         }
@@ -1244,7 +1265,7 @@ export class RequestForwarder {
             }
           : undefined
 
-        const handler = new PerplexityStreamHandler(actualModel, sessionId, deleteSessionCallback, adapter)
+        const handler = new PerplexityStreamHandler(actualModel, sessionId, deleteSessionCallback, adapter, transformed.plan)
         const transformedStream = await handler.handleStream(stream)
         
         return {
@@ -1258,7 +1279,7 @@ export class RequestForwarder {
         }
       }
 
-      const handler = new PerplexityStreamHandler(actualModel, sessionId, undefined, adapter)
+      const handler = new PerplexityStreamHandler(actualModel, sessionId, undefined, adapter, transformed.plan)
       const result = await handler.handleNonStream(stream)
       
       this.applyToolCallsToResponse(result, transformed)

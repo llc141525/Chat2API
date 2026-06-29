@@ -13,13 +13,15 @@ import FormData from 'form-data'
 import { Account, Provider } from '../../store/types'
 import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected, shouldInjectToolPrompt } from '../utils/tools'
 import { parseToolCallsFromText } from '../utils/toolParser'
-import { 
-  createToolCallState, 
-  processStreamContent, 
+import {
+  createToolCallState,
+  processStreamContent,
   flushToolCallBuffer,
   createBaseChunk,
-  ToolCallState 
+  ToolCallState
 } from '../utils/streamToolHandler'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
+import type { ToolCallingPlan } from '../toolCalling/types'
 
 const AGENT_BASE_URL = 'https://agent.minimaxi.com'
 
@@ -78,6 +80,7 @@ interface ChatCompletionRequest {
   tools?: any[]
   tool_choice?: any
   chatId?: string
+  toolCallingPlan?: ToolCallingPlan
 }
 
 interface DeviceInfo {
@@ -124,13 +127,13 @@ function unixTimestamp(): number {
 
 function tokenSplit(authorization: string): string[] {
   const token = authorization.replace('Bearer ', '')
-  
+
   // Check if it's realUserID+JWTtoken format (contains +)
   if (token.includes('+')) {
     // Return the full token for parsing in constructor
     return [token]
   }
-  
+
   // If no +, use the JWT token directly
   return [token]
 }
@@ -147,16 +150,16 @@ function parseJWTUserID(jwtToken: string): string {
       console.log('[MiniMax] Invalid JWT format, expected 3 parts, got:', parts.length)
       return ''
     }
-    
+
     // Base64 decode the payload
     const payload = parts[1]
     // Add padding if needed
     const padding = 4 - (payload.length % 4)
     const paddedPayload = padding !== 4 ? payload + '='.repeat(padding) : payload
-    
+
     const decoded = Buffer.from(paddedPayload, 'base64').toString('utf8')
     const payloadObj = JSON.parse(decoded)
-    
+
     // MiniMax JWT contains user.id
     const userID = payloadObj?.user?.id || ''
     console.log('[MiniMax] Parsed userID from JWT:', userID)
@@ -194,7 +197,7 @@ export class MiniMaxAdapter {
 
     // Check if realUserID is provided separately in credentials
     const providedRealUserID = account.credentials.realUserID as string | undefined
-    
+
     if (providedRealUserID && providedRealUserID.trim()) {
       // User provided realUserID separately, use it directly
       this.realUserID = providedRealUserID.trim()
@@ -225,7 +228,7 @@ export class MiniMaxAdapter {
   private async requestDeviceInfo(): Promise<DeviceInfo> {
     const cacheKey = this.rawToken
     let result = deviceInfoMap.get(cacheKey)
-    
+
     if (result && result.refreshTime > unixTimestamp()) {
       return result
     }
@@ -233,20 +236,20 @@ export class MiniMaxAdapter {
     const randomUuid = uuid()
     const unix = `${Date.now()}`
     const timestamp = unixTimestamp()
-    
+
     const userData = { ...FAKE_USER_DATA }
     userData.uuid = randomUuid
     userData.user_id = this.realUserID
     userData.unix = unix
     userData.token = this.jwtToken
-    
+
     let queryStr = ''
     for (const key in userData) {
       if (userData[key] === undefined) continue
       queryStr += `&${key}=${userData[key]}`
     }
     queryStr = queryStr.substring(1)
-    
+
     const dataJson = JSON.stringify({ uuid: randomUuid })
     const fullUri = `/v1/api/user/device/register?${queryStr}`
     const yy = md5(`${encodeURIComponent(fullUri)}_${dataJson}${md5(unix)}ooui`)
@@ -302,7 +305,7 @@ export class MiniMaxAdapter {
   ): Promise<AxiosResponse> {
     const unix = `${Date.now()}`
     const timestamp = unixTimestamp()
-    
+
     const userData = { ...FAKE_USER_DATA }
     const realUserID = deviceInfo.realUserID || deviceInfo.userId
     userData.uuid = realUserID
@@ -310,14 +313,14 @@ export class MiniMaxAdapter {
     userData.user_id = realUserID
     userData.unix = unix
     userData.token = this.jwtToken
-    
+
     let queryStr = ''
     for (const key in userData) {
       if (userData[key] === undefined) continue
       queryStr += `&${key}=${userData[key]}`
     }
     queryStr = queryStr.substring(1)
-    
+
     const dataJson = JSON.stringify(data || {})
     const fullUri = `${uri}${uri.lastIndexOf('?') != -1 ? '&' : '?'}${queryStr}`
     const yy = md5(`${encodeURIComponent(fullUri)}_${dataJson}${md5(unix)}ooui`)
@@ -437,10 +440,10 @@ export class MiniMaxAdapter {
       }
       // Handle tool response message
       if (msg.role === 'tool' && msg.tool_call_id) {
-        return { 
-          ...msg, 
+        return {
+          ...msg,
           role: 'user' as const,
-          content: `[TOOL_RESULT for ${msg.tool_call_id}] ${msg.content || ''}` 
+          content: `[TOOL_RESULT for ${msg.tool_call_id}] ${msg.content || ''}`
         }
       }
       return msg
@@ -456,14 +459,14 @@ export class MiniMaxAdapter {
       }
       return true
     })
-    
+
     let content = ''
-    
+
     // Prepend system message if exists
     if (systemContent) {
       content = `system:${systemContent}\n`
     }
-    
+
     // For multi-turn with existing session, only send the last user message
     if (isMultiTurn) {
       // Find last user message index manually (ES2021 compatible)
@@ -474,12 +477,12 @@ export class MiniMaxAdapter {
           break
         }
       }
-      
+
       if (lastUserIdx !== -1) {
         const lastUserMsg = otherMessages[lastUserIdx]
         const text = typeof lastUserMsg.content === 'string' ? lastUserMsg.content : ''
         content += `user:${text}\n`
-        
+
         // Include any tool results after the last user message
         for (let i = lastUserIdx + 1; i < otherMessages.length; i++) {
           if (otherMessages[i].role === 'user') {
@@ -487,7 +490,7 @@ export class MiniMaxAdapter {
             content += `user:${toolText}\n`
           }
         }
-        
+
         if (toolsPrompt) {
           content = content.trim() + '\n\n' + toolsPrompt
         }
@@ -502,7 +505,7 @@ export class MiniMaxAdapter {
         }
       }
     }
-    
+
     if (otherMessages.length < 2) {
       content += otherMessages.reduce((acc, msg) => {
         const text = typeof msg.content === 'string' ? msg.content : ''
@@ -512,7 +515,7 @@ export class MiniMaxAdapter {
       const latestMessage = otherMessages[otherMessages.length - 1]
       const hasFileOrImage = Array.isArray(latestMessage.content) &&
         latestMessage.content.some((v: any) => typeof v === 'object' && ['file', 'image_url'].includes(v.type))
-      
+
       if (hasFileOrImage) {
         const newFileMessage: MiniMaxMessage = {
           content: '关注用户最新发送文件和消息',
@@ -520,12 +523,12 @@ export class MiniMaxAdapter {
         }
         otherMessages.push(newFileMessage)
       }
-      
+
       content += otherMessages.reduce((acc, msg) => {
         const text = typeof msg.content === 'string' ? msg.content : ''
         return acc + `${msg.role}:${text}\n`
       }, '') + 'assistant:\n'
-      
+
       content = content.trim().replace(/\!\[.+\]\(.+\)/g, '')
     }
 
@@ -547,19 +550,19 @@ export class MiniMaxAdapter {
 
   async chatCompletion(request: ChatCompletionRequest): Promise<{ response: AxiosResponse | null; stream: { session: ClientHttp2Session; stream: ClientHttp2Stream } | null; chatId: string }> {
     console.log('[MiniMax] chatCompletion called with model:', request.model, 'stream:', request.stream)
-    
+
     this.model = request.model || 'MiniMax-M2.7'
     this.created = unixTimestamp()
-    
+
     const deviceInfo = await this.requestDeviceInfo()
-    
+
     const messages = [...request.messages]
-    
+
     let toolsPrompt = ''
     // Only inject if tools are provided and not already injected by client
     if (request.tools && request.tools.length > 0 && !hasToolPromptInjected(request.messages)) {
       toolsPrompt = toolsToSystemPrompt(request.tools)
-      
+
       // Find and update the last user message
       for (let i = messages.length - 1; i >= 0; i--) {
         if (messages[i].role === 'user') {
@@ -571,23 +574,23 @@ export class MiniMaxAdapter {
         }
       }
     }
-    
+
     const requestBody = this.messagesPrepare(messages, toolsPrompt, false)
-    
+
     let msgId: string = ''
     let chatId: string = request.chatId || ''
-    
+
     if (chatId) {
       console.log('[MiniMax] Using existing chat:', chatId)
       const sendResponse = await this.request('POST', '/matrix/api/v1/chat/send_msg', {
         ...requestBody,
         chat_id: chatId,
       }, deviceInfo)
-      
+
       if (sendResponse.status !== 200) {
         throw new Error(`MiniMax API error: HTTP ${sendResponse.status}`)
       }
-      
+
       const { msg_id, base_resp } = sendResponse.data
       if (base_resp?.status_code !== 0) {
         throw new Error(`Send message failed: ${base_resp?.status_msg || 'Unknown error'}`)
@@ -595,26 +598,26 @@ export class MiniMaxAdapter {
       msgId = msg_id
     } else {
       const sendResponse = await this.request('POST', '/matrix/api/v1/chat/send_msg', requestBody, deviceInfo)
-      
+
       console.log('[MiniMax] Send response status:', sendResponse.status)
-      
+
       if (sendResponse.status !== 200) {
         console.error('[MiniMax] Error response:', JSON.stringify(sendResponse.data))
         throw new Error(`MiniMax API error: HTTP ${sendResponse.status} - ${JSON.stringify(sendResponse.data)}`)
       }
-      
+
       const result = sendResponse.data
       const base_resp = result.base_resp
-      
+
       if (base_resp?.status_code !== 0) {
         throw new Error(`Send message failed: ${base_resp?.status_msg || 'Unknown error'}`)
       }
-      
+
       chatId = result.chat_id
       msgId = result.msg_id
       console.log('[MiniMax] Message sent, chat_id:', chatId, 'msg_id:', msgId)
     }
-    
+
     if (request.stream === true) {
       // Only delete chat in single-turn mode with deleteAfterChat enabled
       // Import shouldDeleteSession from forwarder
@@ -622,35 +625,37 @@ export class MiniMaxAdapter {
         const config = (global as any).storeManager?.getConfig()
         return config?.mode === 'single' && config?.deleteAfterTimeout
       }
-      
+
       const onEnd = shouldDeleteSession() ? async (chatId: string) => {
         await this.deleteChat(chatId)
       } : undefined
-      
-      const transStream = this.createPollingStream(chatId, deviceInfo, this.model, onEnd)
-      return { 
-        response: null, 
-        stream: { session: null as any, stream: transStream as any }, 
-        chatId 
+
+      const transStream = this.createPollingStream(chatId, deviceInfo, this.model, onEnd, request.toolCallingPlan)
+      return {
+        response: null,
+        stream: { session: null as any, stream: transStream as any },
+        chatId
       }
     }
-    
+
     const aiMessage = await this.pollForResponse(chatId, deviceInfo)
-    
+
     // Delete chat after response if in single-turn mode with deleteAfterChat enabled
     const shouldDeleteSession = () => {
       const config = (global as any).storeManager?.getConfig()
       return config?.mode === 'single' && config?.deleteAfterTimeout
     }
-    
+
     if (shouldDeleteSession()) {
       await this.deleteChat(chatId).catch(err => console.error('[MiniMax] Failed to delete chat:', err))
     }
-    
+
     const content = aiMessage?.msg_content || ''
     const thinkingContent = aiMessage?.extra_info?.thinking_content || ''
-    const { content: cleanContent, toolCalls } = parseToolCallsFromText(content, 'minimax')
-    
+    const { content: cleanContent, toolCalls } = request.toolCallingPlan?.shouldParseResponse
+      ? { content, toolCalls: [] }
+      : parseToolCallsFromText(content, 'minimax')
+
     const response = {
       status: 200,
       statusText: 'OK',
@@ -674,44 +679,50 @@ export class MiniMaxAdapter {
         created: this.created,
       },
     }
-    
+
     return { response, stream: null, chatId }
   }
 
   private async pollForResponse(chatId: string, deviceInfo: DeviceInfo, maxPolls = 120, pollInterval = 1000): Promise<any> {
     let pollCount = 0
-    
+
     while (pollCount < maxPolls) {
       await new Promise(resolve => setTimeout(resolve, pollInterval))
       pollCount++
-      
+
       const detailResponse = await this.request('POST', '/matrix/api/v1/chat/get_chat_detail', { chat_id: chatId }, deviceInfo)
-      
+
       if (detailResponse.status !== 200) {
         console.log('[MiniMax] Poll failed, status:', detailResponse.status)
         continue
       }
-      
+
       const { messages, base_resp } = detailResponse.data
-      
+
       if (base_resp?.status_code !== 0) {
         console.log('[MiniMax] Poll failed, status_code:', base_resp?.status_code)
         continue
       }
-      
+
       // Find AI response (msg_type === 2)
       const aiMessage = messages?.find((msg: any) => msg.msg_type === 2)
-      
+
       if (aiMessage && aiMessage.msg_content) {
         console.log('[MiniMax] AI response received after', pollCount, 'polls')
         return aiMessage
       }
     }
-    
+
     throw new Error(`No AI response after ${maxPolls} polls`)
   }
 
-  private createPollingStream(chatId: string, deviceInfo: DeviceInfo, model: string, onEnd?: (chatId: string) => Promise<void>): PassThrough {
+  private createPollingStream(
+    chatId: string,
+    deviceInfo: DeviceInfo,
+    model: string,
+    onEnd?: (chatId: string) => Promise<void>,
+    toolCallingPlan?: ToolCallingPlan
+  ): PassThrough {
     const transStream = new PassThrough()
     const created = this.created
     let lastContent = ''
@@ -720,68 +731,69 @@ export class MiniMaxAdapter {
     const maxPolls = 120
     const pollInterval = 500
     const toolCallState = createToolCallState()
+    const toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
     let sentRole = false
     let sentThinkingRole = false
     let lastMsgId = ''
-    
+
     const poll = async () => {
       try {
         while (pollCount < maxPolls) {
           await new Promise(resolve => setTimeout(resolve, pollInterval))
           pollCount++
-          
+
           const detailResponse = await this.request('POST', '/matrix/api/v1/chat/get_chat_detail', { chat_id: chatId }, deviceInfo)
-          
+
           if (detailResponse.status !== 200) {
             console.log('[MiniMax] Poll status:', detailResponse.status)
             continue
           }
-          
+
           const { messages, chat, base_resp } = detailResponse.data
           if (base_resp?.status_code !== 0) {
             console.log('[MiniMax] Poll base_resp:', base_resp)
             continue
           }
-          
+
           const chatStatus = chat?.chat_status || 0
-          
+
           console.log('[MiniMax] Poll #' + pollCount + ' - chat_status:', chatStatus, 'messages count:', messages?.length)
-          
+
           if (messages && messages.length > 0) {
-            console.log('[MiniMax] Message details:', messages.map((m: any) => ({ 
-              msg_id: m.msg_id, 
-              msg_type: m.msg_type, 
+            console.log('[MiniMax] Message details:', messages.map((m: any) => ({
+              msg_id: m.msg_id,
+              msg_type: m.msg_type,
               content_len: m.msg_content?.length || 0,
               has_thinking: !!m.extra_info?.thinking_content,
               thinking_len: m.extra_info?.thinking_content?.length || 0
             })))
           }
-          
+
           const aiMessages = messages?.filter((msg: any) => msg.msg_type === 2)
           const aiMessage = aiMessages?.length > 0 ? aiMessages[aiMessages.length - 1] : null
-          
+
           console.log('[MiniMax] AI messages count:', aiMessages?.length, 'using last message')
-          
+
           if (aiMessage && aiMessage.msg_content) {
             const currentContent = aiMessage.msg_content
             const currentThinkingContent = aiMessage?.extra_info?.thinking_content || ''
             const currentMsgId = aiMessage.msg_id || ''
-            
+
             if (currentMsgId !== lastMsgId && lastMsgId !== '') {
               console.log('[MiniMax] New AI message detected, msg_id changed from', lastMsgId, 'to', currentMsgId)
               lastContent = ''
               lastThinkingContent = ''
             }
-            
-            console.log('[MiniMax] AI message found - msg_id:', currentMsgId, 
-              'content_len:', currentContent.length, 
+
+            console.log('[MiniMax] AI message found - msg_id:', currentMsgId,
+              'content_len:', currentContent.length,
               'thinking_len:', currentThinkingContent.length,
               'last_content_len:', lastContent.length,
               'last_thinking_len:', lastThinkingContent.length)
-            
+
             if (currentThinkingContent && currentThinkingContent.length > lastThinkingContent.length) {
               const newThinkingChunk = currentThinkingContent.substring(lastThinkingContent.length)
-              
+
               if (newThinkingChunk.trim()) {
                 if (!sentThinkingRole) {
                   transStream.write(`data: ${JSON.stringify({
@@ -793,7 +805,7 @@ export class MiniMaxAdapter {
                   })}\n\n`)
                   sentThinkingRole = true
                 }
-                
+
                 transStream.write(`data: ${JSON.stringify({
                   id: chatId.toString(),
                   model,
@@ -802,45 +814,47 @@ export class MiniMaxAdapter {
                   created,
                 })}\n\n`)
               }
-              
+
               lastThinkingContent = currentThinkingContent
             }
-            
+
             if (currentContent.length > lastContent.length) {
               const newChunk = currentContent.substring(lastContent.length)
-              
+
               const baseChunk = createBaseChunk(chatId.toString(), model, created)
-              const { chunks: outputChunks } = processStreamContent(
-                newChunk, 
-                toolCallState, 
-                baseChunk, 
-                !sentRole,
-                'minimax'
-              )
+              const outputChunks = toolStreamParser
+                ? toolStreamParser.push(newChunk, baseChunk, !sentRole)
+                : processStreamContent(
+                    newChunk,
+                    toolCallState,
+                    baseChunk,
+                    !sentRole,
+                    'minimax'
+                  ).chunks
 
               for (const outChunk of outputChunks) {
                 transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
               }
 
               if (outputChunks.length > 0) sentRole = true
-              
+
               lastContent = currentContent
             }
-            
+
             lastMsgId = currentMsgId
-            
+
             if (chatStatus === 2 && aiMessage.msg_content) {
               console.log('[MiniMax] Stream completed - chat_status: 2, polls:', pollCount, 'content length:', lastContent.length, 'thinking length:', lastThinkingContent.length)
-              
+
               const baseChunk = createBaseChunk(chatId.toString(), model, created)
-              const flushChunks = flushToolCallBuffer(toolCallState, baseChunk, 'minimax')
-              
+              const flushChunks = toolStreamParser?.flush(baseChunk) ?? flushToolCallBuffer(toolCallState, baseChunk, 'minimax')
+
               for (const outChunk of flushChunks) {
                 transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
               }
-              
-              const finishReason = toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
-              
+
+              const finishReason = toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
+
               transStream.write(
                 `data: ${JSON.stringify({
                   id: chatId.toString(),
@@ -856,11 +870,11 @@ export class MiniMaxAdapter {
               }
               return
             }
-            
+
             lastMsgId = currentMsgId
           }
         }
-        
+
         console.log('[MiniMax] Stream timeout after', maxPolls, 'polls')
         transStream.end('data: [DONE]\n\n')
       } catch (err) {
@@ -868,34 +882,34 @@ export class MiniMaxAdapter {
         transStream.end('data: [DONE]\n\n')
       }
     }
-    
+
     poll()
-    
+
     return transStream
   }
 
   async deleteChat(chatId: string): Promise<boolean> {
     const maxRetries = 3
     const retryDelay = 2000
-    
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         const deviceInfo = await this.requestDeviceInfo()
         const response = await this.request('POST', '/matrix/api/v1/chat/delete_chat', { chat_id: parseInt(chatId, 10) }, deviceInfo)
         console.log('[MiniMax] Chat deleted attempt', attempt, ':', chatId, 'Status:', response.status, 'Response:', JSON.stringify(response.data))
-        
+
         if (response.status === 200 && response.data?.base_resp?.status_code === 0) {
           return true
         }
-        
+
         const errorMsg = response.data?.base_resp?.status_msg || 'Unknown error'
-        
+
         if (errorMsg.includes('chat is running') && attempt < maxRetries) {
           console.log(`[MiniMax] Chat still running, waiting ${retryDelay}ms before retry...`)
           await new Promise(resolve => setTimeout(resolve, retryDelay))
           continue
         }
-        
+
         console.warn('[MiniMax] Delete chat failed:', errorMsg)
         return false
       } catch (error) {
@@ -907,7 +921,7 @@ export class MiniMaxAdapter {
         return false
       }
     }
-    
+
     return false
   }
 
@@ -923,15 +937,15 @@ export class MiniMaxAdapter {
   async getCredits(): Promise<CreditInfo> {
     try {
       const deviceInfo = await this.requestDeviceInfo()
-      
+
       const response = await this.request('POST', '/matrix/api/v1/commerce/get_membership_info', {}, deviceInfo)
-      
+
       console.log('[MiniMax] get_membership_info status:', response.status)
-      
+
       if (response.status === 200 && response.data?.base_resp?.status_code === 0) {
         const data = response.data
         const remainingCredits = data?.daily_login_gift_credit_remaining || 0
-        
+
         // Get credit expires timestamp (resets at next day 00:00)
         let expiresAt: number | undefined = undefined
         const creditsData = data?.credits?.['4']?.[0]
@@ -939,12 +953,12 @@ export class MiniMaxAdapter {
           // expires_at is in milliseconds, use it directly
           expiresAt = creditsData.expires_at
         }
-        
+
         if (expiresAt) {
           console.log('[MiniMax] Credit expires at:', new Date(expiresAt).toISOString())
         }
         console.log('[MiniMax] Credits:', { remainingCredits, expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined })
-        
+
         return {
           totalCredits: 0, // Not available
           usedCredits: 0, // Not available
@@ -952,7 +966,7 @@ export class MiniMaxAdapter {
           expiresAt,
         }
       }
-      
+
       console.warn('[MiniMax] Failed to get membership info, token may be expired or invalid')
       return { totalCredits: 0, usedCredits: 0, remainingCredits: 0 }
     } catch (error) {
@@ -965,44 +979,44 @@ export class MiniMaxAdapter {
     const allChats: ChatListItem[] = []
     let nextPageIndexId: number | undefined = undefined
     const pageSize = 100
-    
+
     try {
       const deviceInfo = await this.requestDeviceInfo()
-      
+
       while (true) {
         const requestBody: any = {
           page_size: pageSize,
           workspace_storage_mode: 0,
         }
-        
+
         if (nextPageIndexId !== undefined) {
           requestBody.next_page_index_id = nextPageIndexId
         }
-        
+
         const response = await this.request('POST', '/matrix/api/v1/chat/list_chat', requestBody, deviceInfo)
-        
+
         console.log('[MiniMax] list_chat response status:', response.status)
-        
+
         if (response.status !== 200 || response.data?.base_resp?.status_code !== 0) {
           console.error('[MiniMax] Failed to get chat list:', response.data?.base_resp?.status_msg)
           break
         }
-        
+
         const chatList = response.data?.chats || response.data?.chat_list || []
         console.log('[MiniMax] Received chats count:', chatList.length)
         if (chatList.length === 0) {
           break
         }
-        
+
         allChats.push(...chatList)
-        
+
         if (chatList.length < pageSize) {
           break
         }
-        
+
         nextPageIndexId = chatList[chatList.length - 1]?.chat_id
       }
-      
+
       console.log('[MiniMax] Got chat list, total:', allChats.length)
       return allChats
     } catch (error) {
@@ -1014,18 +1028,18 @@ export class MiniMaxAdapter {
   async deleteAllChats(): Promise<boolean> {
     try {
       console.log('[MiniMax] Starting to delete all chats...')
-      
+
       const chatList = await this.getChatList()
       if (chatList.length === 0) {
         console.log('[MiniMax] No chats to delete')
         return true
       }
-      
+
       console.log('[MiniMax] Found', chatList.length, 'chats to delete')
-      
+
       let successCount = 0
       let failCount = 0
-      
+
       for (const chat of chatList) {
         const result = await this.deleteChat(String(chat.chat_id))
         if (result) {
@@ -1033,12 +1047,12 @@ export class MiniMaxAdapter {
         } else {
           failCount++
         }
-        
+
         if (successCount % 10 === 0) {
           console.log(`[MiniMax] Deleted ${successCount}/${chatList.length} chats...`)
         }
       }
-      
+
       console.log(`[MiniMax] Delete all chats completed. Success: ${successCount}, Failed: ${failCount}`)
       return failCount === 0
     } catch (error) {
@@ -1048,7 +1062,7 @@ export class MiniMaxAdapter {
   }
 
   static isMiniMaxProvider(provider: Provider): boolean {
-    return provider.id === 'minimax' || 
+    return provider.id === 'minimax' ||
            provider.apiEndpoint.includes('minimaxi.com') ||
            provider.apiEndpoint.includes('hailuoai.com')
   }
@@ -1060,13 +1074,15 @@ export class MiniMaxStreamHandler {
   private created: number
   private onEnd?: (chatId: string) => void
   private toolCallState: ToolCallState
+  private toolStreamParser?: ToolStreamParser
   private sentRole: boolean = false
 
-  constructor(model: string, onEnd?: (chatId: string) => void) {
+  constructor(model: string, onEnd?: (chatId: string) => void, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
     this.created = Math.floor(Date.now() / 1000)
     this.onEnd = onEnd
     this.toolCallState = createToolCallState()
+    this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
   }
 
   setChatId(chatId: string) {
@@ -1126,13 +1142,13 @@ export class MiniMaxStreamHandler {
           if (type === 8) {
             // Flush any remaining tool calls
             const baseChunk = createBaseChunk(this.chatId, this.model, this.created)
-            const flushChunks = flushToolCallBuffer(this.toolCallState, baseChunk, 'minimax')
-            
+            const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? flushToolCallBuffer(this.toolCallState, baseChunk, 'minimax')
+
             for (const outChunk of flushChunks) {
               transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
             }
-            
-            const finishReason = this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
+
+            const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
             transStream.write(
               `data: ${JSON.stringify({
                 id: this.chatId,
@@ -1175,13 +1191,15 @@ export class MiniMaxStreamHandler {
 
             // Process tool call interception
             const baseChunk = createBaseChunk(this.chatId, this.model, this.created)
-            const { chunks: outputChunks } = processStreamContent(
-              chunk, 
-              this.toolCallState, 
-              baseChunk, 
-              !this.sentRole,
-              'minimax'
-            )
+            const outputChunks = this.toolStreamParser
+              ? this.toolStreamParser.push(chunk, baseChunk, !this.sentRole)
+              : processStreamContent(
+                  chunk,
+                  this.toolCallState,
+                  baseChunk,
+                  !this.sentRole,
+                  'minimax'
+                ).chunks
 
             for (const outChunk of outputChunks) {
               transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
@@ -1191,13 +1209,13 @@ export class MiniMaxStreamHandler {
 
             if (isEnd === 0) {
               // Flush any remaining tool calls
-              const flushChunks = flushToolCallBuffer(this.toolCallState, baseChunk, 'minimax')
-              
+              const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? flushToolCallBuffer(this.toolCallState, baseChunk, 'minimax')
+
               for (const outChunk of flushChunks) {
                 transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
               }
-              
-              const finishReason = this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
+
+              const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
               transStream.write(
                 `data: ${JSON.stringify({
                   id: this.chatId,
@@ -1293,17 +1311,32 @@ export class MiniMaxStreamHandler {
 
               console.log('[MiniMax] Stream chunk:', chunk.substring(0, 50), 'isEnd:', isEnd)
 
-              transStream.write(
-                `data: ${JSON.stringify({
-                  id: this.chatId,
-                  model: this.model,
-                  object: 'chat.completion.chunk',
-                  choices: [{ index: 0, delta: { content: chunk }, finish_reason: isEnd === 0 ? 'stop' : null }],
-                  created: this.created,
-                })}\n\n`
-              )
+              const baseChunk = createBaseChunk(this.chatId, this.model, this.created)
+              const outputChunks = this.toolStreamParser
+                ? this.toolStreamParser.push(chunk, baseChunk, !this.sentRole)
+                : [{
+                    ...baseChunk,
+                    choices: [{ index: 0, delta: { ...(!this.sentRole ? { role: 'assistant' } : {}), content: chunk }, finish_reason: null }],
+                  }]
+
+              for (const outChunk of outputChunks) {
+                transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+              }
+
+              if (outputChunks.length > 0) this.sentRole = true
 
               if (isEnd === 0) {
+                const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
+                for (const outChunk of flushChunks) {
+                  transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+                }
+                const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
+                transStream.write(
+                  `data: ${JSON.stringify({
+                    ...baseChunk,
+                    choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+                  })}\n\n`
+                )
                 transStream.end('data: [DONE]\n\n')
                 if (this.onEnd) this.onEnd(this.chatId)
               }
@@ -1349,14 +1382,14 @@ export class MiniMaxStreamHandler {
         id: '',
         model: this.model,
         object: 'chat.completion',
-        choices: [{ 
-          index: 0, 
-          message: { 
-            role: 'assistant', 
-            content: '', 
-            reasoning_content: '' 
-          }, 
-          finish_reason: 'stop' 
+        choices: [{
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: '',
+            reasoning_content: ''
+          },
+          finish_reason: 'stop'
         }],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
         created: this.created,

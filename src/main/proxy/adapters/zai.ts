@@ -11,13 +11,15 @@ import FormData from 'form-data'
 import { Account, Provider } from '../../store/types'
 import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
 import { parseToolCallsFromText } from '../utils/toolParser'
-import { 
-  createToolCallState, 
-  processStreamContent, 
+import {
+  createToolCallState,
+  processStreamContent,
   flushToolCallBuffer,
   createBaseChunk,
-  ToolCallState 
+  ToolCallState
 } from '../utils/streamToolHandler'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
+import type { ToolCallingPlan } from '../toolCalling/types'
 
 const ZAI_API_BASE = 'https://chat.z.ai'
 const X_FE_VERSION = 'prod-fe-1.1.37'
@@ -53,10 +55,10 @@ function cleanSearchCitations(text: string): string {
 
 function cleanSearchCitationsWithBuffer(text: string, buffer: { value: string }): string {
   const combined = buffer.value + text
-  
+
   // First try to match complete citations
   let cleaned = combined.replace(new RegExp(SEARCH_CITATION_LOOSE_PATTERN, 'g'), '')
-  
+
   // Check if there's an opening bracket at the end that might start a citation
   const lastOpenBracket = cleaned.lastIndexOf(SEARCH_CITATION_BRACKET_START)
   if (lastOpenBracket !== -1) {
@@ -76,7 +78,7 @@ function cleanSearchCitationsWithBuffer(text: string, buffer: { value: string })
   } else {
     buffer.value = ''
   }
-  
+
   return cleaned
 }
 
@@ -184,7 +186,7 @@ export class ZaiAdapter {
     const r = timestampMs
     const i = String(timestampMs)
     const e = `requestId,${requestId},timestamp,${timestampMs},user_id,${userId}`
-    
+
     // a = message text UTF-8 bytes
     const a = Buffer.from(messageText, 'utf-8')
     // w = base64 encode of message text
@@ -194,10 +196,10 @@ export class ZaiAdapter {
 
     // E = window index (5 minute window)
     const windowIndex = Math.floor(r / (5 * 60 * 1000))
-    
+
     // Layer1: A = HMAC(secret, window_index) -> hex string
     const derivedKeyHex = crypto.createHmac('sha256', secret).update(String(windowIndex)).digest('hex')
-    
+
     // Layer2: k = HMAC(A_hex, canonical_string) -> hex string
     const signature = crypto.createHmac('sha256', derivedKeyHex).update(canonicalString).digest('hex')
 
@@ -208,9 +210,9 @@ export class ZaiAdapter {
     const token = await this.ensureToken()
     const timestamp = Math.floor(Date.now() / 1000)
     const messageId = uuid()
-    
+
     console.log('[Z.ai] Creating chat with model:', model)
-    
+
     const requestBody = {
       chat: {
         id: '',
@@ -249,7 +251,7 @@ export class ZaiAdapter {
         type: 'default',
       },
     }
-    
+
     const response = await axios.post(
       `${ZAI_API_BASE}/api/v1/chats/new`,
       requestBody,
@@ -278,7 +280,7 @@ export class ZaiAdapter {
   async deleteChat(chatId: string): Promise<boolean> {
     try {
       const token = await this.ensureToken()
-      
+
       const response = await axios.delete(
         `${ZAI_API_BASE}/api/v1/chats/${chatId}`,
         {
@@ -303,9 +305,9 @@ export class ZaiAdapter {
   async deleteAllChats(): Promise<boolean> {
     try {
       const token = await this.ensureToken()
-      
+
       console.log('[Z.ai] Deleting all chats...')
-      
+
       const response = await axios.delete(
         `${ZAI_API_BASE}/api/v1/chats/`,
         {
@@ -320,12 +322,12 @@ export class ZaiAdapter {
       )
 
       console.log('[Z.ai] Delete all chats response:', response.status, response.data)
-      
+
       if (response.status === 200 && response.data === true) {
         console.log('[Z.ai] All chats deleted successfully')
         return true
       }
-      
+
       console.warn('[Z.ai] Delete all chats failed:', response.status, response.data)
       return false
     } catch (error) {
@@ -337,9 +339,9 @@ export class ZaiAdapter {
   async chatCompletion(request: ChatCompletionRequest): Promise<{ response: AxiosResponse; chatId: string; requestId: string }> {
     const token = await this.ensureToken()
     const userId = this.extractUserIDFromToken(token)
-    
+
     console.log('[Z.ai] chatCompletion called with request.model:', request.model)
-    
+
     // Z.ai API requires specific model name casing:
     // - GLM-5.1 and GLM-5-Turbo keep uppercase
     // - GLM-5V-Turbo uses lowercase "v" in the request model id
@@ -359,13 +361,13 @@ export class ZaiAdapter {
       'GLM-4.7': 'glm-4.7',
     }
     const mappedModel = modelMapping[request.model] || modelMapping[request.model.toLowerCase()] || request.model
-    
+
     console.log('[Z.ai] Original model:', request.model, '-> Mapped model:', mappedModel)
-    
+
     // Extract system message and merge with user message
     let systemContent = ''
     let processedMessages = []
-    
+
     for (const msg of request.messages) {
       if (msg.role === 'system') {
         systemContent += (systemContent ? '\n\n' : '') + (typeof msg.content === 'string' ? msg.content : '')
@@ -373,34 +375,34 @@ export class ZaiAdapter {
         processedMessages.push(msg)
       }
     }
-    
+
     // If system prompt exists, prepend it to the first user message
     if (systemContent && processedMessages.length > 0) {
       const firstUserIdx = processedMessages.findIndex(m => m.role === 'user')
       if (firstUserIdx !== -1) {
         const firstUserMsg = processedMessages[firstUserIdx]
-        const originalContent = typeof firstUserMsg.content === 'string' 
-          ? firstUserMsg.content 
-          : (Array.isArray(firstUserMsg.content) 
-              ? firstUserMsg.content.find((p: any) => p.type === 'text')?.text || '' 
+        const originalContent = typeof firstUserMsg.content === 'string'
+          ? firstUserMsg.content
+          : (Array.isArray(firstUserMsg.content)
+              ? firstUserMsg.content.find((p: any) => p.type === 'text')?.text || ''
               : '')
-        
+
         processedMessages[firstUserIdx] = {
           ...firstUserMsg,
           content: `${systemContent}\n\nUser: ${originalContent}`
         }
       }
     }
-    
+
     const signaturePrompt = this.extractLastUserMessage(processedMessages)
-    
+
     // Always create a new chat (single-turn mode only)
     const chatResult = await this.createChat(mappedModel, signaturePrompt)
     const chatId = chatResult.chatId
     const messageId = chatResult.messageId
     const parentMessageId = null
     console.log('[Z.ai] Created new chat:', chatId)
-    
+
     const requestId = uuid()
     const timestamp = Date.now()
     const signature = this.generateSignature(signaturePrompt, requestId, timestamp, userId)
@@ -410,10 +412,10 @@ export class ZaiAdapter {
     // Use originalModel for feature detection (preserves user's intent before mapping)
     const modelForDetection = request.originalModel || request.model
     const modelLower = modelForDetection.toLowerCase()
-    
+
     let enableThinking = request.reasoning_effort === false ? false : true
     let enableWebSearch = !!request.web_search
-    
+
     // Auto-enable based on model name (if not explicitly set)
     if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
       enableThinking = true
@@ -580,12 +582,14 @@ export class ZaiStreamHandler {
   private streamEnded: boolean = false
   private citationBuffer: { value: string } = { value: '' }
   private thinkingCitationBuffer: { value: string } = { value: '' }
+  private toolStreamParser?: ToolStreamParser
 
-  constructor(model: string, onEnd?: (chatId: string) => void) {
+  constructor(model: string, onEnd?: (chatId: string) => void, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
     this.created = Math.floor(Date.now() / 1000)
     this.onEnd = onEnd
     this.toolCallState = createToolCallState()
+    this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
   }
 
   setChatId(chatId: string) {
@@ -598,11 +602,11 @@ export class ZaiStreamHandler {
 
   private sendToolCalls(transStream: PassThrough): void {
     if (this.toolCallsSent) return
-    
+
     const toolCalls = parseToolUse(this.content)
     if (toolCalls && toolCalls.length > 0) {
       this.toolCallsSent = true
-      
+
       // Send tool_calls delta
       for (let i = 0; i < toolCalls.length; i++) {
         const tc = toolCalls[i]
@@ -630,7 +634,7 @@ export class ZaiStreamHandler {
           })}\n\n`
         )
       }
-      
+
       // Send finish with tool_calls
       transStream.write(
         `data: ${JSON.stringify({
@@ -657,7 +661,7 @@ export class ZaiStreamHandler {
     const transStream = new PassThrough()
 
     console.log('[Z.ai] Starting stream handler...')
-    
+
     let streamEnded = false
 
     const safeEnd = (data?: string) => {
@@ -676,9 +680,9 @@ export class ZaiStreamHandler {
           if (event.data === '[DONE]') return
 
           const data = JSON.parse(event.data)
-          
+
           if (data.type !== 'chat:completion') return
-          
+
           const result = data.data
           if (!result) return
 
@@ -717,16 +721,18 @@ export class ZaiStreamHandler {
             const cleanedContent = cleanSearchCitationsWithBuffer(result.delta_content, this.citationBuffer)
             if (!cleanedContent) return
             this.content += cleanedContent
-            
+
             // Process tool call interception
             const baseChunk = createBaseChunk(this.chatId, this.model, this.created)
-            const { chunks: outputChunks } = processStreamContent(
-              cleanedContent, 
-              this.toolCallState, 
-              baseChunk, 
-              !this.sentRole && !this.sentThinkingRole,
-              'zai'
-            )
+            const outputChunks = this.toolStreamParser
+              ? this.toolStreamParser.push(cleanedContent, baseChunk, !this.sentRole && !this.sentThinkingRole)
+              : processStreamContent(
+                  cleanedContent,
+                  this.toolCallState,
+                  baseChunk,
+                  !this.sentRole && !this.sentThinkingRole,
+                  'zai'
+                ).chunks
 
             for (const outChunk of outputChunks) {
               transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
@@ -735,20 +741,20 @@ export class ZaiStreamHandler {
             if (outputChunks.length > 0) this.sentRole = true
           } else if (result.phase === 'done' && result.done) {
             console.log('[Z.ai] Stream finished, content length:', this.content.length)
-            
+
             // Flush any remaining tool calls
             const baseChunk = createBaseChunk(this.chatId, this.model, this.created)
-            const flushChunks = flushToolCallBuffer(this.toolCallState, baseChunk, 'zai')
-            
+            const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? flushToolCallBuffer(this.toolCallState, baseChunk, 'zai')
+
             for (const outChunk of flushChunks) {
               transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
             }
-            
+
             // Check if we emitted tool calls
-            const finishReason = this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
-            
+            const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
+
             const usage = result.usage || { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
-            
+
             transStream.write(
               `data: ${JSON.stringify({
                 id: this.chatId,
@@ -805,7 +811,7 @@ export class ZaiStreamHandler {
 
   async handleNonStream(response: any): Promise<any> {
     console.log('[Z.ai] Starting non-stream handler...')
-    
+
     return new Promise((resolve, reject) => {
       const data = {
         id: '',
@@ -864,9 +870,9 @@ export class ZaiStreamHandler {
               if (event.data === '[DONE]') return
 
               const eventData = JSON.parse(event.data)
-              
+
               if (eventData.type !== 'chat:completion') return
-              
+
               const result = eventData.data
               if (!result) return
 
@@ -938,7 +944,7 @@ export class ZaiStreamHandler {
             // Direct JSON object
             data.choices[0].message.content = streamData.choices?.[0]?.message?.content || ''
           }
-          
+
           console.log('[Z.ai] Non-stream JSON finished, content length:', data.choices[0].message.content.length)
           resolveOnce(data)
         } catch (err) {

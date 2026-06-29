@@ -41,7 +41,7 @@ export class ProxyServer {
     this.app.use(async (ctx, next) => {
       ctx.set('Access-Control-Allow-Origin', '*')
       ctx.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-      ctx.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+      ctx.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, X-API-Key, x-api-key, anthropic-version, anthropic-beta')
       ctx.set('Access-Control-Max-Age', '86400')
 
       if (ctx.method === 'OPTIONS') {
@@ -79,7 +79,7 @@ export class ProxyServer {
         const authHeader = ctx.get('Authorization') || ''
         const providedKey = authHeader.startsWith('Bearer ') 
           ? authHeader.slice(7) 
-          : (ctx.query.api_key as string) || ctx.get('X-API-Key')
+          : (ctx.query.api_key as string) || ctx.get('X-API-Key') || ctx.get('x-api-key')
         
         if (!providedKey) {
           ctx.status = 401
@@ -170,6 +170,8 @@ export class ProxyServer {
           'GET /v1/models',
           'GET /v1/models/:model',
           'POST /v1/completions',
+          'POST /anthropic/v1/messages',
+          'POST /v1/messages',
         ],
       }
     })

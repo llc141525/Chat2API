@@ -9,6 +9,8 @@ import { PassThrough } from 'stream'
 import { createParser } from 'eventsource-parser'
 import { Account, Provider } from '../../store/types'
 import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
+import type { ToolCallingPlan } from '../toolCalling/types'
 
 const QWEN_AI_BASE = 'https://chat.qwen.ai'
 
@@ -374,15 +376,26 @@ export class QwenAiStreamHandler {
   private responseId: string = ''
   private content: string = ''
   private toolCallsSent: boolean = false
+  private toolStreamParser?: ToolStreamParser
 
-  constructor(model: string, onEnd?: (chatId: string) => void) {
+  constructor(model: string, onEnd?: (chatId: string) => void, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
     this.created = Math.floor(Date.now() / 1000)
     this.onEnd = onEnd
+    this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
   }
 
   setChatId(chatId: string) {
     this.chatId = chatId
+  }
+
+  private createBaseChunk(): any {
+    return {
+      id: this.responseId || this.chatId,
+      model: this.model,
+      object: 'chat.completion.chunk',
+      created: this.created,
+    }
   }
 
   private sendToolCalls(transStream: PassThrough): void {
@@ -566,14 +579,16 @@ export class QwenAiStreamHandler {
               
               if (content) {
                 console.log('[QwenAI] Sending content chunk:', content)
-                const chunk = {
-                  id: this.responseId || this.chatId,
-                  model: this.model,
-                  object: 'chat.completion.chunk',
-                  choices: [{ index: 0, delta: { content }, finish_reason: null }],
-                  created: this.created,
+                const outputChunks = this.toolStreamParser
+                  ? this.toolStreamParser.push(content, this.createBaseChunk(), false)
+                  : [{
+                      ...this.createBaseChunk(),
+                      choices: [{ index: 0, delta: { content }, finish_reason: null }],
+                    }]
+
+                for (const chunk of outputChunks) {
+                  transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
                 }
-                transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
                 console.log('[QwenAI] Content chunk written')
               }
             } else if (phase === null && content) {
@@ -583,19 +598,41 @@ export class QwenAiStreamHandler {
               // Accumulate content for tool call detection
               this.content += content
               
-              const chunk = {
-                id: this.responseId || this.chatId,
-                model: this.model,
-                object: 'chat.completion.chunk',
-                choices: [{ index: 0, delta: { content }, finish_reason: null }],
-                created: this.created,
+              const outputChunks = this.toolStreamParser
+                ? this.toolStreamParser.push(content, this.createBaseChunk(), false)
+                : [{
+                    ...this.createBaseChunk(),
+                    choices: [{ index: 0, delta: { content }, finish_reason: null }],
+                  }]
+
+              for (const chunk of outputChunks) {
+                transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
               }
-              transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
             }
 
             if (status === 'finished' && (phase === 'answer' || phase === null)) {
+              const baseChunk = this.createBaseChunk()
+              const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
+              for (const chunk of flushChunks) {
+                transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
+              }
+
+              if (this.toolStreamParser?.hasEmittedToolCall()) {
+                const finalChunk = {
+                  ...baseChunk,
+                  choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+                }
+                transStream.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
+                transStream.end('data: [DONE]\n\n')
+
+                if (this.onEnd && this.chatId) {
+                  this.onEnd(this.chatId)
+                }
+                return
+              }
+
               // Check for tool calls before sending stop
-              if (hasToolUse(this.content)) {
+              if (!this.toolStreamParser && hasToolUse(this.content)) {
                 console.log('[QwenAI] Found tool_use in stream, sending tool_calls')
                 this.sendToolCalls(transStream)
                 return

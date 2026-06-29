@@ -1,5 +1,7 @@
 import { PassThrough } from 'stream'
 import { parseToolCallsFromText } from '../utils/toolParser'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
+import type { ToolCallingPlan } from '../toolCalling/types'
 import { 
   createToolCallState, 
   processStreamContent, 
@@ -63,12 +65,14 @@ export class PerplexityStreamHandler {
   private accumulatedContent: string = ''
   private accumulatedReasoning: string = ''
   private sources: any[] = []
+  private toolStreamParser?: ToolStreamParser
 
   constructor(
     model: string,
     sessionId: string,
     onEnd?: () => void,
-    adapter?: PerplexityAdapter
+    adapter?: PerplexityAdapter,
+    toolCallingPlan?: ToolCallingPlan
   ) {
     this.model = model
     this.sessionId = sessionId
@@ -76,6 +80,7 @@ export class PerplexityStreamHandler {
     this.onEnd = onEnd
     this.toolCallState = createToolCallState()
     this.adapter = adapter
+    this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
   }
 
   getSessionTokens(): SessionTokens {
@@ -295,20 +300,22 @@ export class PerplexityStreamHandler {
     if (!filteredContent) return
 
     const baseChunk = createBaseChunk(this.sessionId, this.model, this.created)
-    const { chunks, shouldFlush } = processStreamContent(
-      filteredContent,
-      this.toolCallState,
-      baseChunk,
-      this.isFirstChunk,
-      'perplexity'
-    )
+    const chunks = this.toolStreamParser
+      ? this.toolStreamParser.push(filteredContent, baseChunk, this.isFirstChunk)
+      : processStreamContent(
+          filteredContent,
+          this.toolCallState,
+          baseChunk,
+          this.isFirstChunk,
+          'perplexity'
+        ).chunks
 
     for (const chunk of chunks) {
       transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
       this.isFirstChunk = false
     }
 
-    if (this.toolCallState.isBufferingToolCall || this.toolCallState.hasEmittedToolCall) {
+    if (this.toolStreamParser?.isBuffering() || this.toolStreamParser?.hasEmittedToolCall() || this.toolCallState.isBufferingToolCall || this.toolCallState.hasEmittedToolCall) {
       return
     }
 
@@ -329,7 +336,7 @@ export class PerplexityStreamHandler {
 
   private handleDone(transStream: PassThrough): void {
     const baseChunk = createBaseChunk(this.sessionId, this.model, this.created)
-    const flushChunks = flushToolCallBuffer(this.toolCallState, baseChunk, 'perplexity')
+    const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? flushToolCallBuffer(this.toolCallState, baseChunk, 'perplexity')
     for (const outChunk of flushChunks) {
       transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
     }
@@ -346,7 +353,7 @@ export class PerplexityStreamHandler {
       }
     }
 
-    const finishReason = this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
+    const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
 
     transStream.write(this.createChunk({}, finishReason))
     transStream.write('data: [DONE]\n\n')
@@ -386,7 +393,10 @@ export class PerplexityStreamHandler {
       stream.on('end', () => {
         // Filter citations from accumulated content
         const filteredAccumulatedContent = filterCitations(this.accumulatedContent)
-        const { content: cleanContent, toolCalls } = parseToolCallsFromText(filteredAccumulatedContent)
+        const shouldUseManagedParser = !!this.toolStreamParser
+        const { content: cleanContent, toolCalls } = shouldUseManagedParser
+          ? { content: filteredAccumulatedContent, toolCalls: [] }
+          : parseToolCallsFromText(filteredAccumulatedContent)
 
         const message: any = {
           role: 'assistant',

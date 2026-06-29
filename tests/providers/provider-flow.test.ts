@@ -365,6 +365,95 @@ test('Z.ai default models match the latest chat.z.ai HAR model ids', () => {
   assert.doesNotMatch(zaiAdapterSource, /'glm-4\.5-air':/)
 })
 
+test('Z.ai stream handler uses managed tool calling parser for GLM-5.1', () => {
+  const forwarderSource = readFileSync(
+    join(root, 'src/main/proxy/forwarder.ts'),
+    'utf8',
+  )
+  const forwardZaiStart = forwarderSource.indexOf('private async forwardZai')
+  const forwardZaiEnd = forwarderSource.indexOf('private async forwardMiniMax')
+  const forwardZaiSource = forwarderSource.slice(forwardZaiStart, forwardZaiEnd)
+
+  assert.match(forwardZaiSource, /new ZaiStreamHandler\(actualModel, deleteChatCallback, transformed\.plan\)/)
+
+  const zaiAdapterSource = readFileSync(join(root, 'src/main/proxy/adapters/zai.ts'), 'utf8')
+  assert.match(zaiAdapterSource, /import \{ ToolStreamParser \} from '\.\.\/toolCalling\/ToolStreamParser'/)
+  assert.match(zaiAdapterSource, /import type \{ ToolCallingPlan \} from '\.\.\/toolCalling\/types'/)
+  assert.match(zaiAdapterSource, /private toolStreamParser\?: ToolStreamParser/)
+  assert.match(zaiAdapterSource, /constructor\(model: string, onEnd\?: \(chatId: string\) => void, toolCallingPlan\?: ToolCallingPlan\)/)
+  assert.match(zaiAdapterSource, /this\.toolStreamParser = toolCallingPlan\?\.shouldParseResponse \? new ToolStreamParser\(toolCallingPlan\) : undefined/)
+  assert.match(zaiAdapterSource, /this\.toolStreamParser\.push\(/)
+  assert.match(zaiAdapterSource, /this\.toolStreamParser\?\.flush\(/)
+  assert.match(zaiAdapterSource, /this\.toolStreamParser\?\.hasEmittedToolCall\(\) \? 'tool_calls' : this\.toolCallState\.hasEmittedToolCall \? 'tool_calls' : 'stop'/)
+})
+
+test('built-in prompt-tool stream handlers receive managed parser plans', () => {
+  const forwarderSource = readFileSync(
+    join(root, 'src/main/proxy/forwarder.ts'),
+    'utf8',
+  )
+
+  const forwardQwenAiStart = forwarderSource.indexOf('private async forwardQwenAi')
+  const forwardQwenAiEnd = forwarderSource.indexOf('private async forwardZai')
+  const forwardQwenAiSource = forwarderSource.slice(forwardQwenAiStart, forwardQwenAiEnd)
+  assert.match(forwardQwenAiSource, /new QwenAiStreamHandler\(actualModel, undefined, transformed\.plan\)/)
+
+  const forwardMiniMaxStart = forwarderSource.indexOf('private async forwardMiniMax')
+  const forwardMiniMaxEnd = forwarderSource.indexOf('private async forwardMimo')
+  const forwardMiniMaxSource = forwarderSource.slice(forwardMiniMaxStart, forwardMiniMaxEnd)
+  assert.match(forwardMiniMaxSource, /toolCallingPlan:\s*transformed\.plan/)
+  assert.match(forwardMiniMaxSource, /new MiniMaxStreamHandler\(actualModel, deleteChatCallback, transformed\.plan\)/)
+
+  const forwardPerplexityStart = forwarderSource.indexOf('private async forwardPerplexity')
+  const forwardPerplexityEnd = forwarderSource.indexOf('private buildUrl')
+  const forwardPerplexitySource = forwarderSource.slice(forwardPerplexityStart, forwardPerplexityEnd)
+  assert.match(forwardPerplexitySource, /new PerplexityStreamHandler\(actualModel, sessionId, deleteSessionCallback, adapter, transformed\.plan\)/)
+  assert.match(forwardPerplexitySource, /new PerplexityStreamHandler\(actualModel, sessionId, undefined, adapter, transformed\.plan\)/)
+
+  for (const [label, path] of [
+    ['Qwen AI', 'src/main/proxy/adapters/qwen-ai.ts'],
+    ['MiniMax', 'src/main/proxy/adapters/minimax.ts'],
+    ['Perplexity', 'src/main/proxy/adapters/perplexity-stream.ts'],
+  ] as const) {
+    const source = readFileSync(join(root, path), 'utf8')
+    assert.match(source, /import \{ ToolStreamParser \} from '\.\.\/toolCalling\/ToolStreamParser'/, label)
+    assert.match(source, /import type \{ ToolCallingPlan \} from '\.\.\/toolCalling\/types'/, label)
+    assert.match(source, /private toolStreamParser\?: ToolStreamParser/, label)
+    assert.match(source, /new ToolStreamParser\(toolCallingPlan\)/, label)
+    assert.match(source, /this\.toolStreamParser\.push\(/, label)
+    assert.match(source, /this\.toolStreamParser\?\.flush\(/, label)
+    assert.match(source, /this\.toolStreamParser\?\.hasEmittedToolCall\(\)/, label)
+  }
+})
+
+test('update checks and publishing target llc141525 Chat2API repository', () => {
+  const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+
+  assert.equal(packageJson.homepage, 'https://github.com/llc141525/Chat2API')
+  assert.deepEqual(packageJson.build.publish, {
+    provider: 'github',
+    owner: 'llc141525',
+    repo: 'Chat2API',
+  })
+})
+
+test('Anthropic Messages compatibility routes are registered', () => {
+  const routesIndexSource = readFileSync(join(root, 'src/main/proxy/routes/index.ts'), 'utf8')
+  const serverSource = readFileSync(join(root, 'src/main/proxy/server.ts'), 'utf8')
+  const anthropicSource = readFileSync(join(root, 'src/main/proxy/routes/anthropic.ts'), 'utf8')
+
+  assert.match(routesIndexSource, /import anthropicRouter from '\.\/anthropic'/)
+  assert.match(routesIndexSource, /anthropicRouter/)
+  assert.match(serverSource, /POST \/anthropic\/v1\/messages/)
+  assert.match(serverSource, /POST \/v1\/messages/)
+  assert.match(serverSource, /X-API-Key, x-api-key, anthropic-version, anthropic-beta/)
+  assert.match(serverSource, /ctx\.get\('x-api-key'\)/)
+  assert.match(anthropicSource, /router\.post\('\/anthropic\/v1\/messages'/)
+  assert.match(anthropicSource, /router\.post\('\/v1\/messages'/)
+  assert.match(anthropicSource, /anthropicToolToOpenAI/)
+  assert.match(anthropicSource, /openAIResponseToAnthropic/)
+})
+
 test('Z.ai docs mark provider temporarily unavailable due to captcha risk control', () => {
   const readme = readFileSync(join(root, 'README.md'), 'utf8')
   const readmeCn = readFileSync(join(root, 'README_CN.md'), 'utf8')
