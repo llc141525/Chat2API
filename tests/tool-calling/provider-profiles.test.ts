@@ -13,6 +13,8 @@ test('first-version providers use managed prompt and managed xml by default', ()
     assert.equal(profile.managedSupport, true)
     assert.equal(profile.supportsNativeTools, false)
     assert.equal(profile.preferredManagedProtocol, 'managed_xml')
+    assert.equal(profile.contractHeaderVersion, 1)
+    assert.equal(profile.availabilityDriftRetry, 'enabled')
   }
 })
 
@@ -29,4 +31,12 @@ test('priority providers format tool history with the Chat2API XML protocol', ()
       '<|CHAT2API|tool_result tool_call_id="call_1"><![CDATA[file body]]></|CHAT2API|tool_result>',
     )
   }
+})
+
+test('unknown providers inherit catalog contract defaults', () => {
+  const profile = getProviderToolProfile('custom-provider')
+
+  assert.equal(profile.preferredManagedProtocol, 'managed_xml')
+  assert.equal(profile.contractHeaderVersion, 1)
+  assert.equal(profile.availabilityDriftRetry, 'enabled')
 })

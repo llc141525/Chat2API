@@ -6,6 +6,8 @@ export interface ProviderToolProfile {
   managedSupport: boolean
   supportsNativeTools: boolean
   preferredManagedProtocol: ToolProtocolId
+  contractHeaderVersion: number
+  availabilityDriftRetry: 'enabled' | 'disabled'
   formatAssistantToolCalls(calls: Array<{ id: string; name: string; arguments: string }>): string
   formatToolResult(result: NormalizedToolResult): string
 }
@@ -14,6 +16,8 @@ const chat2ApiXmlHistoryProfile: Omit<ProviderToolProfile, 'providerId'> = {
   managedSupport: true,
   supportsNativeTools: false,
   preferredManagedProtocol: 'managed_xml',
+  contractHeaderVersion: 1,
+  availabilityDriftRetry: 'enabled',
   formatAssistantToolCalls(calls) {
     return managedXmlProtocol.formatAssistantToolCalls(calls)
   },

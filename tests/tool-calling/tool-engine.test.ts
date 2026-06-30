@@ -49,6 +49,7 @@ test('OpenAI tools plus DeepSeek choose managed prompt', () => {
     request: request(),
     provider,
     actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-stage2-openai-tools',
   })
 
   assert.equal(result.plan.mode, 'managed')
@@ -56,6 +57,7 @@ test('OpenAI tools plus DeepSeek choose managed prompt', () => {
   assert.equal(result.plan.shouldInjectPrompt, true)
   assert.equal(result.tools, undefined)
   assert.equal(result.plan.tools.length, 2)
+  assert.equal(result.plan.catalogSnapshot?.fingerprint, result.plan.diagnostics.catalogFingerprint)
   assert.match(result.messages[0].content as string, /<\|CHAT2API\|tool_calls>/)
 })
 
@@ -74,7 +76,7 @@ test('explicit Cherry Studio MCP adapter uses managed prompt and preserves tool 
   assert.equal(result.plan.clientAdapterId, 'cherry-studio-mcp')
   assert.equal(result.plan.mode, 'managed')
   assert.equal(result.plan.shouldInjectPrompt, true)
-  assert.equal(result.plan.tools[0].name, 'default_api:read_file')
+  assert.deepEqual(result.plan.tools.map((tool) => tool.name), ['default_api:list_dir', 'default_api:read_file'])
   assert.equal(result.plan.tools[0].source, 'mcp')
 })
 
@@ -133,10 +135,97 @@ test('tool_choice required preserves required policy on the plan', () => {
     request: request({ tool_choice: 'required' }),
     provider,
     actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-stage2-required',
   })
 
   assert.equal(result.plan.toolChoiceMode, 'required')
   assert.deepEqual([...result.plan.allowedToolNames].sort(), ['default_api:list_dir', 'default_api:read_file'])
+  assert.equal(result.plan.availabilityRetryAllowed, true)
+})
+
+test('tool session key reuses catalog snapshot across omitted-tool turns', () => {
+  const engine = new ToolCallingEngine()
+  const first = engine.transformRequest({
+    request: request(),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-stage2-reuse',
+  })
+  const second = engine.transformRequest({
+    request: request({
+      tools: undefined,
+      messages: [
+        {
+          role: 'assistant',
+          content: null as any,
+          tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'default_api:read_file', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 'call_1', content: 'body' },
+        { role: 'user', content: 'continue' },
+      ],
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-stage2-reuse',
+  })
+
+  assert.equal(first.plan.catalogSnapshot?.fingerprint, second.plan.catalogSnapshot?.fingerprint)
+  assert.equal(second.plan.catalogDiagnostics.source, 'session_catalog')
+})
+
+test('requestId falls back as the tool session key for omitted-tool follow-up turns', () => {
+  const engine = new ToolCallingEngine()
+  const first = engine.transformRequest({
+    request: request(),
+    provider,
+    actualModel: 'deepseek-chat',
+    requestId: 'engine-stage2-requestid-reuse',
+  })
+  const second = engine.transformRequest({
+    request: request({
+      tools: undefined,
+      messages: [
+        {
+          role: 'assistant',
+          content: null as any,
+          tool_calls: [{ id: 'call_reqid', type: 'function', function: { name: 'default_api:read_file', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 'call_reqid', content: 'body' },
+        { role: 'user', content: 'continue' },
+      ],
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    requestId: 'engine-stage2-requestid-reuse',
+  })
+
+  assert.equal(first.plan.catalogSnapshot?.fingerprint, second.plan.catalogSnapshot?.fingerprint)
+  assert.equal(second.plan.catalogDiagnostics.source, 'session_catalog')
+})
+
+test('legacy managed xml prompt without a catalog throws managed_history_requires_catalog', () => {
+  const engine = new ToolCallingEngine()
+
+  assert.throws(() => engine.transformRequest({
+    request: request({
+      tools: undefined,
+      messages: [
+        {
+          role: 'system',
+          content: [
+            '<|CHAT2API|tool_calls>',
+            '<|CHAT2API|invoke name="default_api:read_file">',
+            '<|CHAT2API|parameter name="filePath"><![CDATA[/tmp/a]]></|CHAT2API|parameter>',
+            '</|CHAT2API|invoke>',
+            '</|CHAT2API|tool_calls>',
+          ].join('\n'),
+        },
+        { role: 'user', content: 'continue' },
+      ],
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+  }), /managed_history_requires_catalog|tool_catalog_blocked/)
 })
 
 test('forced function choice narrows allowed tool names to the selected function', () => {

@@ -36,8 +36,9 @@ export class ToolCallingEngine {
     provider: Provider
     actualModel: string
     requestId?: string
+    toolSessionKey?: string | null
   }): ToolCallingTransformResult {
-    const { request, provider, actualModel, requestId } = input
+    const { request, provider, actualModel, requestId, toolSessionKey } = input
     const adapter = getToolClientAdapter(this.config.clientAdapterId)
     const clientRequest = adapter.normalizeRequest(request)
     const plan = buildToolCallingRuntimePlan({
@@ -48,6 +49,7 @@ export class ToolCallingEngine {
       config: this.config,
       clientRequest,
       messages: request.messages,
+      toolSessionKey: toolSessionKey ?? requestId ?? null,
     })
     const shouldInjectPrompt = plan.shouldInjectPrompt
 

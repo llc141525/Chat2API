@@ -151,6 +151,8 @@ export const GENERAL_TOOL_SIGNATURES = [
   '## Available Tools',
   '## Tool Call Protocol',
   '[function_calls]',
+  '<|CHAT2API|tool_calls>',
+  '<|CHAT2API|invoke',
   'TOOL_WRAP_HINT',
   'You can invoke the following developer tools',
   'Tool Call Formatting',
