@@ -1,5 +1,7 @@
+import type { ChatCompletionResponse, ToolCall } from '../../types.ts'
 import type { ToolProtocolId, NormalizedToolDefinition } from '../../toolCalling/types.ts'
 import type { ToolPlan } from '../control/types.ts'
+import type { StreamGateMode } from '../control/types.ts'
 
 export type PayloadEncoding = 'cdata' | 'text' | 'json_text'
 
@@ -125,6 +127,57 @@ export interface ToolCallAssemblerInput {
   validated: ValidatedCallStructure[]
   tools: NormalizedToolDefinition[]
 }
+
+export type EscapedRangeClassification = 'plain_text' | 'unknown'
+
+export interface StreamGateFacts {
+  mode: StreamGateMode
+  hasEscapedToClient: boolean
+  escapedRanges: Array<{
+    start: number
+    end: number
+    classification: EscapedRangeClassification
+  }>
+  detectedMarkers: Array<{
+    protocol: ToolProtocolId
+    marker: string
+    offset: number
+    confidence: 'partial' | 'full'
+  }>
+  bufferedRawOutput: string
+}
+
+export interface StreamGateState {
+  mode: StreamGateMode
+  buffer: string
+  releasedLength: number
+  escapedRanges: StreamGateFacts['escapedRanges']
+}
+
+export interface StreamGateUpdate {
+  state: StreamGateState
+  releasedChunks: string[]
+}
+
+export interface StreamGateFinishResult {
+  rawOutput: string
+  facts: StreamGateFacts
+  releasedChunks: string[]
+}
+
+export type ToolRuntimeMappingInput =
+  | { kind: 'valid_tool_calls'; toolCalls: ToolCall[] }
+  | { kind: 'plain_text'; content: string }
+  | { kind: 'blocked_malformed'; safeMessage: string }
+
+export interface OpenAIResponseMapperInput {
+  id: string
+  model: string
+  created: number
+  input: ToolRuntimeMappingInput
+}
+
+export type OpenAIStreamChunk = ChatCompletionResponse
 
 export type ToolValidationOutcome =
   | {
