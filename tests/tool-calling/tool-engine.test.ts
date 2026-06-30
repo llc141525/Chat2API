@@ -173,3 +173,112 @@ test('non-stream parsing only accepts the selected provider protocol', () => {
   assert.equal(result.choices[0].message.tool_calls, undefined)
   assert.equal(result.choices[0].message.content, '[function_calls][call:default_api:read_file]{"filePath":"/tmp/a"}[/call][/function_calls]')
 })
+
+test('ToolCallingEngine non-stream repairs mixed protocol output before tool_calls', () => {
+  const qwenProvider = {
+    id: 'qwen',
+    name: 'Qwen',
+    type: 'builtin',
+    authType: 'token',
+    apiEndpoint: '',
+    headers: {},
+    enabled: true,
+    createdAt: 0,
+    updatedAt: 0,
+  } as Provider
+  const engine = new ToolCallingEngine({
+    enabled: true,
+    mode: 'force',
+    clientAdapterId: 'standard-openai-tools',
+    diagnosticsEnabled: false,
+    advanced: { promptPreviewEnabled: false },
+  })
+
+  const transform = engine.transformRequest({
+    request: {
+      model: 'qwen-test',
+      messages: [{ role: 'user', content: 'list files' }],
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'bash',
+          parameters: {
+            type: 'object',
+            properties: { argument: { type: 'string' } },
+            required: ['argument'],
+          },
+        },
+      }],
+    },
+    provider: qwenProvider,
+    actualModel: 'qwen-test',
+  })
+
+  const response: any = {
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: '<|CHAT2API|tool_calls><|CHAT2API|invoke name="bash"><|CHAT2API|parameter name="argument"><![CDATA[pwd]]></arg_value></tool_call>',
+      },
+      finish_reason: 'stop',
+    }],
+  }
+
+  engine.applyNonStreamResponse(response, transform.plan)
+
+  assert.equal(response.choices[0].message.content, null)
+  assert.equal(response.choices[0].finish_reason, 'tool_calls')
+  assert.equal(response.choices[0].message.tool_calls[0].function.name, 'bash')
+  assert.equal(response.choices[0].message.tool_calls[0].function.arguments, '{"argument":"pwd"}')
+})
+
+test('ToolCallingEngine non-stream blocks malformed unknown tool output', () => {
+  const qwenProvider = {
+    id: 'qwen',
+    name: 'Qwen',
+    type: 'builtin',
+    authType: 'token',
+    apiEndpoint: '',
+    headers: {},
+    enabled: true,
+    createdAt: 0,
+    updatedAt: 0,
+  } as Provider
+  const engine = new ToolCallingEngine({ mode: 'force' })
+  const transform = engine.transformRequest({
+    request: {
+      model: 'qwen-test',
+      messages: [{ role: 'user', content: 'list files' }],
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'bash',
+          parameters: {
+            type: 'object',
+            properties: { argument: { type: 'string' } },
+            required: ['argument'],
+          },
+        },
+      }],
+    },
+    provider: qwenProvider,
+    actualModel: 'qwen-test',
+  })
+
+  const response: any = {
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: '<|CHAT2API|tool_calls><|CHAT2API|invoke name="python"><|CHAT2API|parameter name="argument"><![CDATA[pwd]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+      },
+      finish_reason: 'stop',
+    }],
+  }
+
+  engine.applyNonStreamResponse(response, transform.plan)
+
+  assert.equal(response.choices[0].message.tool_calls, undefined)
+  assert.equal(response.choices[0].message.content, '<|CHAT2API|tool_calls><|CHAT2API|invoke name="python"><|CHAT2API|parameter name="argument"><![CDATA[pwd]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>')
+  assert.equal(transform.plan.diagnostics.parsedToolCallCount, 0)
+  assert.equal(transform.plan.diagnostics.malformedReason, 'unknown_tool_name')
+})

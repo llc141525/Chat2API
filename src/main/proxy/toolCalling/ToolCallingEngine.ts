@@ -5,6 +5,13 @@ import {
   normalizeToolCallingConfig,
   type ToolCallingConfig,
 } from '../../../shared/toolCalling.ts'
+import {
+  assembleOpenAIToolCalls,
+  getStructureProtocolAdapter,
+  repairStructure,
+  validateToolCallStructure,
+  type MalformedToolIntent,
+} from '../toolRuntime/data/index.ts'
 import { getToolProtocol } from './protocols/index.ts'
 import { getToolClientAdapter } from './clientAdapters/index.ts'
 import { buildToolCallingRuntimePlan } from './runtimePlan.ts'
@@ -65,19 +72,44 @@ export class ToolCallingEngine {
     const message = result?.choices?.[0]?.message
     if (!message || typeof message.content !== 'string') return
 
-    const parseResult = parseSelectedProtocol(message.content, plan)
-    plan.diagnostics.parserFormat = parseResult.protocol
-    plan.diagnostics.parsedToolCallCount = parseResult.toolCalls.length
-    plan.diagnostics.invalidToolNames = parseResult.invalidToolNames
-    plan.diagnostics.malformedReason = parseResult.malformedReason
+    const adapter = getStructureProtocolAdapter(plan.protocol)
+    const firstStructure = adapter.extractStructure(message.content)
+    const firstValidation = validateToolCallStructure({
+      plan: runtimePlanFromCallingPlan(plan),
+      protocolResult: firstStructure,
+      tools: plan.tools,
+    })
 
-    if (parseResult.toolCalls.length === 0) return
+    const validation = firstValidation.status === 'invalid_structure' && firstValidation.malformedIntent
+      ? validateRepaired(adapter, firstValidation.malformedIntent, plan)
+      : firstValidation
 
-    message.content = parseResult.content || null
-    message.tool_calls = parseResult.toolCalls
+    if (validation.status === 'plain_text') {
+      plan.diagnostics.parserFormat = 'unknown'
+      plan.diagnostics.parsedToolCallCount = 0
+      return
+    }
+
+    if (validation.status === 'invalid_structure') {
+      plan.diagnostics.parserFormat = plan.protocol
+      plan.diagnostics.parsedToolCallCount = 0
+      plan.diagnostics.malformedReason = validation.failure.kind
+      return
+    }
+
+    const toolCalls = assembleOpenAIToolCalls({
+      validated: validation.validated,
+      tools: plan.tools,
+    })
+    if (toolCalls.length === 0) return
+
+    message.content = validation.cleanContent || null
+    message.tool_calls = toolCalls
 
     const choice = result.choices[0]
     choice.finish_reason = 'tool_calls'
+    plan.diagnostics.parserFormat = plan.protocol
+    plan.diagnostics.parsedToolCallCount = toolCalls.length
   }
 }
 
@@ -107,7 +139,48 @@ function injectPrompt(messages: ChatMessage[], prompt: string): ChatMessage[] {
   return [{ role: 'system', content: prompt }, ...messages]
 }
 
-function parseSelectedProtocol(content: string, plan: ToolCallingPlan) {
-  const selected = getToolProtocol(plan.protocol)
-  return selected.parse(content, { tools: plan.tools, protocol: plan.protocol })
+function runtimePlanFromCallingPlan(plan: ToolCallingPlan) {
+  return {
+    profile: 'managed_buffered_structural' as const,
+    protocol: plan.protocol,
+    allowedToolNames: [...plan.allowedToolNames],
+    forcedToolName: plan.forcedToolName,
+    diagnostics: {
+      providerId: plan.providerId,
+      model: plan.diagnostics.model,
+      actualModel: plan.diagnostics.actualModel,
+      profile: 'managed_buffered_structural' as const,
+      mode: 'managed' as const,
+      protocol: plan.protocol,
+      reason: plan.diagnostics.reason,
+      toolCount: plan.tools.length,
+      toolChoiceMode: plan.toolChoiceMode,
+      forcedToolName: plan.forcedToolName,
+      allowedToolNames: [...plan.allowedToolNames],
+    },
+  }
+}
+
+function validateRepaired(
+  adapter: ReturnType<typeof getStructureProtocolAdapter>,
+  malformedIntent: MalformedToolIntent,
+  plan: ToolCallingPlan,
+) {
+  const repaired = repairStructure(malformedIntent)
+  if (repaired.status !== 'repaired') {
+    return {
+      status: 'invalid_structure' as const,
+      failure: {
+        kind: 'malformed_container' as const,
+        selectedProtocol: plan.protocol,
+        detail: repaired.reason,
+      },
+    }
+  }
+
+  return validateToolCallStructure({
+    plan: runtimePlanFromCallingPlan(plan),
+    protocolResult: adapter.extractStructure(repaired.repairedText),
+    tools: plan.tools,
+  })
 }

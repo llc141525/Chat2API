@@ -29,7 +29,7 @@ When Codex Responses compatibility is enabled, emit response items with type "fu
     const allowedNames = toolNames(context.tools)
     const rawMatches: string[] = []
     const invalidToolNames: string[] = []
-    const toolCalls = []
+    const toolCalls: ReturnType<typeof buildToolCall>[] = []
 
     let parsed: unknown
     try {
@@ -56,7 +56,7 @@ When Codex Responses compatibility is enabled, emit response items with type "fu
         continue
       }
 
-      const id =
+      const id: string =
         typeof record.call_id === 'string'
           ? record.call_id
           : typeof record.id === 'string'
