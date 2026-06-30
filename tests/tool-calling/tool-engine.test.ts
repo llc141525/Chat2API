@@ -404,3 +404,106 @@ test('ToolCallingEngine non-stream blocks malformed unknown tool output', () => 
   assert.equal(transform.plan.diagnostics.parsedToolCallCount, 0)
   assert.equal(transform.plan.diagnostics.malformedReason, 'unknown_tool_name')
 })
+
+test('non-stream response denying an available tool marks one availability retry request', () => {
+  const engine = new ToolCallingEngine()
+  const transformed = engine.transformRequest({
+    request: request(),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: `engine-catalog-${Date.now()}-drift`,
+  })
+  const result: any = {
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: 'I cannot use default_api:read_file because that tool is not available in this conversation.',
+      },
+      finish_reason: 'stop',
+    }],
+  }
+
+  const retry = engine.applyNonStreamResponse(result, transformed.plan)
+
+  assert.equal(retry?.type, 'availability_retry')
+  assert.equal(retry?.catalogFingerprint, transformed.plan.catalogSnapshot?.fingerprint)
+  assert.equal(transformed.plan.availabilityRetryAttempted, true)
+  assert.equal(transformed.plan.diagnostics.availabilityDriftDetected, true)
+  assert.equal(transformed.plan.diagnostics.availabilityRetryResult, 'attempted')
+})
+
+test('availability drift retry does not trigger twice for one plan', () => {
+  const engine = new ToolCallingEngine()
+  const transformed = engine.transformRequest({
+    request: request(),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: `engine-catalog-${Date.now()}-drift-once`,
+  })
+  const result: any = {
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: 'The default_api:read_file tool does not exist.',
+      },
+      finish_reason: 'stop',
+    }],
+  }
+
+  const first = engine.applyNonStreamResponse(result, transformed.plan)
+  const second = engine.applyNonStreamResponse(result, transformed.plan)
+
+  assert.equal(first?.type, 'availability_retry')
+  assert.equal(second, undefined)
+  assert.equal(transformed.plan.diagnostics.availabilityRetryResult, 'skipped')
+})
+
+test('availability drift retry does not trigger when valid tool_calls were parsed', () => {
+  const engine = new ToolCallingEngine()
+  const transformed = engine.transformRequest({
+    request: request(),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: `engine-catalog-${Date.now()}-drift-valid`,
+  })
+  const result: any = {
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="argument"><![CDATA[{}]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+      },
+      finish_reason: 'stop',
+    }],
+  }
+
+  const retry = engine.applyNonStreamResponse(result, transformed.plan)
+
+  assert.equal(retry, undefined)
+  assert.equal(result.choices[0].finish_reason, 'tool_calls')
+  assert.equal(transformed.plan.diagnostics.availabilityDriftDetected, undefined)
+})
+
+test('availability drift retry clarification only exposes forced tool availability for this turn', () => {
+  const engine = new ToolCallingEngine()
+  const transformed = engine.transformRequest({
+    request: request({ tool_choice: { type: 'function', function: { name: 'default_api:list_dir' } } }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: `engine-catalog-${Date.now()}-drift-forced`,
+  })
+  const result: any = {
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: 'The default_api:list_dir tool is not available in this conversation.',
+      },
+      finish_reason: 'stop',
+    }],
+  }
+
+  const retry = engine.applyNonStreamResponse(result, transformed.plan)
+
+  assert.equal(retry?.type, 'availability_retry')
+  assert.match(retry?.clarification ?? '', /available_tools: default_api:list_dir/)
+  assert.doesNotMatch(retry?.clarification ?? '', /default_api:read_file/)
+})

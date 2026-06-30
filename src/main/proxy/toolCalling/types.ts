@@ -86,6 +86,14 @@ export interface ToolCallDiagnostics {
   catalogFingerprint?: string
   catalogDriftKinds?: ToolCatalogDriftKind[]
   catalogBlocked?: boolean
+  availabilityDriftDetected?: boolean
+  availabilityRetryResult?: 'skipped' | 'attempted' | 'succeeded' | 'failed'
+}
+
+export interface AvailabilityRetryRequest {
+  type: 'availability_retry'
+  catalogFingerprint: string
+  clarification: string
 }
 
 export interface ToolCallingPlan {

@@ -17,7 +17,8 @@ import { getToolClientAdapter } from './clientAdapters/index.ts'
 import { buildToolCallingRuntimePlan } from './runtimePlan.ts'
 import { getProviderToolProfile } from './providerProfiles.ts'
 import { renderManagedXmlContractHeader } from './protocols/managedXml.ts'
-import type { ToolCallingPlan, ToolCallingTransformResult } from './types.ts'
+import { buildAvailabilityRetryClarification, detectAvailabilityDrift } from './availabilityDrift.ts'
+import type { AvailabilityRetryRequest, ToolCallingPlan, ToolCallingTransformResult } from './types.ts'
 
 export class ToolCallingEngine {
   private readonly config: ToolCallingConfig
@@ -71,11 +72,11 @@ export class ToolCallingEngine {
     }
   }
 
-  applyNonStreamResponse(result: any, plan: ToolCallingPlan): void {
-    if (!plan.shouldParseResponse) return
+  applyNonStreamResponse(result: any, plan: ToolCallingPlan): AvailabilityRetryRequest | undefined {
+    if (!plan.shouldParseResponse) return undefined
 
     const message = result?.choices?.[0]?.message
-    if (!message || typeof message.content !== 'string') return
+    if (!message || typeof message.content !== 'string') return undefined
 
     const adapter = getStructureProtocolAdapter(plan.protocol)
     const firstStructure = adapter.extractStructure(message.content)
@@ -92,21 +93,21 @@ export class ToolCallingEngine {
     if (validation.status === 'plain_text') {
       plan.diagnostics.parserFormat = 'unknown'
       plan.diagnostics.parsedToolCallCount = 0
-      return
+      return maybeBuildAvailabilityRetry(message.content, plan)
     }
 
     if (validation.status === 'invalid_structure') {
       plan.diagnostics.parserFormat = plan.protocol
       plan.diagnostics.parsedToolCallCount = 0
       plan.diagnostics.malformedReason = validation.failure.kind
-      return
+      return undefined
     }
 
     const toolCalls = assembleOpenAIToolCalls({
       validated: validation.validated,
       tools: plan.tools,
     })
-    if (toolCalls.length === 0) return
+    if (toolCalls.length === 0) return undefined
 
     message.content = validation.cleanContent || null
     message.tool_calls = toolCalls
@@ -115,6 +116,10 @@ export class ToolCallingEngine {
     choice.finish_reason = 'tool_calls'
     plan.diagnostics.parserFormat = plan.protocol
     plan.diagnostics.parsedToolCallCount = toolCalls.length
+    if (plan.availabilityRetryAttempted) {
+      plan.diagnostics.availabilityRetryResult = 'succeeded'
+    }
+    return undefined
   }
 }
 
@@ -197,4 +202,31 @@ function validateRepaired(
     protocolResult: adapter.extractStructure(repaired.repairedText),
     tools: plan.tools,
   })
+}
+
+function maybeBuildAvailabilityRetry(
+  content: string,
+  plan: ToolCallingPlan,
+): AvailabilityRetryRequest | undefined {
+  if (!plan.availabilityRetryAllowed || !plan.catalogSnapshot) {
+    return undefined
+  }
+
+  if (plan.availabilityRetryAttempted) {
+    plan.diagnostics.availabilityRetryResult = 'skipped'
+    return undefined
+  }
+
+  const detection = detectAvailabilityDrift(plan, content)
+  if (!detection.detected) return undefined
+
+  plan.availabilityRetryAttempted = true
+  plan.diagnostics.availabilityDriftDetected = true
+  plan.diagnostics.availabilityRetryResult = 'attempted'
+
+  return {
+    type: 'availability_retry',
+    catalogFingerprint: plan.catalogSnapshot.fingerprint,
+    clarification: buildAvailabilityRetryClarification(plan),
+  }
 }
