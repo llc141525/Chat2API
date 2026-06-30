@@ -1,3 +1,8 @@
+import type {
+  LegacyToolPromptConfig,
+  ToolCallingConfig,
+} from './toolCalling'
+
 export type AccountStatus = 'active' | 'inactive' | 'expired' | 'error'
 
 export type ProviderStatus = 'online' | 'offline' | 'unknown'

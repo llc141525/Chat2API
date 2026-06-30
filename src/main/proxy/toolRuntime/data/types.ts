@@ -109,6 +109,23 @@ export interface ValidatedCallStructure {
   parameters: ValidatedParameterStructure[]
 }
 
+export type StructuralRepairResult =
+  | {
+      status: 'repaired'
+      protocol: ToolProtocolId
+      repairedText: string
+      method: 'deterministic_rewrap'
+    }
+  | {
+      status: 'not_repairable'
+      reason: string
+    }
+
+export interface ToolCallAssemblerInput {
+  validated: ValidatedCallStructure[]
+  tools: NormalizedToolDefinition[]
+}
+
 export type ToolValidationOutcome =
   | {
       status: 'valid_structure'
