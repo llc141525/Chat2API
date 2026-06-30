@@ -23,6 +23,7 @@ import { PerplexityAdapter } from './adapters/perplexity'
 import { PerplexityStreamHandler } from './adapters/perplexity-stream'
 import { ToolCallingEngine } from './toolCalling/ToolCallingEngine'
 import type { ToolCallingTransformResult } from './toolCalling/types'
+import { preserveContextManagedMessageMetadata } from './contextMessageMetadata'
 import { sessionManager } from './sessionManager'
 import {
   createContextManagementService,
@@ -278,10 +279,10 @@ export class RequestForwarder {
 
             modifiedRequest = {
               ...modifiedRequest,
-              messages: processResult.messages.map(msg => ({
+              messages: preserveContextManagedMessageMetadata(modifiedRequest.messages, processResult.messages.map(msg => ({
                 role: msg.role,
                 content: msg.content,
-              })),
+              }))),
             }
           }
         } catch (error) {
@@ -468,7 +469,7 @@ export class RequestForwarder {
       )
       
       if (request.stream) {
-        const transformedStream = await handler.handleStream(response.data)
+        const transformedStream = await handler.handleStream(response.data, response)
         
         return {
           success: true,
@@ -482,7 +483,7 @@ export class RequestForwarder {
       }
 
       // Non-streaming requests need to collect stream data and convert
-      const result = await handler.handleNonStream(response.data)
+      const result = await handler.handleNonStream(response.data, response)
       
       this.applyToolCallsToResponse(result, transformed)
       
@@ -519,19 +520,23 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      // GLM uses its own [function_calls] bracket format - skip unified tool engine
-      // to avoid format conflicts with managed XML protocol
+      const transformed = this.transformRequestForPromptToolUse(request, provider)
+      const transformedRequest = {
+        ...request,
+        messages: transformed.messages,
+        tools: transformed.tools,
+      }
+
       const adapter = new GLMAdapter(provider, account)
       const { response, conversationId } = await adapter.chatCompletion({
         model: actualModel,
         originalModel: request.model,
-        messages: request.messages,
+        messages: transformedRequest.messages as any,
         stream: request.stream,
         temperature: request.temperature,
         web_search: request.web_search,
         reasoning_effort: request.reasoning_effort,
         deep_research: request.deep_research,
-        tools: request.tools,
       })
 
       const latency = Date.now() - startTime
@@ -557,31 +562,11 @@ export class RequestForwarder {
         }
       }
 
-      // Create bracket-format tool plan for GLM's own [function_calls] format
-      const glmTools = (request.tools || []).map((t: any) => ({
-        name: t.function?.name || t.name,
-        description: t.function?.description || t.description || '',
-        parameters: t.function?.parameters || t.parameters || {},
-      }))
-      const glmToolNames = new Set(glmTools.map((t: any) => t.name))
-      const glmPlan = glmTools.length > 0 ? {
-        mode: 'managed' as const,
-        protocol: 'managed_bracket' as const,
-        clientAdapterId: 'standard-openai-tools' as const,
-        providerId: provider.id,
-        tools: glmTools,
-        shouldInjectPrompt: false,
-        shouldParseResponse: true,
-        toolChoiceMode: 'auto' as const,
-        allowedToolNames: glmToolNames,
-        diagnostics: { requestId: '', clientAdapterId: 'standard-openai-tools', providerId: provider.id, model: request.model, actualModel, toolSource: 'openai', mode: 'managed', protocol: 'managed_bracket', toolCount: glmTools.length, injected: false, reason: 'managed_auto', toolChoiceMode: 'auto', allowedToolNames: [...glmToolNames] } as any,
-      } : undefined
+      const handler = new GLMStreamHandler(actualModel, undefined, undefined, transformed.plan as any)
 
-      const handler = new GLMStreamHandler(actualModel, undefined, undefined, glmPlan as any)
-      
       if (request.stream) {
-        const transformedStream = await handler.handleStream(response.data)
-        
+        const transformedStream = await handler.handleStream(response.data, response)
+
         // If delete session after chat is enabled, we need to handle it after stream ends
         if (shouldDeleteSession()) {
           const originalEnd = transformedStream.end.bind(transformedStream)
@@ -595,7 +580,7 @@ export class RequestForwarder {
             return originalEnd(chunk, encoding, callback)
           }
         }
-        
+
         return {
           success: true,
           status: response.status,
@@ -607,9 +592,9 @@ export class RequestForwarder {
         }
       }
 
-      const result = await handler.handleNonStream(response.data)
-      
-      // GLM adapter handles tool call parsing internally
+      const result = await handler.handleNonStream(response.data, response)
+
+      this.applyToolCallsToResponse(result, transformed)
 
       if (shouldDeleteSession()) {
         const convId = handler.getConversationId()
@@ -833,17 +818,21 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      // Qwen uses its own [function_calls] bracket format - skip unified tool engine
-      // to avoid format conflicts with managed XML protocol
+      const transformed = this.transformRequestForPromptToolUse(request, provider)
+      const transformedRequest = {
+        ...request,
+        messages: transformed.messages,
+        tools: transformed.tools,
+      }
+
       const adapter = new QwenAiAdapter(provider, account)
       const { response, chatId, parentId } = await adapter.chatCompletion({
         model: actualModel,
         originalModel: request.model,
-        messages: request.messages,
+        messages: transformedRequest.messages as any,
         stream: request.stream,
         temperature: request.temperature,
         enable_thinking: !!request.reasoning_effort,
-        tools: request.tools,
       })
 
       const latency = Date.now() - startTime
@@ -858,27 +847,7 @@ export class RequestForwarder {
         }
       }
 
-      // Create bracket-format tool plan for Qwen's own [function_calls] format
-      const qwenTools = (request.tools || []).map((t: any) => ({
-        name: t.function?.name || t.name,
-        description: t.function?.description || t.description || '',
-        parameters: t.function?.parameters || t.parameters || {},
-      }))
-      const qwenToolNames = new Set(qwenTools.map((t: any) => t.name))
-      const qwenPlan = qwenTools.length > 0 ? {
-        mode: 'managed' as const,
-        protocol: 'managed_bracket' as const,
-        clientAdapterId: 'standard-openai-tools' as const,
-        providerId: provider.id,
-        tools: qwenTools,
-        shouldInjectPrompt: false,
-        shouldParseResponse: true,
-        toolChoiceMode: 'auto' as const,
-        allowedToolNames: qwenToolNames,
-        diagnostics: { requestId: '', clientAdapterId: 'standard-openai-tools', providerId: provider.id, model: request.model, actualModel, toolSource: 'openai', mode: 'managed', protocol: 'managed_bracket', toolCount: qwenTools.length, injected: false, reason: 'managed_auto', toolChoiceMode: 'auto', allowedToolNames: [...qwenToolNames] } as any,
-      } : undefined
-
-      const handler = new QwenAiStreamHandler(actualModel, undefined, qwenPlan as any)
+      const handler = new QwenAiStreamHandler(actualModel, undefined, transformed.plan as any)
       handler.setChatId(chatId)
 
       if (request.stream) {
@@ -907,7 +876,7 @@ export class RequestForwarder {
 
       const result = await handler.handleNonStream(response.data)
 
-      // Qwen adapter handles tool call parsing internally
+      this.applyToolCallsToResponse(result, transformed)
 
       if (shouldDeleteSession()) {
         await adapter.deleteChat(chatId)

@@ -13,6 +13,7 @@ import FormData from 'form-data'
 import { Account, Provider } from '../../store/types'
 import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected, shouldInjectToolPrompt } from '../utils/tools'
 import { parseToolCallsFromText } from '../utils/toolParser'
+import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import {
   createToolCallState,
   processStreamContent,
@@ -652,9 +653,18 @@ export class MiniMaxAdapter {
 
     const content = aiMessage?.msg_content || ''
     const thinkingContent = aiMessage?.extra_info?.thinking_content || ''
-    const { content: cleanContent, toolCalls } = request.toolCallingPlan?.shouldParseResponse
-      ? { content, toolCalls: [] }
-      : parseToolCallsFromText(content, 'minimax')
+    let cleanContent: string
+    let toolCalls: any[]
+    if (request.toolCallingPlan?.shouldParseResponse) {
+      const protocol = getToolProtocol(request.toolCallingPlan.protocol)
+      const parsed = protocol.parse(content, { tools: request.toolCallingPlan.tools, protocol: request.toolCallingPlan.protocol })
+      cleanContent = parsed.content || content
+      toolCalls = parsed.toolCalls || []
+    } else {
+      const result = parseToolCallsFromText(content, 'minimax')
+      cleanContent = result.content
+      toolCalls = result.toolCalls
+    }
 
     const response = {
       status: 200,

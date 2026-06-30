@@ -40,6 +40,7 @@ export class ToolCallingEngine {
       model: request.model,
       config: this.config,
       clientRequest,
+      messages: request.messages,
     })
     const shouldInjectPrompt = plan.shouldInjectPrompt
 

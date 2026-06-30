@@ -4,19 +4,22 @@
  * Based on new chat2.qianwen.com API
  */
 
-import axios, { AxiosResponse } from 'axios'
+import axios from 'axios'
+import type { AxiosResponse } from 'axios'
 import { PassThrough } from 'stream'
 import { createGunzip, createInflate, createBrotliDecompress } from 'zlib'
 import * as ZstdCodec from 'zstd-codec'
 import { createParser } from 'eventsource-parser'
-import { Account, Provider } from '../../store/types'
-import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected, shouldInjectToolPrompt } from '../utils/tools'
-import { parseToolCallsFromText } from '../utils/toolParser'
-import { createBaseChunk } from '../utils/streamToolHandler'
-import { getProviderToolProfile } from '../toolCalling/providerProfiles'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
+import type { Account, Provider } from '../../store/types.ts'
+import { hasToolUse, parseToolUse } from '../promptToolUse.ts'
+import type { ToolCall } from '../promptToolUse.ts'
+import { hasToolPromptInjected } from '../utils/tools.ts'
+import { parseToolCallsFromText, type ParsedToolCall } from '../utils/toolParser.ts'
+import { createBaseChunk } from '../utils/streamToolHandler.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import { getToolProtocol } from '../toolCalling/protocols/index.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 /**
  * Check if content contains tool calls (both bracket and XML formats)
@@ -63,6 +66,7 @@ interface QwenMessage {
 
 interface ChatCompletionRequest {
   model: string
+  originalModel?: string
   messages: QwenMessage[]
   tools?: any[]
   stream?: boolean
@@ -106,6 +110,101 @@ function extractTextContent(content: string | any[]): string {
       .filter((item) => item.type === 'text')
       .map((item) => item.text || '')
       .join('\n')
+  }
+  return ''
+}
+
+interface QwenChatRequestBodyInput {
+  request: ChatCompletionRequest
+  actualModel: string
+  sessionId: string
+  reqId: string
+  timestamp: number
+  enableThinking: boolean
+  enableWebSearch: boolean
+}
+
+function buildQwenChatRequestBody(input: QwenChatRequestBodyInput): any {
+  const {
+    request,
+    actualModel,
+    sessionId,
+    reqId,
+    timestamp,
+    enableThinking,
+    enableWebSearch,
+  } = input
+  const toolProfile = getProviderToolProfile('qwen')
+
+  let systemPrompt = ''
+  const conversationParts: string[] = []
+  const lastUserText = extractLastUserText(request.messages)
+
+  for (const msg of request.messages) {
+    if (msg.role === 'system') {
+      systemPrompt = extractTextContent(msg.content)
+    } else if (msg.role === 'user') {
+      conversationParts.push(extractTextContent(msg.content))
+    } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      conversationParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
+        id: tc.id,
+        name: tc.function.name,
+        arguments: tc.function.arguments,
+      }))))
+    } else if (msg.role === 'assistant') {
+      conversationParts.push(`Assistant: ${extractTextContent(msg.content)}`)
+    } else if (msg.role === 'tool' && msg.tool_call_id) {
+      conversationParts.push(toolProfile.formatToolResult({
+        toolCallId: msg.tool_call_id,
+        content: extractTextContent(msg.content),
+      }))
+    }
+  }
+
+  const userContent = conversationParts.join('\n\n')
+  const finalContent = systemPrompt
+    ? `${systemPrompt}\n\nUser: ${userContent}`
+    : userContent
+
+  return {
+    deep_search: (enableWebSearch || enableThinking) ? '1' : '0',
+    req_id: reqId,
+    model: actualModel,
+    scene: 'chat',
+    session_id: sessionId,
+    sub_scene: 'chat',
+    temporary: false,
+    messages: [
+      {
+        content: finalContent,
+        mime_type: 'text/plain',
+        meta_data: {
+          ori_query: lastUserText || userContent || finalContent,
+        },
+      },
+    ],
+    from: 'default',
+    parent_req_id: '0',
+    enable_search: enableWebSearch,
+    biz_data: '{"entryPoint":"tongyigw"}',
+    scene_param: 'first_turn',
+    chat_client: 'h5',
+    client_tm: timestamp.toString(),
+    protocol_version: 'v2',
+    biz_id: 'ai_qwen',
+  }
+}
+
+export function buildQwenChatRequestBodyForTest(input: QwenChatRequestBodyInput): any {
+  return buildQwenChatRequestBody(input)
+}
+
+function extractLastUserText(messages: QwenMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role === 'user') {
+      return extractTextContent(message.content)
+    }
   }
   return ''
 }
@@ -336,80 +435,24 @@ export class QwenAdapter {
     })
     console.log('[Qwen] Using model:', actualModel)
 
-    const toolProfile = getProviderToolProfile('qwen')
-
-    // Build prompt content from conversation messages
-    let systemPrompt = ''
-    const conversationParts: string[] = []
-    
-    for (const msg of request.messages) {
-      if (msg.role === 'system') {
-        systemPrompt = extractTextContent(msg.content)
-      } else if (msg.role === 'user') {
-        conversationParts.push(extractTextContent(msg.content))
-      } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        conversationParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
-          id: tc.id,
-          name: tc.function.name,
-          arguments: tc.function.arguments,
-        }))))
-      } else if (msg.role === 'assistant') {
-        conversationParts.push(`Assistant: ${extractTextContent(msg.content)}`)
-      } else if (msg.role === 'tool' && msg.tool_call_id) {
-        conversationParts.push(toolProfile.formatToolResult({
-          toolCallId: msg.tool_call_id,
-          content: extractTextContent(msg.content),
-        }))
-      }
-    }
-
-    let userContent = conversationParts.join('\n\n')
-
-    // Inject tools prompt if tools are provided and not already injected by client
+    // Tool prompts are injected by ToolCallingEngine in the forwarder.
+    // Keep this legacy fallback disabled to avoid mixing XML and bracket protocols.
     if (request.tools && request.tools.length > 0 && !hasToolPromptInjected(request.messages)) {
-      const toolsPrompt = toolsToSystemPrompt(request.tools)
-      systemPrompt = systemPrompt 
-        ? systemPrompt + '\n\n' + toolsPrompt 
-        : toolsPrompt
-      // Add tool wrap hint to user content
-      userContent = userContent + TOOL_WRAP_HINT
+      console.warn('[Qwen] Direct adapter tool injection is disabled; use ToolCallingEngine before calling adapter')
     }
-
-    // If system prompt exists, prepend it to user content
-    const finalContent = systemPrompt 
-      ? `${systemPrompt}\n\nUser: ${userContent}`
-      : userContent
 
     const timestamp = Date.now()
     const nonce = generateNonce()
 
-    const requestBody = {
-      deep_search: (enableWebSearch || enableThinking) ? '1' : '0',
-      req_id: reqId,
-      model: actualModel,
-      scene: 'chat',
-      session_id: sessionId,
-      sub_scene: 'chat',
-      temporary: false,
-      messages: [
-        {
-          content: finalContent,
-          mime_type: 'text/plain',
-          meta_data: {
-            ori_query: finalContent
-          }
-        }
-      ],
-      from: 'default',
-      parent_req_id: '0',
-      enable_search: enableWebSearch,
-      biz_data: '{"entryPoint":"tongyigw"}',
-      scene_param: 'first_turn',
-      chat_client: 'h5',
-      client_tm: timestamp.toString(),
-      protocol_version: 'v2',
-      biz_id: 'ai_qwen'
-    }
+    const requestBody = buildQwenChatRequestBody({
+      request,
+      actualModel,
+      sessionId,
+      reqId,
+      timestamp,
+      enableThinking,
+      enableWebSearch,
+    })
 
     const queryString = `biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen&ut=${uuid(false)}&nonce=${nonce}&timestamp=${timestamp}`
     const url = `${QWEN_API_BASE}/api/v2/chat?${queryString}`
@@ -932,9 +975,18 @@ export class QwenStreamHandler {
       let resolved = false
 
       const finalizeWithData = (content: string) => {
-        const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-          ? { content, toolCalls: [] }
-          : parseToolCallsFromText(content, 'qwen')
+        let cleanContent: string
+        let toolCalls: ParsedToolCall[]
+        if (this.toolCallingPlan?.shouldParseResponse) {
+          const protocol = getToolProtocol(this.toolCallingPlan.protocol)
+          const parsed = protocol.parse(content, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
+          cleanContent = parsed.content || content
+          toolCalls = parsed.toolCalls || []
+        } else {
+          const result = parseToolCallsFromText(content, 'qwen')
+          cleanContent = result.content
+          toolCalls = result.toolCalls
+        }
         if (toolCalls.length > 0) {
           data.choices[0].message.content = null
           data.choices[0].message.tool_calls = toolCalls
@@ -1039,10 +1091,19 @@ export class QwenStreamHandler {
                       this.content = contentAccumulator
                       
                       // Parse tool calls from content
-                      const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-                        ? { content: contentAccumulator, toolCalls: [] }
-                        : parseToolCallsFromText(contentAccumulator, 'qwen')
-                      
+                      let cleanContent: string
+                      let toolCalls: ParsedToolCall[]
+                      if (this.toolCallingPlan?.shouldParseResponse) {
+                        const protocol = getToolProtocol(this.toolCallingPlan.protocol)
+                        const parsed = protocol.parse(contentAccumulator, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
+                        cleanContent = parsed.content || contentAccumulator
+                        toolCalls = parsed.toolCalls || []
+                      } else {
+                        const result = parseToolCallsFromText(contentAccumulator, 'qwen')
+                        cleanContent = result.content
+                        toolCalls = result.toolCalls
+                      }
+
                       if (toolCalls.length > 0) {
                         data.choices[0].message.content = null
                         ;(data.choices[0].message as any).tool_calls = toolCalls

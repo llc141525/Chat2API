@@ -10,6 +10,7 @@ import { createParser } from 'eventsource-parser'
 import { Account, Provider } from '../../store/types'
 import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles'
 import type { ToolCallingPlan } from '../toolCalling/types'
 
 const QWEN_AI_BASE = 'https://chat.qwen.ai'
@@ -45,8 +46,10 @@ const MODEL_ALIASES: Record<string, string> = {
 }
 
 interface QwenAiMessage {
-  role: 'user' | 'assistant' | 'system'
-  content: string
+  role: 'user' | 'assistant' | 'system' | 'tool'
+  content: string | any[] | null
+  tool_call_id?: string
+  tool_calls?: any[]
 }
 
 interface ChatCompletionRequest {
@@ -279,6 +282,7 @@ export class QwenAiAdapter {
     })
     
     // Build conversation preserving full history
+    const toolProfile = getProviderToolProfile('qwen-ai')
     let systemContent = ''
     let allContent = ''
 
@@ -293,41 +297,22 @@ export class QwenAiAdapter {
           allContent += (allContent ? '\n\n' : '') + `Assistant: ${msg.content}`
         }
         if (msg.tool_calls) {
-          for (const tc of msg.tool_calls) {
-            allContent += `\n(Used tool: ${tc.function.name})`
-          }
+          allContent += (allContent ? '\n\n' : '') + toolProfile.formatAssistantToolCalls(msg.tool_calls.map((tc: any) => ({
+            id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          })))
         }
       } else if (msg.role === 'tool') {
-        allContent += `\n(Tool result: ${(msg as any).content || ''})`
+        allContent += (allContent ? '\n\n' : '') + toolProfile.formatToolResult({
+          toolCallId: msg.tool_call_id || '',
+          content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? ''),
+        })
       }
     }
     
     // If system prompt exists, prepend to content
     let userContent = systemContent ? `${systemContent}\n\n${allContent}` : allContent
-
-    // Inject tool prompt using bracket format if tools provided
-    if (request.tools && request.tools.length > 0) {
-      const toolDefs = request.tools.map(t => {
-        const fn = t.function || t
-        const required = (fn.parameters as any)?.required
-        const reqStr = (Array.isArray(required) && required.length > 0)
-          ? `\n  MANDATORY PARAMS: ${required.join(', ')}`
-          : ''
-        return `\`${fn.name}\`: ${fn.description || 'No description'}.${reqStr}\n  Schema: ${JSON.stringify(fn.parameters || {})}`
-      }).join('\n\n')
-
-      userContent += `\n\n## Available Tools
-${toolDefs}
-
-CRITICAL RULES:
-- Use EXACT tool names from above. Do NOT rename, shorten, or invent names.
-- EVERY tool call MUST include ALL parameters listed in MANDATORY PARAMS.
-- When calling tools, output ONLY a [function_calls] block, NO other text:
-  [function_calls]
-  [call:TOOL_NAME]{"arg": "value"}[/call]
-  [/function_calls]
-- JSON args MUST be compact on ONE LINE. No newlines, no pretty print.`
-    }
 
     const fid = uuid()
     const childId = uuid()

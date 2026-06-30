@@ -105,6 +105,31 @@ test('fenced code block examples are emitted as text and never as tool calls', (
   assert.equal(chunks[0].choices[0].delta.content, text)
 })
 
+test('ordinary XML-like angle bracket text does not start tool buffering', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const text = 'literal <tag attr="1">value</tag> and escaped &lt;tool_calls&gt;'
+  const chunks = parser.push(text, baseChunk)
+
+  assert.equal(chunks.length, 1)
+  assert.equal(chunks[0].choices[0].delta.content, text)
+  assert.equal(parser.isBuffering(), false)
+  assert.equal(parser.hasEmittedToolCall(), false)
+})
+
+test('XML tool call preserves literal angle brackets in CDATA arguments', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const chunks = parser.push(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath"><![CDATA[tests/<literal>/input.txt with <tag>value</tag>]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+    baseChunk,
+  )
+
+  const toolCall = chunks.at(-1)?.choices[0].delta.tool_calls[0]
+  assert.equal(toolCall.function.name, 'default_api:read_file')
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), {
+    filePath: 'tests/<literal>/input.txt with <tag>value</tag>',
+  })
+})
+
 test('generated call IDs stay stable between emitted chunks and final state', () => {
   const parser = new ToolStreamParser(plan('managed_bracket'))
   const chunks = parser.push('[function_calls][call:default_api:read_file]{"filePath":"/tmp/a"}[/call][/function_calls]', baseChunk)

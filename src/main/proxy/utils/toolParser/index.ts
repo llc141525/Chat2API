@@ -1,5 +1,5 @@
-import { ToolCall } from '../../types'
-import { ToolCallFormat } from '../../constants/signatures'
+import type { ToolCall } from '../../types.ts'
+import type { ToolCallFormat } from '../../constants/signatures.ts'
 
 /**
  * 工具调用解析结果

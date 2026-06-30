@@ -3,29 +3,34 @@
  * Implements GLM (Zhipu Qingyan) web API protocol
  */
 
-import axios, { AxiosResponse } from 'axios'
+import axios from 'axios'
+import type { AxiosResponse } from 'axios'
 import crypto from 'crypto'
-import { Account, Provider } from '../../store/types'
-import { storeManager } from '../../store/store'
+import type { Account, Provider } from '../../store/types.ts'
 import { PassThrough } from 'stream'
+import { createBrotliDecompress, createGunzip, createInflate } from 'zlib'
+import * as ZstdCodec from 'zstd-codec'
 import { createParser } from 'eventsource-parser'
 import FormData from 'form-data'
 import mime from 'mime-types'
 import path from 'path'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected } from '../utils/tools'
-import { parseToolCallsFromText } from '../utils/toolParser'
-import { 
+import { hasToolPromptInjected } from '../utils/tools.ts'
+import { parseToolCallsFromText, type ParsedToolCall } from '../utils/toolParser.ts'
+import {
   createBaseChunk,
-} from '../utils/streamToolHandler'
-import { getProviderToolProfile } from '../toolCalling/providerProfiles'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
+} from '../utils/streamToolHandler.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import { getToolProtocol } from '../toolCalling/protocols/index.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const GLM_API_BASE = 'https://chatglm.cn/chatglm'
 const DEFAULT_ASSISTANT_ID = '65940acff94777010aa6b796'
 const SIGN_SECRET = '8a1317a7468aa3ad86e997d08f3f31cb'
 const ACCESS_TOKEN_EXPIRES = 3600
 const FILE_MAX_SIZE = 100 * 1024 * 1024 // 100MB
+const TOOL_PROMPT_MARKER = '## Available Tools'
+const TOOL_PROMPT_RESULT_MARKER = '<|CHAT2API|tool_result'
 
 const FAKE_HEADERS = {
   Accept: 'text/event-stream',
@@ -79,6 +84,28 @@ interface ChatCompletionRequest {
 }
 
 const tokenCache = new Map<string, TokenInfo>()
+
+function extractManagedToolPrompt(messages: GLMMessage[]): { messages: GLMMessage[]; toolsPrompt: string } {
+  let toolsPrompt = ''
+  const cleanedMessages = messages.map((message) => {
+    if (message.role !== 'system' || typeof message.content !== 'string') return message
+
+    const markerIndex = message.content.indexOf(TOOL_PROMPT_MARKER)
+    if (markerIndex < 0 || !message.content.includes(TOOL_PROMPT_RESULT_MARKER)) return message
+
+    const beforePrompt = message.content.slice(0, markerIndex).trim()
+    toolsPrompt = message.content.slice(markerIndex).trim()
+    return { ...message, content: beforePrompt }
+  })
+
+  return { messages: cleanedMessages, toolsPrompt }
+}
+
+export function buildGLMPromptMessagesForTest(messages: GLMMessage[], refs: any[] = []): { role: string; content: any[] }[] {
+  const adapter = Object.create(GLMAdapter.prototype) as GLMAdapter
+  const managedToolPrompt = extractManagedToolPrompt(messages)
+  return (adapter as any).messagesToPrompt(managedToolPrompt.messages, refs, managedToolPrompt.toolsPrompt, false)
+}
 
 function uuid(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -167,6 +194,7 @@ export class GLMAdapter {
       const decryptedCredentials = {
         refresh_token,
       }
+      const { storeManager } = await import('../../store/store.ts')
       await storeManager.updateAccount(this.account.id, {
         credentials: decryptedCredentials,
       })
@@ -423,39 +451,17 @@ export class GLMAdapter {
 
     // Clone messages to avoid modifying original request
     const messages = [...request.messages]
+    const managedToolPrompt = extractManagedToolPrompt(messages)
 
-    // Check if tool prompt has already been injected by client
-    const toolPromptExists = hasToolPromptInjected(messages)
-
-    // Inject tools definition into prompt if tools are provided and not already injected
-    let toolsPrompt = ''
-    if (request.tools && request.tools.length > 0 && !toolPromptExists) {
-      const glmStrictHint = `
-
-GLM STRICT RULES:
-- If user asks to create/modify code or files, you MUST call tools instead of replying with plain text.
-- You MUST output ONLY one [function_calls] block when calling tools.
-- Use exact tool names from list, case-sensitive, do not rename.`
-      toolsPrompt = toolsToSystemPrompt(request.tools) + glmStrictHint
-
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') {
-          const currentContent = messages[i].content
-          if (typeof currentContent === 'string') {
-            messages[i] = { ...messages[i], content: currentContent + TOOL_WRAP_HINT }
-          } else if (Array.isArray(currentContent)) {
-            messages[i] = {
-              ...messages[i],
-              content: [...currentContent, { type: 'text', text: TOOL_WRAP_HINT }],
-            }
-          }
-          break
-        }
-      }
+    // Tool prompts are injected by ToolCallingEngine in the forwarder.
+    // Keep this legacy fallback only for direct adapter callers that still pass tools.
+    let toolsPrompt = managedToolPrompt.toolsPrompt
+    if (request.tools && request.tools.length > 0 && !hasToolPromptInjected(messages)) {
+      console.warn('[GLM] Direct adapter tool injection is disabled; use ToolCallingEngine before calling adapter')
     }
 
     // Extract and upload files
-    const { fileUrls, imageUrls } = this.extractFileUrls(messages)
+    const { fileUrls, imageUrls } = this.extractFileUrls(managedToolPrompt.messages)
     const refs: any[] = []
 
     // Upload files
@@ -486,7 +492,7 @@ GLM STRICT RULES:
       }
     }
 
-    const preparedMessages = this.messagesToPrompt(messages, refs, toolsPrompt, false)
+    const preparedMessages = this.messagesToPrompt(managedToolPrompt.messages, refs, toolsPrompt, false)
 
     let assistantId = DEFAULT_ASSISTANT_ID
     let chatMode = ''
@@ -720,12 +726,13 @@ export class GLMStreamHandler {
     }
   }
 
-  async handleStream(stream: any): Promise<PassThrough> {
+  async handleStream(stream: any, response?: AxiosResponse): Promise<PassThrough> {
     const transStream = new PassThrough()
     const cachedParts: any[] = []
     let sentContent = ''
     let sentReasoning = ''
     let sentRole = false
+    let finished = false
 
     transStream.write(
       `data: ${JSON.stringify({
@@ -736,6 +743,31 @@ export class GLMStreamHandler {
         created: this.created,
       })}\n\n`
     )
+
+    const finishStream = (delta: Record<string, unknown> = {}, includeUsage: boolean = false): void => {
+      if (finished) return
+      finished = true
+
+      const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
+      const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
+      for (const outChunk of flushChunks) {
+        transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+      }
+
+      const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
+      transStream.write(
+        `data: ${JSON.stringify({
+          id: this.conversationId,
+          model: this.model,
+          object: 'chat.completion.chunk',
+          choices: [{ index: 0, delta, finish_reason: finishReason }],
+          ...(includeUsage ? { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } : {}),
+          created: this.created,
+        })}\n\n`
+      )
+      transStream.end('data: [DONE]\n\n')
+      this.onEnd?.()
+    }
 
     const parser = createParser({
       onEvent: (event: any) => {
@@ -854,37 +886,12 @@ export class GLMStreamHandler {
 
             if (outputChunks.length > 0) sentRole = true
           } else {
-            // Flush any remaining tool call buffer before finishing
-            const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
-            const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-            for (const outChunk of flushChunks) {
-              transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
-            }
-
-            // Determine finish_reason based on whether we had tool calls
-            const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-
-            transStream.write(
-              `data: ${JSON.stringify({
-                id: this.conversationId,
-                model: this.model,
-                object: 'chat.completion.chunk',
-                choices: [
-                  {
-                    index: 0,
-                    delta:
-                      result.status === 'intervene' && result.last_error?.intervene_text
-                        ? { content: '\n\n' + result.last_error.intervene_text }
-                        : {},
-                    finish_reason: finishReason,
-                  },
-                ],
-                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                created: this.created,
-              })}\n\n`
+            finishStream(
+              result.status === 'intervene' && result.last_error?.intervene_text
+                ? { content: '\n\n' + result.last_error.intervene_text }
+                : {},
+              true,
             )
-            transStream.end('data: [DONE]\n\n')
-            this.onEnd?.()
           }
         } catch (err) {
           console.error('[GLM] Stream parse error:', err)
@@ -892,61 +899,28 @@ export class GLMStreamHandler {
       },
     })
 
+    const inputStream = this.createDecodedStream(stream, response, (text) => parser.feed(text), finishStream)
+    if (!inputStream) return transStream
+
     const decoder = new TextDecoder('utf-8')
-    stream.on('data', (buffer: Buffer) => parser.feed(decoder.decode(buffer, { stream: true })))
+    inputStream.on('data', (buffer: Buffer) => parser.feed(decoder.decode(buffer, { stream: true })))
 
     // Handle stream errors - ensure proper cleanup
-    stream.once('error', (err: Error) => {
+    inputStream.once('error', (err: Error) => {
       console.error('[GLM] Stream error:', err.message)
-      // Flush any remaining tool call buffer
-      const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
-      const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-      for (const outChunk of flushChunks) {
-        transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
-      }
-      const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-      transStream.write(
-        `data: ${JSON.stringify({
-          id: this.conversationId,
-          model: this.model,
-          object: 'chat.completion.chunk',
-          choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-          created: this.created,
-        })}\n\n`
-      )
-      transStream.end('data: [DONE]\n\n')
-      this.onEnd?.()
+      finishStream()
     })
 
     // Handle stream close - ensure proper cleanup if not already finished
-    stream.once('close', () => {
+    inputStream.once('close', () => {
       console.log('[GLM] Stream closed')
-      // Only send finish if we haven't already
-      if (!transStream.closed) {
-        const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
-        const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-        for (const outChunk of flushChunks) {
-          transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
-        }
-        const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-        transStream.write(
-          `data: ${JSON.stringify({
-            id: this.conversationId,
-            model: this.model,
-            object: 'chat.completion.chunk',
-            choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-            created: this.created,
-          })}\n\n`
-        )
-        transStream.end('data: [DONE]\n\n')
-        this.onEnd?.()
-      }
+      finishStream()
     })
 
     return transStream
   }
 
-  async handleNonStream(stream: any): Promise<any> {
+  async handleNonStream(stream: any, response?: AxiosResponse): Promise<any> {
     return new Promise((resolve, reject) => {
       const cachedParts: any[] = []
 
@@ -1035,7 +1009,18 @@ export class GLMStreamHandler {
                 if (partReasoning) fullReasoning += (fullReasoning.length > 0 ? '\n' : '') + partReasoning
               })
 
-              const { content: cleanContent, toolCalls } = parseToolCallsFromText(fullText, 'glm')
+              let cleanContent: string
+              let toolCalls: ParsedToolCall[]
+              if (this.toolCallingPlan?.shouldParseResponse) {
+                const protocol = getToolProtocol(this.toolCallingPlan.protocol)
+                const parsed = protocol.parse(fullText, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
+                cleanContent = parsed.content || fullText
+                toolCalls = parsed.toolCalls || []
+              } else {
+                const result = parseToolCallsFromText(fullText, 'glm')
+                cleanContent = result.content
+                toolCalls = result.toolCalls
+              }
 
               resolve({
                 id: this.conversationId,
@@ -1063,9 +1048,32 @@ export class GLMStreamHandler {
         },
       })
 
-      stream.on('data', (buffer: Buffer) => parser.feed(buffer.toString()))
-      stream.once('error', reject)
-      stream.once('close', () => {
+      const inputStream = this.createDecodedStream(
+        stream,
+        response,
+        (text) => parser.feed(text),
+        () => {
+          resolve({
+            id: this.conversationId,
+            model: this.model,
+            object: 'chat.completion',
+            choices: [
+              {
+                index: 0,
+                message: { role: 'assistant', content: '', reasoning_content: null },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+            created: Math.floor(Date.now() / 1000),
+          })
+        },
+      )
+      if (!inputStream) return
+
+      inputStream.on('data', (buffer: Buffer) => parser.feed(buffer.toString()))
+      inputStream.once('error', reject)
+      inputStream.once('close', () => {
         resolve({
           id: this.conversationId,
           model: this.model,
@@ -1082,6 +1090,53 @@ export class GLMStreamHandler {
         })
       })
     })
+  }
+
+  private createDecodedStream(
+    stream: any,
+    response: AxiosResponse | undefined,
+    onDecodedZstd: (text: string) => void,
+    onZstdEnd?: () => void,
+  ): any | null {
+    const contentEncoding = String(response?.headers?.['content-encoding'] || '').toLowerCase()
+    if (contentEncoding === 'gzip') {
+      console.log('[GLM] Decompressing gzip stream...')
+      return stream.pipe(createGunzip())
+    }
+    if (contentEncoding === 'deflate') {
+      console.log('[GLM] Decompressing deflate stream...')
+      return stream.pipe(createInflate())
+    }
+    if (contentEncoding === 'br') {
+      console.log('[GLM] Decompressing brotli stream...')
+      return stream.pipe(createBrotliDecompress())
+    }
+    if (contentEncoding === 'zstd') {
+      console.log('[GLM] Decompressing zstd stream...')
+      const chunks: Buffer[] = []
+      stream.on('data', (chunk: Buffer) => chunks.push(chunk))
+      stream.once('end', () => {
+        try {
+          const compressedData = Buffer.concat(chunks)
+          ZstdCodec.run((zstd) => {
+            const simple = new zstd.Simple()
+            const decompressed = simple.decompress(compressedData)
+            onDecodedZstd(Buffer.from(decompressed).toString('utf8'))
+            onZstdEnd?.()
+          })
+        } catch (err) {
+          console.error('[GLM] Zstd decompression error:', err)
+          onZstdEnd?.()
+        }
+      })
+      stream.once('error', (err: Error) => {
+        console.error('[GLM] Stream error:', err)
+        onZstdEnd?.()
+      })
+      return null
+    }
+
+    return stream
   }
 
   getConversationId(): string {

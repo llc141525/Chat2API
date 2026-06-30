@@ -50,10 +50,14 @@ Tool results will be provided as Chat2API XML result blocks:
     parseBlocks(parseable, {
       blockPattern: /<\|CHAT2API\|tool_calls>([\s\S]*?)<\/\|CHAT[^|]*\|tool_calls>/g,
       invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT[^|]*\|invoke>/g,
-      parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT[^|]*\|parameter>/g,
+      parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/(?:\|CHAT[^|]*\|)?parameter>/g,
+      fallbackParameterPatterns: [
+        /<parameter\s*=\s*"?([^"">\s]+)"?\s*>([\s\S]*?)<\/parameter>/gi,
+      ],
       rawMatches,
       invalidToolNames,
       allowedNames,
+      tools: context.tools,
       toolCalls,
     })
 
@@ -64,6 +68,7 @@ Tool results will be provided as Chat2API XML result blocks:
       rawMatches,
       invalidToolNames,
       allowedNames,
+      tools: context.tools,
       toolCalls,
     })
 
@@ -113,7 +118,9 @@ interface ParseBlockOptions {
   rawMatches: string[]
   invalidToolNames: string[]
   allowedNames: Set<string>
+  tools: ToolParseContext['tools']
   toolCalls: ReturnType<typeof buildToolCall>[]
+  fallbackParameterPatterns?: RegExp[]
 }
 
 function parseBlocks(content: string, options: ParseBlockOptions): void {
@@ -137,8 +144,24 @@ function parseBlocks(content: string, options: ParseBlockOptions): void {
         addParameter(args, parameterMatch[1].trim(), parseJsonValue(parameterMatch[2]))
       }
 
+      if (options.fallbackParameterPatterns) {
+        for (const fallbackPattern of options.fallbackParameterPatterns) {
+          let fbMatch: RegExpExecArray | null
+          while ((fbMatch = fallbackPattern.exec(invokeMatch[2])) !== null) {
+            addParameter(args, fbMatch[1].trim(), parseJsonValue(fbMatch[2]))
+          }
+        }
+      }
+
       options.toolCalls.push(
-        buildToolCall(`call_${options.toolCalls.length}`, options.toolCalls.length, name, JSON.stringify(args), invokeMatch[0]),
+        buildToolCall(
+          `call_${options.toolCalls.length}`,
+          options.toolCalls.length,
+          name,
+          JSON.stringify(args),
+          invokeMatch[0],
+          options.tools,
+        ),
       )
     }
   }

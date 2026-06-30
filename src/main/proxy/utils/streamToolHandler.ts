@@ -9,20 +9,19 @@
  * Import from './toolParser/index.ts' for the latest unified parsing functionality.
  */
 
-import { parseToolCallsFromText } from './toolParser'
+import { parseToolCallsFromText } from './toolParser.ts'
 
 // Import types and functions from the new unified module
+import type { StreamState } from './toolParser/index.ts'
 import {
-  StreamState,
   createStreamState,
   parseToolCallsStream as unifiedParseToolCallsStream,
   flushToolCallBuffer as unifiedFlushToolCallBuffer,
-  shouldBlockOutput as unifiedShouldBlockOutput,
-  createBaseChunk as unifiedCreateBaseChunk
-} from './toolParser/index'
+  shouldBlockOutput as unifiedShouldBlockOutput
+} from './toolParser/index.ts'
 
 // Re-export StreamState type for backward compatibility
-export type { StreamState } from './toolParser/index'
+export type { StreamState } from './toolParser/index.ts'
 
 /**
  * Tool call state for backward compatibility
