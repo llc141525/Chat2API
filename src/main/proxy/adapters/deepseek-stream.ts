@@ -6,6 +6,7 @@
 import { PassThrough } from 'stream'
 import { parseToolCallsFromText } from '../utils/toolParser.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const MODEL_NAME = 'deepseek-chat'
@@ -589,9 +590,18 @@ export class DeepSeekStreamHandler {
 
       stream.on('end', () => {
         // Parse tool calls from accumulated content
-        const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-          ? { content: accumulatedContent, toolCalls: [] }
-          : parseToolCallsFromText(accumulatedContent)
+        let cleanContent: string
+        let toolCalls: any[]
+        if (this.toolCallingPlan?.shouldParseResponse) {
+          const protocol = getToolProtocol(this.toolCallingPlan.protocol)
+          const parsed = protocol.parse(accumulatedContent, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
+          cleanContent = parsed.content || accumulatedContent
+          toolCalls = parsed.toolCalls || []
+        } else {
+          const result = parseToolCallsFromText(accumulatedContent)
+          cleanContent = result.content
+          toolCalls = result.toolCalls
+        }
         const citations = isSearchSilentModel
           ? ''
           : DeepSeekStreamHandler.formatSearchCitations(searchResults)

@@ -1,9 +1,13 @@
 /**
  * Tool Parser Module - Parse tool calls from text content
- * 
- * Supported format:
- * Bracket format: [function_calls][call:name]{args}[/call][/function_calls]
- * 
+ *
+ * Supported formats:
+ * - Chat2API XML: <|CHAT2API|tool_calls><|CHAT2API|invoke name="..."><|CHAT2API|parameter name="..."><![CDATA[value]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>
+ * - Bracket format: [function_calls][call:name]{args}[/call][/function_calls]
+ *
+ * Legacy parser path. Managed tool runtime must not depend on this module.
+ * New managed XML parsing belongs under src/main/proxy/toolRuntime/.
+ *
  * All formats are normalized to the standard OpenAI tool_calls format
  */
 
@@ -18,12 +22,15 @@ export interface ParsedToolCall {
   rawText?: string
 }
 
+const CHAT2API_XML_START = '<|CHAT2API|tool_calls>'
+const CHAT2API_XML_START_ALT = '<tool_calls>'
+
 /**
  * Parse tool calls from text content
  */
-export function parseToolCallsFromText(text: string, modelType: string = 'default'): { 
+export function parseToolCallsFromText(text: string, modelType: string = 'default'): {
   content: string
-  toolCalls: ParsedToolCall[] 
+  toolCalls: ParsedToolCall[]
 } {
   console.log('[ToolParser] parseToolCallsFromText called, modelType:', modelType, 'text length:', text?.length || 0)
   if (!text) {
@@ -33,141 +40,222 @@ export function parseToolCallsFromText(text: string, modelType: string = 'defaul
   const toolCalls: ParsedToolCall[] = []
   let cleanContent = text
 
-  // Support both [function_calls] and function_calls] (missing opening bracket)
-  const hasFunctionCalls = text.includes('[function_calls]') || 
+  // Check for Chat2API XML format first: <|CHAT2API|tool_calls> or <tool_calls>
+  const hasChat2API = text.includes(CHAT2API_XML_START) || text.includes(CHAT2API_XML_START_ALT)
+  console.log('[ToolParser] hasChat2API:', hasChat2API)
+
+  if (hasChat2API) {
+    const xmlResults = parseChat2apiXmlFormat(text)
+    if (xmlResults.toolCalls.length > 0) {
+      toolCalls.push(...xmlResults.toolCalls)
+      cleanContent = xmlResults.content
+      console.log('[ToolParser] Chat2API XML parsed:', toolCalls.length, 'tool calls')
+    }
+  }
+
+  // Check for bracket format (even if XML was found, also check for bracket fallback)
+  const hasFunctionCalls = text.includes('[function_calls]') ||
                            text.includes('function_calls]') ||
                            /\[call[:=]/.test(text)
-  
+
   console.log('[ToolParser] hasFunctionCalls:', hasFunctionCalls)
-  
-  if (!hasFunctionCalls) {
-    return { content: text, toolCalls: [] }
-  }
 
-  // Prepend missing opening bracket if needed
-  // Find function_calls] that is not preceded by [ or / and add the missing bracket
-  // This handles cases like "text\nfunction_calls]" or just "function_calls]"
-  let processedText = text
-  // Match function_calls] that is not preceded by [ or / (to avoid matching [/function_calls])
-  const missingBracketRegex = /(^|[^\/\[])(function_calls\])/g
-  if (!processedText.includes('[function_calls]') && missingBracketRegex.test(processedText)) {
-    // Replace function_calls] with [function_calls] when not preceded by [ or /
-    processedText = processedText.replace(/(^|[^\/\[])(function_calls\])/g, '$1[$2')
-    console.log('[ToolParser] Prepended opening bracket, processedText:', processedText.substring(0, 100))
-  }
+  if (hasFunctionCalls) {
+    // Prepend missing opening bracket if needed
+    let processedText = cleanContent
+    const missingBracketRegex = /(^|[^\/\[])(function_calls\])/g
+    if (!processedText.includes('[function_calls]') && missingBracketRegex.test(processedText)) {
+      processedText = processedText.replace(/(^|[^\/\[])(function_calls\])/g, '$1[$2')
+      console.log('[ToolParser] Prepended opening bracket')
+    }
 
-  // Extract the content inside [function_calls]...[/function_calls]
-  // Also support unclosed [function_calls] blocks for streaming or malformed output
-  const blockRegex = /\[function_calls\]([\s\S]*?)(?:\[\/function_calls\]|$)/g
-  let blockMatch
+    const blockRegex = /\[function_calls\]([\s\S]*?)(?:\[\/function_calls\]|$)/g
+    let blockMatch
+    const bracketCalls: ParsedToolCall[] = []
 
-  while ((blockMatch = blockRegex.exec(processedText)) !== null) {
-    const blockContent = blockMatch[1]
-    console.log('[ToolParser] blockContent:', blockContent?.substring(0, 200))
+    while ((blockMatch = blockRegex.exec(processedText)) !== null) {
+      const blockContent = blockMatch[1]
+      console.log('[ToolParser] blockContent:', blockContent?.substring(0, 200))
 
-    // Parse individual [call:name]...[/call] inside the block
-    if (modelType === 'kimi' || modelType === 'glm' || modelType === 'minimax' || modelType === 'zai') {
-      // Legacy Regex-based Logic (Proven to work for these models)
-      // Support [call:name], [call:=name], [call := name] formats
-      const callRegex = modelType === 'minimax' 
-        ? /\[(?:call\s*[:=]\s*([a-zA-Z0-9_:-]+)|invoke\s+name\s*=\s*"([a-zA-Z0-9_:-]+)")\]([\s\S]*?)\[\/call\]/g
-        : /\[call\s*[:=]?\s*([a-zA-Z0-9_:-]+)\]([\s\S]*?)\[\/call\]/g
+      if (modelType === 'kimi' || modelType === 'glm' || modelType === 'minimax' || modelType === 'zai') {
+        const callRegex = modelType === 'minimax'
+          ? /\[(?:call\s*[:=]\s*([a-zA-Z0-9_:-]+)|invoke\s+name\s*=\s*"([a-zA-Z0-9_:-]+)")\]([\s\S]*?)\[\/call\]/g
+          : /\[call\s*[:=]?\s*([a-zA-Z0-9_:-]+)\]([\s\S]*?)\[\/call\]/g
 
-      let match
-      while ((match = callRegex.exec(blockContent)) !== null) {
-        const functionName = match[1] || match[2]
-        let argumentsStr = ''
-        if (modelType === 'minimax') {
-          argumentsStr = (match[3] || '').trim()
-        } else {
-          argumentsStr = (match[2] || '').trim()
-        }
-
-        // Clean up markdown
-        if (argumentsStr.startsWith('```') && argumentsStr.endsWith('```')) {
-          argumentsStr = argumentsStr.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-        }
-
-        const parsed = tryParseJSON(argumentsStr)
-        if (parsed) {
-          toolCalls.push({
-            index: toolCalls.length,
-            id: `call_${Date.now()}_${toolCalls.length}`,
-            type: 'function',
-            function: { name: functionName, arguments: JSON.stringify(parsed) },
-            rawText: match[0]
-          })
-        }
-      }
-    } else {
-      // Modern Balanced-Braces Logic (Specifically for Qwen to handle nested tags)
-      // Support both [call:name] and [call:=name] formats
-      const callStartRegex = /\[call[:=]?([a-zA-Z0-9_:-]+)\]/g
-      let callStartMatch
-
-      while ((callStartMatch = callStartRegex.exec(blockContent)) !== null) {
-        const functionName = callStartMatch[1]
-        const argsStartIndex = callStartMatch.index + callStartMatch[0].length
-        const remainingText = blockContent.substring(argsStartIndex)
-
-        let argumentsStr = extractBalancedJson(remainingText)
-        let jsonEndIndex = -1
-        let parsed = null
-
-        if (argumentsStr) {
-          const startIdx = remainingText.indexOf('{')
-          jsonEndIndex = startIdx + argumentsStr.length
-          let cleanArgsStr = argumentsStr.trim()
-          if (cleanArgsStr.startsWith('```') && cleanArgsStr.endsWith('```')) {
-            cleanArgsStr = cleanArgsStr.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+        let match
+        while ((match = callRegex.exec(blockContent)) !== null) {
+          const functionName = match[1] || match[2]
+          let argumentsStr = modelType === 'minimax' ? (match[3] || '').trim() : (match[2] || '').trim()
+          if (argumentsStr.startsWith('```') && argumentsStr.endsWith('```')) {
+            argumentsStr = argumentsStr.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
           }
-          parsed = tryParseJSON(cleanArgsStr)
-        }
-
-        if (!parsed) {
-          parsed = tryRegexFallback(remainingText)
+          const parsed = tryParseJSON(argumentsStr)
           if (parsed) {
-            const endCallIdx = remainingText.indexOf('[/call]')
-            jsonEndIndex = endCallIdx !== -1 ? endCallIdx : remainingText.length
+            bracketCalls.push({
+              index: bracketCalls.length,
+              id: `call_${Date.now()}_${bracketCalls.length}`,
+              type: 'function',
+              function: { name: functionName, arguments: JSON.stringify(parsed) },
+              rawText: match[0]
+            })
           }
         }
-
-        if (parsed) {
-          let rawTextEndIndex = argsStartIndex + jsonEndIndex
-          const afterJson = blockContent.substring(rawTextEndIndex)
-          const closeTagMatch = afterJson.match(/^\s*\[\/call\]/)
-          if (closeTagMatch) rawTextEndIndex += closeTagMatch[0].length
-
-          toolCalls.push({
-            index: toolCalls.length,
-            id: `call_${Date.now()}_${toolCalls.length}`,
-            type: 'function',
-            function: { name: functionName, arguments: JSON.stringify(parsed) },
-            rawText: blockContent.substring(callStartMatch.index, rawTextEndIndex)
-          })
-          callStartRegex.lastIndex = rawTextEndIndex
+      } else {
+        const callStartRegex = /\[call[:=]?([a-zA-Z0-9_:-]+)\]/g
+        let callStartMatch
+        while ((callStartMatch = callStartRegex.exec(blockContent)) !== null) {
+          const functionName = callStartMatch[1]
+          const argsStartIndex = callStartMatch.index + callStartMatch[0].length
+          const remainingText = blockContent.substring(argsStartIndex)
+          let argumentsStr = extractBalancedJson(remainingText)
+          let jsonEndIndex = -1
+          let parsed = null
+          if (argumentsStr) {
+            const startIdx = remainingText.indexOf('{')
+            jsonEndIndex = startIdx + argumentsStr.length
+            let cleanArgsStr = argumentsStr.trim()
+            if (cleanArgsStr.startsWith('```') && cleanArgsStr.endsWith('```')) {
+              cleanArgsStr = cleanArgsStr.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+            }
+            parsed = tryParseJSON(cleanArgsStr)
+          }
+          if (!parsed) {
+            parsed = tryRegexFallback(remainingText)
+            if (parsed) {
+              const endCallIdx = remainingText.indexOf('[/call]')
+              jsonEndIndex = endCallIdx !== -1 ? endCallIdx : remainingText.length
+            }
+          }
+          if (parsed) {
+            let rawTextEndIndex = argsStartIndex + jsonEndIndex
+            const afterJson = blockContent.substring(rawTextEndIndex)
+            const closeTagMatch = afterJson.match(/^\s*\[\/call\]/)
+            if (closeTagMatch) rawTextEndIndex += closeTagMatch[0].length
+            bracketCalls.push({
+              index: bracketCalls.length,
+              id: `call_${Date.now()}_${bracketCalls.length}`,
+              type: 'function',
+              function: { name: functionName, arguments: JSON.stringify(parsed) },
+              rawText: blockContent.substring(callStartMatch.index, rawTextEndIndex)
+            })
+            callStartRegex.lastIndex = rawTextEndIndex
+          }
         }
       }
-    }
 
-    // Remove the parsed calls from content
-    for (const tc of toolCalls) {
-      if (tc.rawText) {
-        cleanContent = cleanContent.replace(tc.rawText, '')
+      // Remove the parsed calls from content
+      for (const tc of bracketCalls) {
+        if (tc.rawText) {
+          cleanContent = cleanContent.replace(tc.rawText, '')
+        }
+      }
+
+      if (blockContent.includes('[/function_calls]')) {
+        const emptyBlockRegex = /\[function_calls\]\s*\[\/function_calls\]/g
+        cleanContent = cleanContent.replace(emptyBlockRegex, '')
       }
     }
 
-    // If the block is now empty (except for [function_calls] tags and whitespace), remove the tags too
-    // Only remove if we found the closing tag
-    if (blockContent.includes('[/function_calls]')) {
-      const emptyBlockRegex = /\[function_calls\]\s*\[\/function_calls\]/g
-      cleanContent = cleanContent.replace(emptyBlockRegex, '')
-    }
+    toolCalls.push(...bracketCalls)
   }
 
   return {
     content: cleanContent.trim(),
     toolCalls
+  }
+}
+
+/**
+ * Parse Chat2API XML format tool calls: <|CHAT2API|tool_calls><|CHAT2API|invoke name="..."><|CHAT2API|parameter name="..."><![CDATA[value]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>
+ * Also supports the simpler <tool_calls>/<invoke>/<parameter> variant
+ */
+function parseChat2apiXmlFormat(text: string): { content: string; toolCalls: ParsedToolCall[] } {
+  const toolCalls: ParsedToolCall[] = []
+  let cleanContent = text
+  const rawMatches: string[] = []
+
+  // Parse <|CHAT2API|tool_calls> blocks
+  const chat2apiBlockRegex = /<\|CHAT2API\|tool_calls>([\s\S]*?)<\/\|CHAT[^|]*\|tool_calls>/g
+  let blockMatch: RegExpExecArray | null
+  while ((blockMatch = chat2apiBlockRegex.exec(text)) !== null) {
+    rawMatches.push(blockMatch[0])
+    parseInvokeBlock(blockMatch[1], toolCalls, rawMatches, {
+      invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT[^|]*\|invoke>/g,
+      parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/(?:\|CHAT[^|]*\|)?parameter>/g,
+    })
+  }
+
+  // Parse <tool_calls> blocks (simpler variant)
+  const toolCallsBlockRegex = /<tool_calls>([\s\S]*?)<\/tool_calls>/g
+  while ((blockMatch = toolCallsBlockRegex.exec(cleanContent)) !== null) {
+    if (!rawMatches.includes(blockMatch[0])) {
+      rawMatches.push(blockMatch[0])
+      parseInvokeBlock(blockMatch[1], toolCalls, rawMatches, {
+        invokePattern: /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/g,
+        parameterPattern: /<parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/parameter>/g,
+      })
+    }
+  }
+
+  // Clean up matched raw text from content
+  for (const raw of rawMatches) {
+    cleanContent = cleanContent.replace(raw, '')
+  }
+
+  return { content: cleanContent, toolCalls }
+}
+
+function parseInvokeBlock(
+  blockContent: string,
+  toolCalls: ParsedToolCall[],
+  rawMatches: string[],
+  patterns: { invokePattern: RegExp; parameterPattern: RegExp }
+): void {
+  let invokeMatch: RegExpExecArray | null
+  while ((invokeMatch = patterns.invokePattern.exec(blockContent)) !== null) {
+    const name = invokeMatch[1].trim()
+    rawMatches.push(invokeMatch[0])
+
+    const args: Record<string, unknown> = {}
+    let paramMatch: RegExpExecArray | null
+    while ((paramMatch = patterns.parameterPattern.exec(invokeMatch[2])) !== null) {
+      const paramName = paramMatch[1].trim()
+      let paramValue = paramMatch[2].trim()
+      // Unwrap CDATA
+      const cdataMatch = paramValue.match(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/)
+      if (cdataMatch) {
+        paramValue = cdataMatch[1]
+      }
+      // Try JSON parse, fallback to string
+      try {
+        args[paramName] = JSON.parse(paramValue)
+      } catch {
+        args[paramName] = paramValue
+      }
+    }
+
+    // Also try <parameter=name> format (without quotes around name and without closing tag)
+    if (Object.keys(args).length === 0) {
+      const altParamRegex = /<parameter\s*=\s*"?([^"">\s]+)"?\s*>([\s\S]*?)<\/parameter>/gi
+      let altMatch: RegExpExecArray | null
+      while ((altMatch = altParamRegex.exec(invokeMatch[2])) !== null) {
+        const paramName = altMatch[1].trim()
+        let paramValue = altMatch[2].trim()
+        const cdataMatch = paramValue.match(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/)
+        if (cdataMatch) paramValue = cdataMatch[1]
+        try { args[paramName] = JSON.parse(paramValue) } catch { args[paramName] = paramValue }
+      }
+    }
+
+    if (name) {
+      toolCalls.push({
+        index: toolCalls.length,
+        id: `call_${Date.now()}_${toolCalls.length}`,
+        type: 'function',
+        function: { name, arguments: JSON.stringify(args) },
+        rawText: invokeMatch[0],
+      })
+    }
   }
 }
 

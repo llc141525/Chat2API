@@ -58,3 +58,13 @@ src/renderer/next-app/
 
 # Backup
 backup/
+
+# Agent / probe artifacts
+.agent-probe/
+.codegraph/
+.superpowers/
+.opencode/agent/
+.dev-server.pid
+
+# Superpowers plans
+docs/superpowers/plans/

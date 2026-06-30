@@ -1,5 +1,10 @@
-import { ToolCall } from '../../types'
-import { ToolCallFormat } from '../../constants/signatures'
+import type { ToolCall } from '../../types.ts'
+import type { ToolCallFormat } from '../../constants/signatures.ts'
+
+/**
+ * Legacy parser path. Managed tool runtime must not depend on this module.
+ * New managed XML parsing belongs under src/main/proxy/toolRuntime/.
+ */
 
 /**
  * 工具调用解析结果

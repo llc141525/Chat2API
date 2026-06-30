@@ -1,6 +1,7 @@
 import { PassThrough } from 'stream'
 import { parseToolCallsFromText } from '../utils/toolParser'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
+import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import type { ToolCallingPlan } from '../toolCalling/types'
 import { 
   createToolCallState, 
@@ -393,10 +394,18 @@ export class PerplexityStreamHandler {
       stream.on('end', () => {
         // Filter citations from accumulated content
         const filteredAccumulatedContent = filterCitations(this.accumulatedContent)
-        const shouldUseManagedParser = !!this.toolStreamParser
-        const { content: cleanContent, toolCalls } = shouldUseManagedParser
-          ? { content: filteredAccumulatedContent, toolCalls: [] }
-          : parseToolCallsFromText(filteredAccumulatedContent)
+        let cleanContent: string
+        let toolCalls: any[]
+        if (this.toolStreamParser && this.toolCallingPlan) {
+          const protocol = getToolProtocol(this.toolCallingPlan.protocol)
+          const parsed = protocol.parse(filteredAccumulatedContent, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
+          cleanContent = parsed.content || filteredAccumulatedContent
+          toolCalls = parsed.toolCalls || []
+        } else {
+          const result = parseToolCallsFromText(filteredAccumulatedContent)
+          cleanContent = result.content
+          toolCalls = result.toolCalls
+        }
 
         const message: any = {
           role: 'assistant',

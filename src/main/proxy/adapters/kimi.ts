@@ -12,6 +12,7 @@ import { createBaseChunk } from '../utils/streamToolHandler'
 import { createKimiChatPayload, encodeKimiGrpcFrame } from './providerModelOptions'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
+import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import type { ToolCallingPlan } from '../toolCalling/types'
 
 const KIMI_API_BASE = 'https://www.kimi.com'
@@ -873,9 +874,18 @@ export class KimiStreamHandler {
               }
 
               if (data.done !== undefined) {
-                const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-                  ? { content, toolCalls: [] }
-                  : parseToolCallsFromText(content, 'kimi')
+                let cleanContent: string
+                let toolCalls: any[]
+                if (this.toolCallingPlan?.shouldParseResponse) {
+                  const protocol = getToolProtocol(this.toolCallingPlan.protocol)
+                  const parsed = protocol.parse(content, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
+                  cleanContent = parsed.content || content
+                  toolCalls = parsed.toolCalls || []
+                } else {
+                  const result = parseToolCallsFromText(content, 'kimi')
+                  cleanContent = result.content
+                  toolCalls = result.toolCalls
+                }
 
                 const message: any = {
                   role: 'assistant',

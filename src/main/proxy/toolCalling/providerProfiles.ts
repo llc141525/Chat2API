@@ -2,10 +2,12 @@ import type { NormalizedToolResult, ToolProtocolId } from './types.ts'
 import { managedXmlProtocol } from './protocols/managedXml.ts'
 
 export interface ProviderToolProfile {
-  providerId: 'deepseek' | 'kimi' | 'glm' | 'qwen' | string
+  providerId: 'deepseek' | 'kimi' | 'glm' | 'qwen' | 'qwen-ai' | string
   managedSupport: boolean
   supportsNativeTools: boolean
   preferredManagedProtocol: ToolProtocolId
+  contractHeaderVersion: number
+  availabilityDriftRetry: 'enabled' | 'disabled'
   formatAssistantToolCalls(calls: Array<{ id: string; name: string; arguments: string }>): string
   formatToolResult(result: NormalizedToolResult): string
 }
@@ -14,6 +16,8 @@ const chat2ApiXmlHistoryProfile: Omit<ProviderToolProfile, 'providerId'> = {
   managedSupport: true,
   supportsNativeTools: false,
   preferredManagedProtocol: 'managed_xml',
+  contractHeaderVersion: 1,
+  availabilityDriftRetry: 'enabled',
   formatAssistantToolCalls(calls) {
     return managedXmlProtocol.formatAssistantToolCalls(calls)
   },
@@ -37,6 +41,10 @@ const profiles: Record<string, ProviderToolProfile> = {
   },
   qwen: {
     providerId: 'qwen',
+    ...chat2ApiXmlHistoryProfile,
+  },
+  'qwen-ai': {
+    providerId: 'qwen-ai',
     ...chat2ApiXmlHistoryProfile,
   },
 }

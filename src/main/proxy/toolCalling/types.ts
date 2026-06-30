@@ -32,6 +32,35 @@ export interface NormalizedToolResult {
   content: string
 }
 
+export type ToolCatalogSource = 'current_request' | 'session_catalog' | 'none'
+
+export type ToolCatalogDriftKind =
+  | 'added_tool'
+  | 'removed_tool'
+  | 'schema_changed'
+  | 'missing_current_tools_with_session_catalog'
+  | 'missing_current_tools_without_catalog'
+  | 'history_references_unknown_tool'
+
+export interface ToolCatalogSnapshot {
+  sessionId: string | null
+  fingerprint: string
+  tools: ReadonlyArray<NormalizedToolDefinition>
+  allowedToolNames: ReadonlyArray<string>
+  schemaHashes: Readonly<Record<string, string>>
+  source: 'current_request' | 'session_catalog'
+  createdTurnIndex: number
+  updatedTurnIndex: number
+}
+
+export interface ToolCatalogDiagnostics {
+  source: ToolCatalogSource
+  fingerprint?: string
+  driftKinds: ToolCatalogDriftKind[]
+  blocked: boolean
+  reason?: string
+}
+
 export interface ToolCallDiagnostics {
   requestId?: string
   clientAdapterId: string
@@ -53,6 +82,18 @@ export interface ToolCallDiagnostics {
   toolChoiceMode?: 'auto' | 'none' | 'required' | 'forced'
   forcedToolName?: string
   allowedToolNames?: string[]
+  catalogSource?: ToolCatalogSource
+  catalogFingerprint?: string
+  catalogDriftKinds?: ToolCatalogDriftKind[]
+  catalogBlocked?: boolean
+  availabilityDriftDetected?: boolean
+  availabilityRetryResult?: 'skipped' | 'attempted' | 'succeeded' | 'failed'
+}
+
+export interface AvailabilityRetryRequest {
+  type: 'availability_retry'
+  catalogFingerprint: string
+  clarification: string
 }
 
 export interface ToolCallingPlan {
@@ -66,6 +107,10 @@ export interface ToolCallingPlan {
   toolChoiceMode: 'auto' | 'none' | 'required' | 'forced'
   allowedToolNames: Set<string>
   forcedToolName?: string
+  catalogSnapshot?: ToolCatalogSnapshot
+  catalogDiagnostics: ToolCatalogDiagnostics
+  availabilityRetryAllowed: boolean
+  availabilityRetryAttempted?: boolean
   diagnostics: ToolCallDiagnostics
 }
 

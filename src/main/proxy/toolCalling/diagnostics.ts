@@ -49,3 +49,66 @@ export function buildSmokeFixture(clientAdapterId: ToolClientAdapterId) {
       : 'auto',
   }
 }
+
+export type ToolDiagnosticEventType =
+  | 'tool_catalog_resolved'
+  | 'tool_catalog_drift_detected'
+  | 'tool_contract_injected'
+  | 'tool_availability_drift_detected'
+  | 'tool_availability_retry_result'
+  | 'provider_empty_output'
+
+export interface ToolDiagnosticEvent {
+  type: ToolDiagnosticEventType
+  requestId?: string
+  providerId?: string
+  model?: string
+  catalogSource?: string
+  catalogFingerprint?: string
+  toolNames?: string[]
+  schemaHashes?: Record<string, string>
+  driftKinds?: string[]
+  protocol?: string
+  headerVersion?: number
+  retryResult?: 'skipped' | 'attempted' | 'succeeded' | 'failed'
+  responseMode?: 'streaming' | 'non_streaming'
+  timestamp: number
+}
+
+const MAX_TOOL_DIAGNOSTIC_EVENTS = 200
+let toolDiagnosticEvents: ToolDiagnosticEvent[] = []
+
+export function recordToolDiagnosticEvent(event: Omit<ToolDiagnosticEvent, 'timestamp'>): ToolDiagnosticEvent {
+  const safeEvent: ToolDiagnosticEvent = {
+    type: event.type,
+    requestId: event.requestId,
+    providerId: event.providerId,
+    model: event.model,
+    catalogSource: event.catalogSource,
+    catalogFingerprint: event.catalogFingerprint,
+    toolNames: event.toolNames ? [...event.toolNames] : undefined,
+    schemaHashes: event.schemaHashes ? { ...event.schemaHashes } : undefined,
+    driftKinds: event.driftKinds ? [...event.driftKinds] : undefined,
+    protocol: event.protocol,
+    headerVersion: event.headerVersion,
+    retryResult: event.retryResult,
+    responseMode: event.responseMode,
+    timestamp: Date.now(),
+  }
+
+  toolDiagnosticEvents = [...toolDiagnosticEvents, safeEvent].slice(-MAX_TOOL_DIAGNOSTIC_EVENTS)
+  return safeEvent
+}
+
+export function getToolDiagnosticEvents(): ToolDiagnosticEvent[] {
+  return toolDiagnosticEvents.map((event) => ({
+    ...event,
+    toolNames: event.toolNames ? [...event.toolNames] : undefined,
+    schemaHashes: event.schemaHashes ? { ...event.schemaHashes } : undefined,
+    driftKinds: event.driftKinds ? [...event.driftKinds] : undefined,
+  }))
+}
+
+export function clearToolDiagnosticEvents(): void {
+  toolDiagnosticEvents = []
+}

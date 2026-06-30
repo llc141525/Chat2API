@@ -57,14 +57,18 @@ export function buildToolCall(
   name: string,
   args: string,
   rawText?: string,
+  tools: NormalizedToolDefinition[] = [],
 ): ToolCall {
+  const normalizedArgs = normalizeArguments(args)
+  const repairedArgs = repairArgumentsForSchema(name, normalizedArgs, tools)
+
   return {
     id,
     index,
     type: 'function',
     function: {
       name,
-      arguments: normalizeArguments(args),
+      arguments: repairedArgs,
     },
     ...(rawText ? { rawText } : {}),
   } as ToolCall
@@ -147,6 +151,54 @@ export function addParameter(target: Record<string, unknown>, name: string, valu
   } else {
     target[name] = [existing, value]
   }
+}
+
+export function repairArgumentsForSchema(
+  toolName: string,
+  args: string,
+  tools: NormalizedToolDefinition[],
+): string {
+  const tool = tools.find((candidate) => candidate.name === toolName)
+  if (!tool) return args
+
+  const parsed = safeParseObject(args)
+  if (!parsed) return args
+
+  const parameters = tool.parameters ?? {}
+  const properties = isRecord(parameters.properties) ? parameters.properties : {}
+  let repaired: Record<string, unknown> = { ...parsed }
+
+  for (const [name, schema] of Object.entries(properties)) {
+    if (!isRecord(schema)) continue
+    if (schema.type === 'array' && repaired[name] !== undefined && !Array.isArray(repaired[name])) {
+      repaired = { ...repaired, [name]: [repaired[name]] }
+    }
+  }
+
+  const required = Array.isArray(parameters.required) ? parameters.required : []
+  if (
+    required.includes('prompt')
+    && repaired.prompt === undefined
+    && typeof repaired.description === 'string'
+    && repaired.description.trim()
+  ) {
+    repaired = { ...repaired, prompt: repaired.description }
+  }
+
+  return JSON.stringify(repaired)
+}
+
+function safeParseObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value)
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 export function renderToolList(tools: NormalizedToolDefinition[]): string {

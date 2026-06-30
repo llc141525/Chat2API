@@ -3,8 +3,8 @@
  * Enables tool calling for models without native function calling support
  */
 
-import { ChatCompletionTool, ChatMessage } from '../types'
-import { CLIENT_SIGNATURES, GENERAL_TOOL_SIGNATURES, hasGeneralToolPromptSignature } from '../constants/signatures'
+import type { ChatCompletionTool, ChatMessage } from '../types.ts'
+import { CLIENT_SIGNATURES, GENERAL_TOOL_SIGNATURES, hasGeneralToolPromptSignature } from '../constants/signatures.ts'
 
 // Re-export for backward compatibility
 export const TOOL_PROMPT_SIGNATURES = {
