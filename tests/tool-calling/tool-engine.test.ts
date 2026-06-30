@@ -58,7 +58,25 @@ test('OpenAI tools plus DeepSeek choose managed prompt', () => {
   assert.equal(result.tools, undefined)
   assert.equal(result.plan.tools.length, 2)
   assert.equal(result.plan.catalogSnapshot?.fingerprint, result.plan.diagnostics.catalogFingerprint)
+  assert.match(result.messages[0].content as string, /Tool Contract Header/)
+  assert.match(result.messages[0].content as string, /catalog_fingerprint:/)
   assert.match(result.messages[0].content as string, /<\|CHAT2API\|tool_calls>/)
+})
+
+test('managed prompt includes Tool Contract Header from catalog snapshot', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request(),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: `engine-catalog-${Date.now()}-header`,
+  })
+
+  const content = result.messages[0].content as string
+  assert.match(content, /Tool Contract Header/)
+  assert.match(content, /contract_header_version: 1/)
+  assert.match(content, new RegExp(`catalog_fingerprint: ${result.plan.catalogSnapshot?.fingerprint}`))
+  assert.match(content, /allowed_tools: default_api:list_dir, default_api:read_file/)
+  assert.match(content, /The tools listed in this contract are available for this turn/)
 })
 
 test('explicit Cherry Studio MCP adapter uses managed prompt and preserves tool names', () => {
@@ -171,6 +189,7 @@ test('tool session key reuses catalog snapshot across omitted-tool turns', () =>
 
   assert.equal(first.plan.catalogSnapshot?.fingerprint, second.plan.catalogSnapshot?.fingerprint)
   assert.equal(second.plan.catalogDiagnostics.source, 'session_catalog')
+  assert.match(second.messages[0].content as string, /catalog_fingerprint:/)
 })
 
 test('requestId falls back as the tool session key for omitted-tool follow-up turns', () => {
@@ -201,6 +220,7 @@ test('requestId falls back as the tool session key for omitted-tool follow-up tu
 
   assert.equal(first.plan.catalogSnapshot?.fingerprint, second.plan.catalogSnapshot?.fingerprint)
   assert.equal(second.plan.catalogDiagnostics.source, 'session_catalog')
+  assert.match(second.messages[0].content as string, /catalog_fingerprint:/)
 })
 
 test('legacy managed xml prompt without a catalog throws managed_history_requires_catalog', () => {
@@ -238,6 +258,19 @@ test('forced function choice narrows allowed tool names to the selected function
   assert.equal(result.plan.toolChoiceMode, 'forced')
   assert.equal(result.plan.forcedToolName, 'default_api:list_dir')
   assert.deepEqual(result.plan.tools.map((tool) => tool.name), ['default_api:list_dir'])
+})
+
+test('forced function choice contract header only exposes the forced tool for this turn', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({ tool_choice: { type: 'function', function: { name: 'default_api:list_dir' } } }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-stage3-forced-header',
+  })
+
+  const content = result.messages[0].content as string
+  assert.match(content, /allowed_tools: default_api:list_dir/)
+  assert.doesNotMatch(content, /allowed_tools: .*default_api:read_file/)
 })
 
 test('non-stream parsing only accepts the selected provider protocol', () => {

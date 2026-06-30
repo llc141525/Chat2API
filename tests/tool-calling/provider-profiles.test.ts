@@ -40,3 +40,12 @@ test('unknown providers inherit catalog contract defaults', () => {
   assert.equal(profile.contractHeaderVersion, 1)
   assert.equal(profile.availabilityDriftRetry, 'enabled')
 })
+
+test('managed provider profiles expose contract header and availability retry defaults', () => {
+  for (const providerId of ['qwen', 'qwen-ai', 'glm']) {
+    const profile = getProviderToolProfile(providerId)
+    assert.equal(profile.preferredManagedProtocol, 'managed_xml')
+    assert.equal(profile.contractHeaderVersion, 1)
+    assert.equal(profile.availabilityDriftRetry, 'enabled')
+  }
+})

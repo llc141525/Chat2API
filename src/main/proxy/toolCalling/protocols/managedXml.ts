@@ -111,6 +111,24 @@ Tool results will be provided as Chat2API XML result blocks:
   },
 }
 
+export interface ManagedXmlContractHeaderInput {
+  catalogFingerprint: string
+  allowedToolNames: string[]
+  protocol: string
+  contractHeaderVersion: number
+}
+
+export function renderManagedXmlContractHeader(input: ManagedXmlContractHeaderInput): string {
+  return [
+    'Tool Contract Header',
+    `contract_header_version: ${input.contractHeaderVersion}`,
+    `protocol: ${input.protocol}`,
+    `catalog_fingerprint: ${input.catalogFingerprint}`,
+    `allowed_tools: ${input.allowedToolNames.join(', ')}`,
+    'The tools listed in this contract are available for this turn because they were provided by the runtime.',
+  ].join('\n')
+}
+
 interface ParseBlockOptions {
   blockPattern: RegExp
   invokePattern: RegExp

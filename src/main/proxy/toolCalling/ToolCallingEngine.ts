@@ -15,7 +15,9 @@ import {
 import { getToolProtocol } from './protocols/index.ts'
 import { getToolClientAdapter } from './clientAdapters/index.ts'
 import { buildToolCallingRuntimePlan } from './runtimePlan.ts'
-import type { NormalizedToolDefinition, ToolCallingPlan, ToolCallingTransformResult, ToolProtocolId } from './types.ts'
+import { getProviderToolProfile } from './providerProfiles.ts'
+import { renderManagedXmlContractHeader } from './protocols/managedXml.ts'
+import type { ToolCallingPlan, ToolCallingTransformResult } from './types.ts'
 
 export class ToolCallingEngine {
   private readonly config: ToolCallingConfig
@@ -61,8 +63,9 @@ export class ToolCallingEngine {
       }
     }
 
+    const profile = getProviderToolProfile(provider.id)
     return {
-      messages: injectPrompt(request.messages, renderPrompt(plan.protocol, plan.tools, this.config)),
+      messages: injectPrompt(request.messages, renderPrompt(plan, this.config, profile.contractHeaderVersion)),
       tools: undefined,
       plan,
     }
@@ -116,20 +119,29 @@ export class ToolCallingEngine {
 }
 
 function renderPrompt(
-  protocol: ToolProtocolId,
-  tools: NormalizedToolDefinition[],
+  plan: ToolCallingPlan,
   config: ToolCallingConfig,
+  contractHeaderVersion: number,
 ): string {
-  const prompt = getToolProtocol(protocol).renderPrompt(tools)
+  const prompt = getToolProtocol(plan.protocol).renderPrompt(plan.tools)
+  const contractHeader = plan.catalogSnapshot
+    ? renderManagedXmlContractHeader({
+        catalogFingerprint: plan.catalogSnapshot.fingerprint,
+        allowedToolNames: [...plan.allowedToolNames],
+        protocol: plan.protocol,
+        contractHeaderVersion,
+      })
+    : ''
+  const fullPrompt = contractHeader ? `${contractHeader}\n\n${prompt}` : prompt
   const customPromptTemplate = config.diagnosticsEnabled
     ? config.advanced.customPromptTemplate
     : undefined
-  if (!customPromptTemplate) return prompt
+  if (!customPromptTemplate) return fullPrompt
 
   return customPromptTemplate
-    .replace(/\{\{tools\}\}/g, prompt)
-    .replace(/\{\{tool_names\}\}/g, tools.map((tool) => tool.name).join(', '))
-    .replace(/\{\{format\}\}/g, protocol)
+    .replace(/\{\{tools\}\}/g, fullPrompt)
+    .replace(/\{\{tool_names\}\}/g, plan.tools.map((tool) => tool.name).join(', '))
+    .replace(/\{\{format\}\}/g, plan.protocol)
 }
 
 function injectPrompt(messages: ChatMessage[], prompt: string): ChatMessage[] {
