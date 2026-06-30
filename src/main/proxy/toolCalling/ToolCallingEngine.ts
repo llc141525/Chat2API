@@ -18,6 +18,7 @@ import { buildToolCallingRuntimePlan } from './runtimePlan.ts'
 import { getProviderToolProfile } from './providerProfiles.ts'
 import { renderManagedXmlContractHeader } from './protocols/managedXml.ts'
 import { buildAvailabilityRetryClarification, detectAvailabilityDrift } from './availabilityDrift.ts'
+import { recordToolDiagnosticEvent } from './diagnostics.ts'
 import type { AvailabilityRetryRequest, ToolCallingPlan, ToolCallingTransformResult } from './types.ts'
 
 export class ToolCallingEngine {
@@ -56,6 +57,32 @@ export class ToolCallingEngine {
     })
     const shouldInjectPrompt = plan.shouldInjectPrompt
 
+    if (plan.catalogSnapshot) {
+      recordToolDiagnosticEvent({
+        type: 'tool_catalog_resolved',
+        requestId,
+        providerId: provider.id,
+        model: actualModel,
+        catalogSource: plan.catalogDiagnostics.source,
+        catalogFingerprint: plan.catalogSnapshot.fingerprint,
+        toolNames: [...plan.catalogSnapshot.allowedToolNames],
+        schemaHashes: { ...plan.catalogSnapshot.schemaHashes },
+        driftKinds: [...plan.catalogDiagnostics.driftKinds],
+        responseMode: request.stream ? 'streaming' : 'non_streaming',
+      })
+      if (plan.catalogDiagnostics.driftKinds.length > 0) {
+        recordToolDiagnosticEvent({
+          type: 'tool_catalog_drift_detected',
+          requestId,
+          providerId: provider.id,
+          model: actualModel,
+          catalogFingerprint: plan.catalogSnapshot.fingerprint,
+          driftKinds: [...plan.catalogDiagnostics.driftKinds],
+          responseMode: request.stream ? 'streaming' : 'non_streaming',
+        })
+      }
+    }
+
     if (!shouldInjectPrompt) {
       return {
         messages: request.messages,
@@ -65,6 +92,17 @@ export class ToolCallingEngine {
     }
 
     const profile = getProviderToolProfile(provider.id)
+    recordToolDiagnosticEvent({
+      type: 'tool_contract_injected',
+      requestId,
+      providerId: provider.id,
+      model: actualModel,
+      catalogFingerprint: plan.catalogSnapshot?.fingerprint,
+      toolNames: plan.catalogSnapshot ? [...plan.catalogSnapshot.allowedToolNames] : undefined,
+      protocol: plan.protocol,
+      headerVersion: profile.contractHeaderVersion,
+      responseMode: request.stream ? 'streaming' : 'non_streaming',
+    })
     return {
       messages: injectPrompt(request.messages, renderPrompt(plan, this.config, profile.contractHeaderVersion)),
       tools: undefined,
@@ -223,6 +261,25 @@ function maybeBuildAvailabilityRetry(
   plan.availabilityRetryAttempted = true
   plan.diagnostics.availabilityDriftDetected = true
   plan.diagnostics.availabilityRetryResult = 'attempted'
+
+  recordToolDiagnosticEvent({
+    type: 'tool_availability_drift_detected',
+    requestId: plan.diagnostics.requestId,
+    providerId: plan.providerId,
+    model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
+    catalogFingerprint: plan.catalogSnapshot.fingerprint,
+    toolNames: [...plan.catalogSnapshot.allowedToolNames],
+    responseMode: 'non_streaming',
+  })
+  recordToolDiagnosticEvent({
+    type: 'tool_availability_retry_result',
+    requestId: plan.diagnostics.requestId,
+    providerId: plan.providerId,
+    model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
+    catalogFingerprint: plan.catalogSnapshot.fingerprint,
+    retryResult: 'attempted',
+    responseMode: 'non_streaming',
+  })
 
   return {
     type: 'availability_retry',
