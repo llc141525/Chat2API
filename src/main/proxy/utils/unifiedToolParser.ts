@@ -1,6 +1,9 @@
 /**
  * Unified Tool Parser Module
  * Parses tool calls from multiple formats (bracket, XML, Anthropic, JSON)
+ *
+ * Legacy parser path. Managed tool runtime must not depend on this module.
+ * New managed XML parsing belongs under src/main/proxy/toolRuntime/.
  */
 
 import { ToolCall } from '../types'

@@ -42,6 +42,16 @@ function Test-ContainsAny([string]$Text, [string[]]$Needles) {
     return $false
 }
 
+function Invoke-OpenCodeDebug([string[]]$Args, [string]$OutputPath) {
+    $output = & opencode @Args 2>&1
+    $exit = $LASTEXITCODE
+    $output | Out-File -FilePath $OutputPath -Encoding utf8
+    if ($exit -ne 0) {
+        Fail "opencode $($Args -join ' ') failed with code $exit"
+    }
+    return ($output -join "`n")
+}
+
 Write-Host "============================================"
 Write-Host " Chat2API Final Agent Capability Probe"
 Write-Host " Model: $Model"
@@ -57,10 +67,24 @@ $inputPath = "tests/agent-capability/input.txt"
 $promptPath = "tests/agent-capability/prompt.md"
 $eventsPath = "$probeDir/opencode-events.ndjson"
 $resultPath = "$probeDir/result.json"
+$skillDebugPath = "$probeDir/opencode-debug-skill.json"
+$agentDebugPath = "$probeDir/opencode-debug-agent.json"
 
 if (-not (Test-Path $inputPath)) { Fail "Input file not found: $inputPath" }
 if (-not (Test-Path $promptPath)) { Fail "Prompt file not found: $promptPath" }
 if (-not (Get-Command opencode -ErrorAction SilentlyContinue)) { Fail "opencode command not found in PATH" }
+
+$skillDebug = Invoke-OpenCodeDebug @("debug", "skill") $skillDebugPath
+if ($skillDebug.IndexOf('"name": "agent-capability-probe"', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+    Fail "agent-capability-probe is not visible in opencode debug skill"
+}
+Pass "agent-capability-probe is visible in opencode debug skill"
+
+$agentDebug = Invoke-OpenCodeDebug @("debug", "agent", "capability-probe") $agentDebugPath
+if ($agentDebug.IndexOf('"skill": true', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+    Fail "capability-probe agent does not expose the skill tool"
+}
+Pass "capability-probe agent exposes the skill tool"
 
 $inputResolved = Resolve-Path $inputPath
 $inputBytes = [System.IO.File]::ReadAllBytes($inputResolved)
@@ -83,7 +107,7 @@ $expected = [ordered]@{
 $prompt = Get-Content -Raw $promptPath
 
 Write-Host "Running OpenCode..."
-$rawOutput = & opencode run --model $Model --format json --dir . $prompt 2>&1
+$rawOutput = & opencode run --model $Model --agent capability-probe --format json --dir . $prompt 2>&1
 $exitCode = $LASTEXITCODE
 $rawOutput | Out-File -FilePath $eventsPath -Encoding utf8
 

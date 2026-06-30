@@ -5,6 +5,9 @@
  * - Chat2API XML: <|CHAT2API|tool_calls><|CHAT2API|invoke name="..."><|CHAT2API|parameter name="..."><![CDATA[value]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>
  * - Bracket format: [function_calls][call:name]{args}[/call][/function_calls]
  *
+ * Legacy parser path. Managed tool runtime must not depend on this module.
+ * New managed XML parsing belongs under src/main/proxy/toolRuntime/.
+ *
  * All formats are normalized to the standard OpenAI tool_calls format
  */
 

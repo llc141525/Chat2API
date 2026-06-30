@@ -5,6 +5,9 @@
  * Strategy: Buffer content when [function_calls] marker is detected,
  * parse tool calls and emit them as tool_calls delta instead of text content
  *
+ * Legacy parser path. Managed tool runtime must not depend on this module.
+ * New managed XML parsing belongs under src/main/proxy/toolRuntime/.
+ *
  * @deprecated This module is being phased out. Use the new unified toolParser module instead.
  * Import from './toolParser/index.ts' for the latest unified parsing functionality.
  */

@@ -67,6 +67,10 @@ function sseEvent(data: unknown, event?: string): string {
 
 const managedXmlToolCall = '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath"><![CDATA[/tmp/a]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>'
 
+function countOccurrences(value: string, needle: string): number {
+  return value.split(needle).length - 1
+}
+
 // ============================================================
 // ROOT CAUSE: GLM forwarder BYPASSES ToolCallingEngine
 // ============================================================
@@ -135,6 +139,8 @@ test('GLM adapter moves managed XML tool prompt to the final instruction positio
   const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
 
   assert.equal(promptMessages.length, 1)
+  assert.equal(countOccurrences(text, '## Available Tools'), 1)
+  assert.equal(countOccurrences(text, '<|CHAT2API|tool_calls>'), 1)
   assert.match(text, /^System: You are a coding assistant\./)
   assert.match(text, /User: Read tests\/agent-capability\/input\.txt/)
   assert.doesNotMatch(text, /System: You are a coding assistant\.[\s\S]*## Available Tools[\s\S]*User:/)
