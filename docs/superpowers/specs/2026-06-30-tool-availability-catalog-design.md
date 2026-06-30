@@ -23,11 +23,12 @@ This phase introduces an explicit `ToolCatalogStore`, immutable per-turn `ToolCa
 2. `ToolCatalogStore` is the single source of truth for available tools across managed turns.
 3. `sessionManager` may reference catalog identity, but it must not own tool availability truth.
 4. Every managed turn consumes an immutable `ToolCatalogSnapshot`.
-5. Prompt-rendered tools, allowed tool names, validator input, and protocol rendering must derive from the same snapshot.
-6. Drift handling is structural and bounded. It never invents tool semantics.
-7. External client boundaries remain OpenAI-compatible.
-8. Provider prompt protocol remains profile-specific. Managed XML stays valid for Qwen, GLM, and Qwen AI unless a provider profile explicitly selects another protocol.
-9. Diagnostics record structure facts only and avoid logging tool arguments or full schemas.
+5. A `ToolCatalogSnapshot` is immutable within a single tool turn execution. Any catalog change creates a new snapshot with a new fingerprint.
+6. Prompt-rendered tools, allowed tool names, validator input, and protocol rendering must derive from the same snapshot.
+7. Drift handling is structural and bounded. It never invents tool semantics.
+8. External client boundaries remain OpenAI-compatible.
+9. Provider prompt protocol remains profile-specific. Managed XML stays valid for Qwen, GLM, and Qwen AI unless a provider profile explicitly selects another protocol.
+10. Diagnostics record structure facts only and avoid logging tool arguments or full schemas.
 
 ## Target Boundary Model
 
@@ -70,6 +71,13 @@ interface ToolCatalogSnapshot {
   updatedTurnIndex: number
 }
 ```
+
+Hard invariant:
+
+- A `ToolCatalogSnapshot` is immutable for the full duration of one tool turn execution.
+- Any change to normalized tools, allowed tool names, schema hashes, protocol-relevant metadata, or availability-affecting tool choice creates a new snapshot.
+- Every new snapshot must have a new fingerprint.
+- Prompt rendering, validation, protocol mapping, availability drift detection, retry, and response assembly for one turn must all reference the same snapshot fingerprint.
 
 The fingerprint must be derived from normalized structural facts:
 
@@ -197,6 +205,8 @@ The retry may only:
 - reinject the same full tool list
 - reinject the same `Tool Contract Header`
 - add one structural clarification that the runtime-provided catalog is authoritative for the current turn
+
+The retry must preserve the original turn snapshot fingerprint. If catalog state changes before the retry can run, the original retry is invalid and the runtime must start a new tool turn plan from the new snapshot or block with diagnostics.
 
 The retry must not:
 
