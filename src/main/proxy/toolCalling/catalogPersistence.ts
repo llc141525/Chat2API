@@ -64,3 +64,13 @@ export function createFileCatalogPersistence(filePath: string): CatalogPersisten
     },
   }
 }
+
+export function createMemoryPersistence(): CatalogPersistenceStore {
+  const store = new Map<string, ToolCatalogSnapshot>()
+  return {
+    save(sessionId, snapshot) { store.set(sessionId, snapshot) },
+    load(sessionId) { return store.get(sessionId) },
+    delete(sessionId) { store.delete(sessionId) },
+    loadAll() { return new Map(store) },
+  }
+}
