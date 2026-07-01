@@ -1,6 +1,13 @@
 import type { ChatMessage, ChatCompletionTool, ToolCall } from '../types.ts'
 
 export type ToolCallingMode = 'managed' | 'disabled'
+export type DisabledReason =
+  | 'mode_off'
+  | 'tool_choice_none'
+  | 'no_tools'
+  | 'provider_not_supported'
+  | 'no_tools_with_managed_history'
+  | 'catalog_blocked'
 export type ToolProtocolId =
   | 'openai_chat'
   | 'managed_bracket'
@@ -32,7 +39,7 @@ export interface NormalizedToolResult {
   content: string
 }
 
-export type ToolCatalogSource = 'current_request' | 'session_catalog' | 'none'
+export type ToolCatalogSource = 'current_request' | 'session_catalog' | 'restored_from_history' | 'none'
 
 export type ToolCatalogDriftKind =
   | 'added_tool'
@@ -41,6 +48,7 @@ export type ToolCatalogDriftKind =
   | 'missing_current_tools_with_session_catalog'
   | 'missing_current_tools_without_catalog'
   | 'history_references_unknown_tool'
+  | 'restored_from_history'
 
 export interface ToolCatalogSnapshot {
   sessionId: string | null
@@ -48,7 +56,7 @@ export interface ToolCatalogSnapshot {
   tools: ReadonlyArray<NormalizedToolDefinition>
   allowedToolNames: ReadonlyArray<string>
   schemaHashes: Readonly<Record<string, string>>
-  source: 'current_request' | 'session_catalog'
+  source: 'current_request' | 'session_catalog' | 'restored_from_history'
   createdTurnIndex: number
   updatedTurnIndex: number
 }

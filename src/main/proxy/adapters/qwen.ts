@@ -1,4 +1,9 @@
 /**
+ * ADR-001: Tool prompt injection is owned by ToolCallingEngine.
+ * This file is a Provider Adapter — it must NEVER import
+ * hasToolPromptInjected, toolsToSystemPrompt, TOOL_WRAP_HINT,
+ * or shouldInjectToolPrompt.
+ *
  * Qwen Adapter
  * Implements Qwen (Tongyi Qianwen) web API protocol
  * Based on new chat2.qianwen.com API
@@ -13,7 +18,7 @@ import { createParser } from 'eventsource-parser'
 import type { Account, Provider } from '../../store/types.ts'
 import { hasToolUse, parseToolUse } from '../promptToolUse.ts'
 import type { ToolCall } from '../promptToolUse.ts'
-import { hasToolPromptInjected } from '../utils/tools.ts'
+
 import { parseToolCallsFromText, type ParsedToolCall } from '../utils/toolParser.ts'
 import { createBaseChunk } from '../utils/streamToolHandler.ts'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
@@ -436,10 +441,6 @@ export class QwenAdapter {
     console.log('[Qwen] Using model:', actualModel)
 
     // Tool prompts are injected by ToolCallingEngine in the forwarder.
-    // Keep this legacy fallback disabled to avoid mixing XML and bracket protocols.
-    if (request.tools && request.tools.length > 0 && !hasToolPromptInjected(request.messages)) {
-      console.warn('[Qwen] Direct adapter tool injection is disabled; use ToolCallingEngine before calling adapter')
-    }
 
     const timestamp = Date.now()
     const nonce = generateNonce()

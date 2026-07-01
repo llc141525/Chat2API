@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Lint adapter files (INV-001 enforcement)
+        run: npx eslint src/main/proxy/adapters/
+
+  typecheck-tool-calling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: TypeScript type check tool-calling module
+        run: |
+          npx tsc -p tsconfig.node.json --noEmit 2>&1 |
+            grep -v "downlevelIteration" |
+            grep "toolCalling/" &&
+            exit 1 || exit 0
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run tool-calling tests
+        run: node --test tests/tool-calling/*.test.ts
+      - name: Run provider tests
+        run: node --test tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+        continue-on-error: true

@@ -223,10 +223,10 @@ test('requestId falls back as the tool session key for omitted-tool follow-up tu
   assert.match(second.messages[0].content as string, /catalog_fingerprint:/)
 })
 
-test('legacy managed xml prompt without a catalog throws managed_history_requires_catalog', () => {
+test('legacy managed xml prompt without a catalog restores default_api:read_file from history', () => {
   const engine = new ToolCallingEngine()
 
-  assert.throws(() => engine.transformRequest({
+  const result = engine.transformRequest({
     request: request({
       tools: undefined,
       messages: [
@@ -245,7 +245,11 @@ test('legacy managed xml prompt without a catalog throws managed_history_require
     }),
     provider,
     actualModel: 'deepseek-chat',
-  }), /managed_history_requires_catalog|tool_catalog_blocked/)
+  })
+
+  assert.equal(result.plan.mode, 'managed')
+  assert.equal(result.plan.catalogDiagnostics.source, 'restored_from_history')
+  assert.ok([...result.plan.allowedToolNames].includes('default_api:read_file'))
 })
 
 test('forced function choice narrows allowed tool names to the selected function', () => {

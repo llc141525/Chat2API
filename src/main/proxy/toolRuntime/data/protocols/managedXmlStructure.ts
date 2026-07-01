@@ -235,9 +235,23 @@ function findAnyClose(value: string, start: number): number {
 }
 
 function unwrapPayload(value: string): { rawPayload: string; payloadEncoding: PayloadEncoding } {
-  const cdata = value.match(/^\s*<!\[CDATA\[([\s\S]*?)(?:\]\]>)?\s*$/)
-  if (cdata) {
-    return { rawPayload: cdata[1], payloadEncoding: 'cdata' }
+  if (value.includes(']]>') && !value.includes('<![CDATA[')) {
+    return { rawPayload: '', payloadEncoding: 'text' }
+  }
+
+  const cdataOpen = value.indexOf('<![CDATA[')
+  if (cdataOpen !== -1) {
+    const afterOpen = value.slice(cdataOpen + 9)
+    const cdataClose = afterOpen.indexOf(']]>')
+    if (cdataClose === -1) {
+      return { rawPayload: '', payloadEncoding: 'text' }
+    }
+    const inner = afterOpen.slice(0, cdataClose)
+    const trailing = afterOpen.slice(cdataClose + 3).trim()
+    if (trailing.length > 0) {
+      return { rawPayload: '', payloadEncoding: 'text' }
+    }
+    return { rawPayload: inner, payloadEncoding: 'cdata' }
   }
 
   const trimmed = value.trim()

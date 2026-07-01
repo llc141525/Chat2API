@@ -35,6 +35,15 @@ npm run dev:win 2>&1 | Tee-Object -FilePath .\dev.log
 - Do not remove unrelated user changes in the worktree.
 - When adding or updating a built-in provider, update both `src/main/providers/builtin/<provider>.ts` and the matching entry in `src/main/store/types.ts`.
 
+## Tool Injection Rules
+
+The following invariants are enforced across the codebase. Violations must be caught in code review and blocked by CI.
+
+- INV-001 [Single Ownership]: `ToolCallingEngine` is the sole owner of tool prompt injection. Provider Adapters must never import `hasToolPromptInjected`, `toolsToSystemPrompt`, `TOOL_WRAP_HINT`, or `shouldInjectToolPrompt`.
+- INV-002 [Stateless Fallback]: Any tool resolution logic depending on Session Store must have a stateless degradation path: `Session Store → Message History Extraction → Request Tools → Safe Empty`. Returning an empty tool list without fallback is forbidden.
+- INV-003 [Delete = Risk]: Deleting any tool/message processing code during refactoring requires explicit declaration of original purpose and equivalent coverage proof in the PR description. Unprovable deletions must be retained with `// TODO: investigate why this exists`.
+- INV-004 [Client Quirks Matrix]: All tool-calling changes must be verified against the known client behavior quirks list, not solely against OpenAI official documentation.
+
 ## Tool Calling Requirements
 
 Chat2API must support OpenCode-style tool use through providers that do not expose native OpenAI tool calling.
@@ -84,7 +93,7 @@ npm run dev:win 2>&1 | Tee-Object -FilePath .\dev.log
 Then run the OpenCode probe with the model under test:
 
 ```powershell
-.\tests\agent-capability\verify-opencode-capability.ps1 -Model "GLM-5.2"
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
 ```
 
 The probe files live in:

@@ -228,8 +228,8 @@ test('forced tool selection uses session catalog when the current turn omits too
   assert.deepEqual(forcedPlan.tools.map((tool) => tool.name), ['weather-test:get_weather'])
 })
 
-test('managed history without catalog throws instead of degrading to a disabled passthrough plan', () => {
-  assert.throws(() => buildToolCallingRuntimePlan({
+test('managed history without catalog restores tools from history and proceeds in managed mode', () => {
+  const plan = buildToolCallingRuntimePlan({
     requestId: 'r7',
     providerId: 'qwen',
     actualModel: 'qwen3-coder',
@@ -256,11 +256,15 @@ test('managed history without catalog throws instead of degrading to a disabled 
       { role: 'tool', tool_call_id: 'call_legacy', content: 'legacy result' },
       { role: 'user', content: 'continue' },
     ],
-  }), /managed_history_requires_catalog|tool_catalog_blocked/)
+  })
+
+  assert.equal(plan.mode, 'managed')
+  assert.equal(plan.catalogDiagnostics.source, 'restored_from_history')
+  assert.deepEqual([...plan.allowedToolNames], ['weather-test:get_weather'])
 })
 
-test('assistant managed xml content without a catalog also blocks instead of degrading to no_tools', () => {
-  assert.throws(() => buildToolCallingRuntimePlan({
+test('assistant managed xml content without a catalog restores bash tool from history', () => {
+  const plan = buildToolCallingRuntimePlan({
     requestId: 'r8',
     providerId: 'qwen',
     actualModel: 'qwen3-coder',
@@ -282,5 +286,9 @@ test('assistant managed xml content without a catalog also blocks instead of deg
       role: 'assistant',
       content: '<|CHAT2API|tool_calls><|CHAT2API|invoke name="bash"></|CHAT2API|tool_calls>' as any,
     }],
-  }), /managed_history_requires_catalog|tool_catalog_blocked/)
+  })
+
+  assert.equal(plan.mode, 'managed')
+  assert.equal(plan.catalogDiagnostics.source, 'restored_from_history')
+  assert.deepEqual([...plan.allowedToolNames], ['bash'])
 })

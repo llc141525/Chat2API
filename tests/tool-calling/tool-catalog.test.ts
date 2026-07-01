@@ -72,7 +72,7 @@ test('omitted tools reuse an existing session catalog without changing fingerpri
   assert.deepEqual(second.diagnostics.driftKinds, ['missing_current_tools_with_session_catalog'])
 })
 
-test('omitted tools with managed history and no catalog block', () => {
+test('omitted tools with managed history and no catalog restore from history as degraded fallback', () => {
   const result = createToolCatalogStore().resolveSnapshot({
     sessionId: 's-missing',
     requestTools: [],
@@ -80,10 +80,10 @@ test('omitted tools with managed history and no catalog block', () => {
     historyToolNames: ['bash'],
   })
 
-  assert.equal(result.blocked, true)
-  assert.equal(result.snapshot, undefined)
-  assert.deepEqual(result.diagnostics.driftKinds, ['missing_current_tools_without_catalog'])
-  assert.equal(result.diagnostics.reason, 'managed_history_requires_catalog')
+  assert.equal(result.blocked, false)
+  assert.equal(result.snapshot?.source, 'restored_from_history')
+  assert.deepEqual(result.snapshot?.allowedToolNames, ['bash'])
+  assert.ok(result.diagnostics.driftKinds.includes('restored_from_history'))
 })
 
 test('added tools create a new snapshot and new fingerprint', () => {
@@ -153,7 +153,7 @@ test('schema changes for historical tools block', () => {
   assert.equal(result.diagnostics.reason, 'historical_tool_schema_changed')
 })
 
-test('request-scoped resolution works without a session id but does not persist', () => {
+test('request-scoped resolution works without a session id and falls back to history', () => {
   const store = createToolCatalogStore()
   const first = store.resolveSnapshot({
     sessionId: null,
@@ -170,7 +170,9 @@ test('request-scoped resolution works without a session id but does not persist'
 
   assert.equal(first.blocked, false)
   assert.equal(first.snapshot?.sessionId, null)
-  assert.equal(second.blocked, true)
+  assert.equal(second.blocked, false)
+  assert.equal(second.snapshot?.source, 'restored_from_history')
+  assert.deepEqual(second.snapshot?.allowedToolNames, ['bash'])
 })
 
 test('resolveToolCatalog uses the shared singleton store', () => {
@@ -188,4 +190,32 @@ test('resolveToolCatalog uses the shared singleton store', () => {
   })
 
   assert.equal(second.snapshot?.fingerprint, first.snapshot?.fingerprint)
+})
+
+test('blocked resolution fingerprint matches returned snapshot fingerprint', () => {
+  const store = createToolCatalogStore()
+  store.resolveSnapshot({
+    sessionId: 'fingerprint-consistency',
+    requestTools: [bashTool],
+    hasManagedToolHistory: false,
+    historyToolNames: [],
+  })
+
+  const changedBash: NormalizedToolDefinition = {
+    ...bashTool,
+    parameters: { type: 'object', properties: { cmd: { type: 'string' } } },
+  }
+  const blocked = store.resolveSnapshot({
+    sessionId: 'fingerprint-consistency',
+    requestTools: [changedBash],
+    hasManagedToolHistory: true,
+    historyToolNames: ['bash'],
+  })
+
+  assert.equal(blocked.blocked, true)
+  assert.equal(
+    blocked.diagnostics.fingerprint,
+    blocked.snapshot?.fingerprint,
+    'Blocked resolution must have consistent fingerprint between snapshot and diagnostics',
+  )
 })

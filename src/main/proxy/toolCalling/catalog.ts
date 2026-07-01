@@ -56,14 +56,31 @@ export function createToolCatalogStore(): ToolCatalogStore {
         }
       }
 
-      if (input.hasManagedToolHistory) {
+      if (input.hasManagedToolHistory && input.historyToolNames.length > 0) {
+        const stubTools: NormalizedToolDefinition[] = input.historyToolNames.map((name) => ({
+          name,
+          description: '',
+          parameters: { type: 'object', additionalProperties: true },
+          source: 'openai' as const,
+        }))
+        const snapshot = buildSnapshot({
+          sessionId: input.sessionId,
+          tools: stubTools,
+          source: 'restored_from_history',
+          createdTurnIndex: ++turnCounter,
+          updatedTurnIndex: ++turnCounter,
+        })
+        if (input.sessionId) {
+          sessions.set(input.sessionId, { snapshot })
+        }
         return {
-          blocked: true,
+          snapshot,
+          blocked: false,
           diagnostics: {
-            source: 'none',
-            driftKinds: ['missing_current_tools_without_catalog'],
-            blocked: true,
-            reason: 'managed_history_requires_catalog',
+            source: 'restored_from_history',
+            fingerprint: snapshot.fingerprint,
+            driftKinds: ['restored_from_history'],
+            blocked: false,
           },
         }
       }
@@ -151,7 +168,7 @@ function canonicalToolNames(names: string[]): string[] {
 function buildSnapshot(input: {
   sessionId: string | null
   tools: NormalizedToolDefinition[]
-  source: 'current_request' | 'session_catalog'
+  source: 'current_request' | 'session_catalog' | 'restored_from_history'
   createdTurnIndex: number
   updatedTurnIndex: number
 }): ToolCatalogSnapshot {

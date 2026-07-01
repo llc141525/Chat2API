@@ -22,7 +22,7 @@ function Get-LineValue([string]$Text, [string]$Key) {
     if (-not $match.Success) {
         Fail "Missing key in input file: $Key"
     }
-    return $match.Groups[1].Value
+    return $match.Groups[1].Value.TrimEnd("`r")
 }
 
 function ConvertTo-StableJson($Value) {
@@ -42,12 +42,12 @@ function Test-ContainsAny([string]$Text, [string[]]$Needles) {
     return $false
 }
 
-function Invoke-OpenCodeDebug([string[]]$Args, [string]$OutputPath) {
-    $output = & opencode @Args 2>&1
+function Invoke-OpenCodeDebug([string[]]$DebugArgs, [string]$OutputPath) {
+    $output = & opencode @DebugArgs 2>&1
     $exit = $LASTEXITCODE
     $output | Out-File -FilePath $OutputPath -Encoding utf8
     if ($exit -ne 0) {
-        Fail "opencode $($Args -join ' ') failed with code $exit"
+        Fail "opencode $($DebugArgs -join ' ') failed with code $exit"
     }
     return ($output -join "`n")
 }
@@ -91,8 +91,13 @@ $inputBytes = [System.IO.File]::ReadAllBytes($inputResolved)
 $inputText = [System.IO.File]::ReadAllText($inputResolved, [System.Text.Encoding]::UTF8)
 $expectedSha256 = (Get-FileHash -Path $inputPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $expectedByteLength = $inputBytes.Length
-$expectedLineCount = ([regex]::Matches($inputText, "`r`n|`n|`r").Count)
-if ($inputText.Length -gt 0) { $expectedLineCount += 1 }
+$newlineMatches = [regex]::Matches($inputText, "`r`n|`n|`r")
+$expectedLineCount = $newlineMatches.Count
+if ($inputText.Length -gt 0 -and $inputText[-1] -ne "`n" -and $inputText[-1] -ne "`r") {
+    $expectedLineCount += 1
+} elseif ($inputText.Length -eq 0) {
+    $expectedLineCount = 0
+}
 
 $expected = [ordered]@{
     skill = "agent-capability-probe"
@@ -107,7 +112,7 @@ $expected = [ordered]@{
 $prompt = Get-Content -Raw $promptPath
 
 Write-Host "Running OpenCode..."
-$rawOutput = & opencode run --model $Model --agent capability-probe --format json --dir . $prompt 2>&1
+$rawOutput = $prompt | & opencode run --model $Model --agent capability-probe --format json --dir . 2>&1
 $exitCode = $LASTEXITCODE
 $rawOutput | Out-File -FilePath $eventsPath -Encoding utf8
 
@@ -169,7 +174,7 @@ $finalDoneSeen = $false
 
 $skillNeedles = @("agent-capability-probe", '"skill"')
 $toolCallNeedles = @("tool_call", "toolcall", "tool_call_delta", "call_tool", "tool.start", "tool.starting", "tool:call", "function_call")
-$toolResultNeedles = @("tool_result", "toolresult", "observation", "tool.finish", "tool.finished", "tool:result")
+$toolResultNeedles = @("tool_result", "toolresult", "observation", "tool.finish", "tool.finished", "tool:result", '"status":"completed"', '"state":{"status":"completed"')
 $nonSkillToolNames = @("read", "bash", "grep", "glob", "list", "edit", "write", "read_file", "Get-Content", "Get-FileHash")
 
 foreach ($event in $events) {

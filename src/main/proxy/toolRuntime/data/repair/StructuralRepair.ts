@@ -11,6 +11,13 @@ export function repairStructure(intent: MalformedToolIntent): StructuralRepairRe
     }
   }
 
+  if (intent.failureKind === 'unterminated_container') {
+    return {
+      status: 'not_repairable',
+      reason: 'Cannot repair unterminated container: model output was truncated',
+    }
+  }
+
   if (intent.parameters.length === 0) {
     return {
       status: 'not_repairable',

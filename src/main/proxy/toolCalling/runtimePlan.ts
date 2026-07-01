@@ -30,7 +30,7 @@ export function buildToolCallingRuntimePlan(input: {
   const catalogToolNames = new Set(catalogTools.map((tool) => tool.name))
 
   if (catalogResolution.blocked) {
-    throw new Error(catalogResolution.diagnostics.reason ?? 'tool_catalog_blocked')
+    console.warn(`[runtimePlan] Catalog blocked (${catalogResolution.diagnostics.reason ?? 'tool_catalog_blocked'}) — continuing with degraded tools`)
   }
 
   if (input.clientRequest.toolChoice.mode === 'forced' && forcedName && !catalogToolNames.has(forcedName)) {
@@ -101,6 +101,7 @@ function getDisabledReason(
   if (toolChoiceMode === 'none') return 'tool_choice_none'
   if (toolCount === 0) {
     if (!hasExistingManagedXmlContext(messages)) return 'no_tools'
+    return 'no_tools_with_managed_history'
   }
   if (!managedSupport && config.mode === 'auto') return 'provider_not_supported'
   return undefined
@@ -127,8 +128,6 @@ function hasExistingManagedXmlContext(messages?: ChatMessage[]): boolean {
   return false
 }
 
-const TOOL_NAME_REGEX = /<\|CHAT2API\|invoke\s+name="([^"]+)"/g
-
 function extractManagedHistoryToolNames(messages?: ChatMessage[]): string[] {
   if (!messages) return []
 
@@ -143,9 +142,8 @@ function extractManagedHistoryToolNames(messages?: ChatMessage[]): string[] {
 
     if ((msg.role !== 'system' && msg.role !== 'assistant') || typeof msg.content !== 'string') continue
 
-    TOOL_NAME_REGEX.lastIndex = 0
-    let match: RegExpExecArray | null
-    while ((match = TOOL_NAME_REGEX.exec(msg.content)) !== null) {
+    const matches = msg.content.matchAll(/<\|CHAT2API\|invoke\s+name="([^"]+)"/g)
+    for (const match of matches) {
       names.add(match[1])
     }
   }

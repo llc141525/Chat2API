@@ -30,6 +30,10 @@ export function detectAvailabilityDrift(plan: ToolCallingPlan, rawAssistantText:
 }
 
 export function buildAvailabilityRetryClarification(plan: ToolCallingPlan): string {
+  if (plan.allowedToolNames.size === 0) {
+    console.warn('[availabilityDrift] buildAvailabilityRetryClarification called with no allowed tools — returning empty clarification')
+    return 'Tool availability clarification:\nno tools available'
+  }
   const allowedToolNames = [...plan.allowedToolNames]
   return [
     'Tool availability clarification:',

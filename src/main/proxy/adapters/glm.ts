@@ -1,4 +1,9 @@
 /**
+ * ADR-001: Tool prompt injection is owned by ToolCallingEngine.
+ * This file is a Provider Adapter — it must NEVER import
+ * hasToolPromptInjected, toolsToSystemPrompt, TOOL_WRAP_HINT,
+ * or shouldInjectToolPrompt.
+ *
  * GLM Adapter
  * Implements GLM (Zhipu Qingyan) web API protocol
  */
@@ -14,14 +19,12 @@ import { createParser } from 'eventsource-parser'
 import FormData from 'form-data'
 import mime from 'mime-types'
 import path from 'path'
-import { hasToolPromptInjected } from '../utils/tools.ts'
-import { parseToolCallsFromText, type ParsedToolCall } from '../utils/toolParser.ts'
+
 import {
   createBaseChunk,
 } from '../utils/streamToolHandler.ts'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
-import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const GLM_API_BASE = 'https://chatglm.cn/chatglm'
@@ -84,6 +87,17 @@ interface ChatCompletionRequest {
 }
 
 const tokenCache = new Map<string, TokenInfo>()
+
+function extractGLMTextContent(content: any): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: any) => c.type === 'text')
+      .map((c: any) => c.text)
+      .join('\n')
+  }
+  return String(content || '')
+}
 
 function extractManagedToolPrompt(messages: GLMMessage[]): { messages: GLMMessage[]; toolsPrompt: string } {
   let toolsPrompt = ''
@@ -335,113 +349,40 @@ export class GLMAdapter {
       })
     }
 
-    // Process messages including tool calls and tool responses
-    const processedMessages = messages.map(msg => {
-      // Handle tool calls in assistant message
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        return {
-          ...msg,
-          content: toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
-            id: tc.id,
-            name: tc.function.name,
-            arguments: tc.function.arguments,
-          }))),
-        }
-      }
-      // Handle tool response message
-      if (msg.role === 'tool' && msg.tool_call_id) {
-        return { 
-          ...msg, 
-          role: 'user' as const,
-          content: toolProfile.formatToolResult({
-            toolCallId: msg.tool_call_id,
-            content: String(msg.content || ''),
-          }),
-        }
-      }
-      return msg
-    })
+    const conversationParts: string[] = []
+    let systemPrompt = ''
 
-    // For multi-turn mode, only send the last user message
-    if (isMultiTurn) {
-      let lastUserIdx = -1
-      for (let i = processedMessages.length - 1; i >= 0; i--) {
-        if (processedMessages[i].role === 'user') {
-          lastUserIdx = i
-          break
-        }
-      }
-      
-      if (lastUserIdx !== -1) {
-        const lastUserMsg = processedMessages[lastUserIdx]
-        let textContent = ''
-        if (typeof lastUserMsg.content === 'string') {
-          textContent = lastUserMsg.content
-        } else if (Array.isArray(lastUserMsg.content)) {
-          textContent = lastUserMsg.content.filter((c) => c.type === 'text').map((c) => c.text).join('')
-        }
-        
-        // Include any tool results after the last user message
-        for (let i = lastUserIdx + 1; i < processedMessages.length; i++) {
-          if (processedMessages[i].role === 'user') {
-            const toolText = typeof processedMessages[i].content === 'string' 
-              ? processedMessages[i].content 
-              : ''
-            textContent += '\n' + toolText
-          }
-        }
-        
-        if (toolsPrompt) {
-          textContent = textContent.trim() + "\n\n" + toolsPrompt
-        }
-        
-        content.push({ type: 'text', text: textContent })
-        return [{ role: 'user', content }]
+    for (const msg of messages) {
+      if (msg.role === 'system') {
+        systemPrompt = extractGLMTextContent(msg.content)
+      } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        conversationParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
+          id: tc.id,
+          name: tc.function.name,
+          arguments: tc.function.arguments,
+        }))))
+      } else if (msg.role === 'tool' && msg.tool_call_id) {
+        conversationParts.push(toolProfile.formatToolResult({
+          toolCallId: msg.tool_call_id,
+          content: extractGLMTextContent(msg.content),
+        }))
+      } else if (msg.role === 'assistant') {
+        conversationParts.push(`Assistant: ${extractGLMTextContent(msg.content)}`)
+      } else if (msg.role === 'user') {
+        conversationParts.push(extractGLMTextContent(msg.content))
       }
     }
 
-    // Extract text from messages
-    if (processedMessages.length < 2) {
-      let textContent = processedMessages.reduce((acc, msg) => {
-        if (typeof msg.content === 'string') {
-          return acc + msg.content + '\n'
-        } else if (Array.isArray(msg.content)) {
-          const textParts = msg.content.filter((c) => c.type === 'text').map((c) => c.text)
-          return acc + textParts.join('') + '\n'
-        }
-        return acc
-      }, '')
+    const userContent = conversationParts.join('\n\n')
+    let textContent = systemPrompt
+      ? `${systemPrompt}\n\nUser: ${userContent}`
+      : userContent
 
-      // Inject tools prompt at the VERY END
-      if (toolsPrompt) {
-        textContent = textContent.trim() + "\n\n" + toolsPrompt
-      }
-
-      content.push({ type: 'text', text: textContent })
-      return [{ role: 'user', content }]
-    }
-
-    let textContent = processedMessages.reduce((acc, msg) => {
-      const role = msg.role
-        .replace('system', 'System')
-        .replace('assistant', 'Assistant')
-        .replace('user', 'User')
-        .replace('tool', 'User')
-      if (typeof msg.content === 'string') {
-        return acc + `${role}: ${msg.content}\n\n`
-      } else if (Array.isArray(msg.content)) {
-        const text = msg.content.filter((c) => c.type === 'text').map((c) => c.text).join('')
-        return acc + `${role}: ${text}\n\n`
-      }
-      return acc
-    }, '')
-
-    // Inject tools prompt at the VERY END
     if (toolsPrompt) {
-      textContent = textContent.trim() + "\n\n" + toolsPrompt
+      textContent = textContent.trimEnd() + '\n\n' + toolsPrompt
     }
 
-    content.push({ type: 'text', text: textContent + 'Assistant: ' })
+    content.push({ type: 'text', text: textContent })
     return [{ role: 'user', content }]
   }
 
@@ -454,11 +395,8 @@ export class GLMAdapter {
     const managedToolPrompt = extractManagedToolPrompt(messages)
 
     // Tool prompts are injected by ToolCallingEngine in the forwarder.
-    // Keep this legacy fallback only for direct adapter callers that still pass tools.
-    let toolsPrompt = managedToolPrompt.toolsPrompt
-    if (request.tools && request.tools.length > 0 && !hasToolPromptInjected(messages)) {
-      console.warn('[GLM] Direct adapter tool injection is disabled; use ToolCallingEngine before calling adapter')
-    }
+    // Adapter only formats already-injected messages via messagesToPrompt.
+    const toolsPrompt = managedToolPrompt.toolsPrompt
 
     // Extract and upload files
     const { fileUrls, imageUrls } = this.extractFileUrls(managedToolPrompt.messages)
@@ -1009,18 +947,7 @@ export class GLMStreamHandler {
                 if (partReasoning) fullReasoning += (fullReasoning.length > 0 ? '\n' : '') + partReasoning
               })
 
-              let cleanContent: string
-              let toolCalls: ParsedToolCall[]
-              if (this.toolCallingPlan?.shouldParseResponse) {
-                const protocol = getToolProtocol(this.toolCallingPlan.protocol)
-                const parsed = protocol.parse(fullText, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
-                cleanContent = parsed.content || fullText
-                toolCalls = parsed.toolCalls || []
-              } else {
-                const result = parseToolCallsFromText(fullText, 'glm')
-                cleanContent = result.content
-                toolCalls = result.toolCalls
-              }
+              const cleanContent = fullText.trim()
 
               resolve({
                 id: this.conversationId,
@@ -1031,11 +958,10 @@ export class GLMStreamHandler {
                     index: 0,
                     message: {
                       role: 'assistant',
-                      content: toolCalls.length > 0 ? null : cleanContent.trim(),
+                      content: cleanContent,
                       reasoning_content: fullReasoning || null,
-                      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
                     },
-                    finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+                    finish_reason: 'stop',
                   },
                 ],
                 usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },

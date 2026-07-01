@@ -1,3 +1,21 @@
+/**
+ * ADR-001: ToolCallingEngine is the SINGLE OWNER of tool prompt injection.
+ *
+ * Ownership means:
+ * - Only ToolCallingEngine.transformRequest() decides whether to inject a
+ *   managed tool prompt into the outgoing messages.
+ * - Provider Adapters MUST NOT import hasToolPromptInjected, toolsToSystemPrompt,
+ *   TOOL_WRAP_HINT, or shouldInjectToolPrompt.
+ * - PromptAdapters (src/main/proxy/adapters/prompt/) may use hasToolPromptInjected
+ *   ONLY for formatting decisions (checking whether a prompt already exists).
+ *   They must never re-inject or modify the tool prompt content.
+ *
+ * If you need to change how/when tool prompts are injected, change it here —
+ * never in an adapter.
+ *
+ * See AGENTS.md → Tool Injection Rules for full invariant definitions.
+ */
+
 import type { ChatCompletionRequest, ChatMessage } from '../types.ts'
 import type { Provider } from '../../store/types.ts'
 import {

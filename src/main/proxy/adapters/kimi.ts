@@ -1,4 +1,9 @@
 /**
+ * ADR-001: Tool prompt injection is owned by ToolCallingEngine.
+ * This file is a Provider Adapter — it must NEVER import
+ * hasToolPromptInjected, toolsToSystemPrompt, TOOL_WRAP_HINT,
+ * or shouldInjectToolPrompt.
+ *
  * Kimi K2.6 Adapter
  * Implements Kimi web API protocol with thinking mode and web search support
  */
@@ -6,7 +11,7 @@
 import axios, { AxiosResponse } from 'axios'
 import { Account, Provider } from '../../store/types'
 import { PassThrough } from 'stream'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected } from '../utils/tools'
+
 import { parseToolCallsFromText } from '../utils/toolParser'
 import { createBaseChunk } from '../utils/streamToolHandler'
 import { createKimiChatPayload, encodeKimiGrpcFrame } from './providerModelOptions'
@@ -155,115 +160,39 @@ export class KimiAdapter {
     return { accessToken: this.token, userId: '' }
   }
 
-  private messagesPrepare(messages: KimiMessage[], toolsPrompt?: string, isMultiTurn: boolean = false): string {
+  private messagesPrepare(messages: KimiMessage[], toolsPrompt?: string): string {
     const toolProfile = getProviderToolProfile('kimi')
-    // Process messages including tool calls and tool responses
-    const processedMessages = messages.map(msg => {
-      // Handle tool calls in assistant message
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        return {
-          ...msg,
-          content: toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
-            id: tc.id,
-            name: tc.function.name,
-            arguments: tc.function.arguments,
-          }))),
-        }
-      }
-      // Handle tool response message
-      if (msg.role === 'tool' && msg.tool_call_id) {
-        return { 
-          ...msg, 
-          role: 'user' as const,
-          content: toolProfile.formatToolResult({
-            toolCallId: msg.tool_call_id,
-            content: String(msg.content || ''),
-          }),
-        }
-      }
-      return msg
-    })
+    const conversationParts: string[] = []
+    let systemPrompt = ''
 
-    // Extract system message first
-    let systemContent = ''
-    const otherMessages = processedMessages.filter(msg => {
+    for (const msg of messages) {
       if (msg.role === 'system') {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        systemContent = text
-        return false
-      }
-      return true
-    })
-
-    let content = ''
-
-    // Prepend system message if exists
-    if (systemContent) {
-      content = `system:${systemContent}\n`
-    }
-
-    // For multi-turn with existing session, only send the last user message
-    if (isMultiTurn) {
-      // Find last user message index manually (ES2021 compatible)
-      let lastUserIdx = -1
-      for (let i = otherMessages.length - 1; i >= 0; i--) {
-        if (otherMessages[i].role === 'user') {
-          lastUserIdx = i
-          break
-        }
-      }
-      
-      if (lastUserIdx !== -1) {
-        const lastUserMsg = otherMessages[lastUserIdx]
-        const text = typeof lastUserMsg.content === 'string' ? lastUserMsg.content : ''
-        content += `user:${this.wrapUrlsToTags(text)}\n`
-        
-        // Include any tool results after the last user message
-        for (let i = lastUserIdx + 1; i < otherMessages.length; i++) {
-          if (otherMessages[i].role === 'user') {
-            const toolText = typeof otherMessages[i].content === 'string' ? otherMessages[i].content : ''
-            content += `user:${toolText}\n`
-          }
-        }
-        
-        if (toolsPrompt) {
-          content = content.trim() + "\n\n" + toolsPrompt
-        }
-        return content
+        systemPrompt = extractKimiTextContent(msg.content)
+      } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        conversationParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
+          id: tc.id,
+          name: tc.function.name,
+          arguments: tc.function.arguments,
+        }))))
+      } else if (msg.role === 'tool' && msg.tool_call_id) {
+        conversationParts.push(toolProfile.formatToolResult({
+          toolCallId: msg.tool_call_id,
+          content: extractKimiTextContent(msg.content),
+        }))
+      } else if (msg.role === 'assistant') {
+        conversationParts.push(`Assistant: ${extractKimiTextContent(msg.content)}`)
+      } else if (msg.role === 'user') {
+        conversationParts.push(this.wrapUrlsToTags(extractKimiTextContent(msg.content)))
       }
     }
 
-    if (otherMessages.length < 2) {
-      content += otherMessages.reduce((acc, msg) => {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        return acc + `${msg.role === 'user' ? this.wrapUrlsToTags(text) : text}\n`
-      }, '')
-    } else {
-      const latestMessage = otherMessages[otherMessages.length - 1]
-      const hasFileOrImage = Array.isArray(latestMessage.content) &&
-        latestMessage.content.some((v: any) => typeof v === 'object' && ['file', 'image_url'].includes(v.type))
+    const userContent = conversationParts.join('\n\n')
+    let content = systemPrompt
+      ? `${systemPrompt}\n\nUser: ${userContent}`
+      : userContent
 
-      if (hasFileOrImage) {
-        otherMessages.splice(otherMessages.length - 1, 0, {
-          content: 'Focus on the latest files and messages sent by user',
-          role: 'system' as const,
-        })
-      } else {
-        otherMessages.splice(otherMessages.length - 1, 0, {
-          content: 'Focus on the latest message from user',
-          role: 'system' as const,
-        })
-      }
-
-      content += otherMessages.reduce((acc, msg) => {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        return acc + `${msg.role}:${msg.role === 'user' ? this.wrapUrlsToTags(text) : text}\n`
-      }, '')
-    }
-
-    // Inject tools prompt at the VERY END of the content to maximize attention
     if (toolsPrompt) {
-      content = content.trim() + "\n\n" + toolsPrompt
+      content = content.trimEnd() + '\n\n' + toolsPrompt
     }
 
     return content
@@ -281,30 +210,7 @@ export class KimiAdapter {
 
     const messages = [...request.messages]
 
-    // Check if tool prompt has already been injected by client
-    const toolPromptExists = hasToolPromptInjected(messages)
-
-    let toolsPrompt = ''
-    if (request.tools && request.tools.length > 0 && !toolPromptExists) {
-      toolsPrompt = toolsToSystemPrompt(request.tools, true)
-
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') {
-          const currentContent = messages[i].content
-          if (typeof currentContent === 'string') {
-            messages[i] = { ...messages[i], content: currentContent + TOOL_WRAP_HINT }
-          } else if (Array.isArray(currentContent)) {
-            messages[i] = {
-              ...messages[i],
-              content: [...currentContent, { type: 'text', text: TOOL_WRAP_HINT }],
-            }
-          }
-          break
-        }
-      }
-    }
-
-    const content = this.messagesPrepare(messages, toolsPrompt, false)
+    const content = this.messagesPrepare(messages)
 
     // Determine if thinking and web search should be enabled
     // Priority: explicit parameters > model name detection

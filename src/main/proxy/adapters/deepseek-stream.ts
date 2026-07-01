@@ -4,9 +4,8 @@
  */
 
 import { PassThrough } from 'stream'
-import { parseToolCallsFromText } from '../utils/toolParser.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
-import { getToolProtocol } from '../toolCalling/protocols/index.ts'
+import { recordToolDiagnosticEvent } from '../toolCalling/diagnostics.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const MODEL_NAME = 'deepseek-chat'
@@ -458,10 +457,12 @@ export class DeepSeekStreamHandler {
     let currentPath = ''
     let accumulatedTokenUsage = 2
     const searchResults: any[] = []
+    const fragmentTypes = new Set<string>()
     const isThinkingModel = this.isThinkingModel()
     const isFoldModel = this.isFoldModel(isThinkingModel)
     const isSearchSilentModel = this.isSearchSilentModel()
     const shouldStripSearchControlMarker = this.shouldStripSearchControlMarker()
+    let upstreamDoneSeen = false
 
     return new Promise((resolve, reject) => {
       let buffer = ''
@@ -475,7 +476,10 @@ export class DeepSeekStreamHandler {
           if (!line.trim() || !line.startsWith('data:')) continue
 
           const data = line.slice(5).trim()
-          if (data === '[DONE]') return
+          if (data === '[DONE]') {
+            upstreamDoneSeen = true
+            return
+          }
 
           try {
             const parsed = JSON.parse(data)
@@ -494,6 +498,9 @@ export class DeepSeekStreamHandler {
               const fragments = parsed.v.response.fragments
               if (Array.isArray(fragments) && fragments.length > 0) {
                 for (const fragment of fragments) {
+                  if (typeof fragment.type === 'string') {
+                    fragmentTypes.add(fragment.type)
+                  }
                   if (Array.isArray(fragment.results)) {
                     DeepSeekStreamHandler.mergeSearchResultsInto(searchResults, fragment.results)
                   }
@@ -512,6 +519,9 @@ export class DeepSeekStreamHandler {
             } else if (parsed.p === 'response/fragments') {
               if (Array.isArray(parsed.v)) {
                 for (const fragment of parsed.v) {
+                  if (typeof fragment.type === 'string') {
+                    fragmentTypes.add(fragment.type)
+                  }
                   if (fragment.content) {
                     let cleanedFragment = fragment.content.replace(/FINISHED/g, '')
                     cleanedFragment = stripSearchControlMarker(cleanedFragment, shouldStripSearchControlMarker)
@@ -589,19 +599,7 @@ export class DeepSeekStreamHandler {
       })
 
       stream.on('end', () => {
-        // Parse tool calls from accumulated content
-        let cleanContent: string
-        let toolCalls: any[]
-        if (this.toolCallingPlan?.shouldParseResponse) {
-          const protocol = getToolProtocol(this.toolCallingPlan.protocol)
-          const parsed = protocol.parse(accumulatedContent, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
-          cleanContent = parsed.content || accumulatedContent
-          toolCalls = parsed.toolCalls || []
-        } else {
-          const result = parseToolCallsFromText(accumulatedContent)
-          cleanContent = result.content
-          toolCalls = result.toolCalls
-        }
+        const cleanContent = accumulatedContent
         const citations = isSearchSilentModel
           ? ''
           : DeepSeekStreamHandler.formatSearchCitations(searchResults)
@@ -609,15 +607,30 @@ export class DeepSeekStreamHandler {
         const contentWithCitations = citations
           ? (trimmedContent ? `${trimmedContent}\n\n${citations}` : citations)
           : trimmedContent
+        const finalContentLength = contentWithCitations.length
+        const finalReasoningLength = accumulatedThinkingContent.trim().length
+        const diagnosticBase = {
+          providerId: 'deepseek',
+          model: this.model,
+          responseMode: 'non_streaming' as const,
+          contentLength: finalContentLength,
+          reasoningLength: finalReasoningLength,
+          fragmentTypes: [...fragmentTypes].sort(),
+          upstreamDoneSeen,
+          finishReason: 'stop' as const,
+        }
+
+        recordToolDiagnosticEvent({
+          type: finalContentLength === 0 && finalReasoningLength === 0
+            ? 'provider_empty_output'
+            : 'provider_output_observed',
+          ...diagnosticBase,
+        })
 
         const message: any = {
           role: 'assistant',
           reasoning_content: accumulatedThinkingContent.trim() || undefined,
-          content: toolCalls.length > 0 ? null : contentWithCitations,
-        }
-
-        if (toolCalls.length > 0) {
-          message.tool_calls = toolCalls
+          content: contentWithCitations,
         }
 
         // Log for debugging
@@ -634,7 +647,7 @@ export class DeepSeekStreamHandler {
           choices: [{
             index: 0,
             message,
-            finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+            finish_reason: 'stop',
           }],
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: accumulatedTokenUsage },
           created: this.created,

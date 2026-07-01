@@ -66,6 +66,16 @@ export function validateToolCallStructure(input: ToolCallValidatorInput): ToolVa
       })
     }
 
+    const emptyComplex = emptyComplexParameters(call, tool)
+    if (emptyComplex.length > 0) {
+      return invalid({
+        kind: 'malformed_argument_container',
+        selectedProtocol,
+        detail: `Parameter ${emptyComplex.join(', ')} has empty payload but schema requires complex type`,
+        toolName,
+      })
+    }
+
     validated.push({
       callIndex: call.callIndex,
       toolName,
@@ -94,6 +104,23 @@ function missingRequiredParameters(
   const present = new Set(call.rawParameters.map((parameter) => parameter.rawName))
 
   return required.filter((name) => !present.has(name))
+}
+
+function emptyComplexParameters(
+  call: ExtractedCallStructure,
+  tool: NormalizedToolDefinition,
+): string[] {
+  const props = tool.parameters?.properties as Record<string, any> | undefined
+  if (!props) return []
+
+  return call.rawParameters
+    .filter((param) => {
+      const schema = props[param.rawName]
+      if (!schema) return false
+      const isComplex = schema.type === 'array' || schema.type === 'object'
+      return isComplex && param.rawPayload.trim().length === 0
+    })
+    .map((param) => param.rawName)
 }
 
 function invalid(failure: ToolStructureFailure): ToolValidationOutcome {

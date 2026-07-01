@@ -1,4 +1,9 @@
 /**
+ * ADR-001: Tool prompt injection is owned by ToolCallingEngine.
+ * This file is a Provider Adapter — it must NEVER import
+ * hasToolPromptInjected, toolsToSystemPrompt, TOOL_WRAP_HINT,
+ * or shouldInjectToolPrompt.
+ *
  * MiniMax Adapter
  * Based on MiniMax-Free-API implementation
  * https://github.com/LLM-Red-Team/MiniMax-Free-API
@@ -11,8 +16,9 @@ import crypto from 'crypto'
 import { createParser, EventSourceMessage } from 'eventsource-parser'
 import FormData from 'form-data'
 import { Account, Provider } from '../../store/types'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected, shouldInjectToolPrompt } from '../utils/tools'
+
 import { parseToolCallsFromText } from '../utils/toolParser'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles'
 import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import {
   createToolCallState,
@@ -429,113 +435,39 @@ export class MiniMaxAdapter {
     return { session, stream }
   }
 
-  private messagesPrepare(messages: MiniMaxMessage[], toolsPrompt?: string, isMultiTurn: boolean = false): any {
-    // Process messages including tool calls and tool responses
-    const processedMessages = messages.map(msg => {
-      // Handle tool calls in assistant message
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        const toolCallsText = msg.tool_calls.map(tc => {
-          return `[call:${tc.function.name}]${tc.function.arguments}[/call]`
-        }).join('\n')
-        return { ...msg, content: `[function_calls]\n${toolCallsText}\n[/function_calls]` }
-      }
-      // Handle tool response message
-      if (msg.role === 'tool' && msg.tool_call_id) {
-        return {
-          ...msg,
-          role: 'user' as const,
-          content: `[TOOL_RESULT for ${msg.tool_call_id}] ${msg.content || ''}`
-        }
-      }
-      return msg
-    })
+  private messagesPrepare(messages: MiniMaxMessage[], toolsPrompt?: string): any {
+    const toolProfile = getProviderToolProfile('minimax')
+    const conversationParts: string[] = []
+    let systemPrompt = ''
 
-    // Extract system message first
-    let systemContent = ''
-    const otherMessages = processedMessages.filter(msg => {
+    for (const msg of messages) {
       if (msg.role === 'system') {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        systemContent = text
-        return false
-      }
-      return true
-    })
-
-    let content = ''
-
-    // Prepend system message if exists
-    if (systemContent) {
-      content = `system:${systemContent}\n`
-    }
-
-    // For multi-turn with existing session, only send the last user message
-    if (isMultiTurn) {
-      // Find last user message index manually (ES2021 compatible)
-      let lastUserIdx = -1
-      for (let i = otherMessages.length - 1; i >= 0; i--) {
-        if (otherMessages[i].role === 'user') {
-          lastUserIdx = i
-          break
-        }
-      }
-
-      if (lastUserIdx !== -1) {
-        const lastUserMsg = otherMessages[lastUserIdx]
-        const text = typeof lastUserMsg.content === 'string' ? lastUserMsg.content : ''
-        content += `user:${text}\n`
-
-        // Include any tool results after the last user message
-        for (let i = lastUserIdx + 1; i < otherMessages.length; i++) {
-          if (otherMessages[i].role === 'user') {
-            const toolText = typeof otherMessages[i].content === 'string' ? otherMessages[i].content : ''
-            content += `user:${toolText}\n`
-          }
-        }
-
-        if (toolsPrompt) {
-          content = content.trim() + '\n\n' + toolsPrompt
-        }
-        return {
-          msg_type: 1,
-          text: content,
-          chat_type: 1,
-          attachments: [],
-          selected_mcp_tools: [],
-          backend_config: {},
-          sub_agent_ids: [],
-        }
+        systemPrompt = extractMiniMaxTextContent(msg.content)
+      } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        conversationParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
+          id: tc.id,
+          name: tc.function.name,
+          arguments: tc.function.arguments,
+        }))))
+      } else if (msg.role === 'tool' && msg.tool_call_id) {
+        conversationParts.push(toolProfile.formatToolResult({
+          toolCallId: msg.tool_call_id,
+          content: extractMiniMaxTextContent(msg.content),
+        }))
+      } else if (msg.role === 'assistant') {
+        conversationParts.push(`Assistant: ${extractMiniMaxTextContent(msg.content)}`)
+      } else if (msg.role === 'user') {
+        conversationParts.push(extractMiniMaxTextContent(msg.content))
       }
     }
 
-    if (otherMessages.length < 2) {
-      content += otherMessages.reduce((acc, msg) => {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        return acc + `${msg.role}:${text}\n`
-      }, '')
-    } else {
-      const latestMessage = otherMessages[otherMessages.length - 1]
-      const hasFileOrImage = Array.isArray(latestMessage.content) &&
-        latestMessage.content.some((v: any) => typeof v === 'object' && ['file', 'image_url'].includes(v.type))
+    const userContent = conversationParts.join('\n\n')
+    let content = systemPrompt
+      ? `${systemPrompt}\n\nUser: ${userContent}`
+      : userContent
 
-      if (hasFileOrImage) {
-        const newFileMessage: MiniMaxMessage = {
-          content: '关注用户最新发送文件和消息',
-          role: 'system',
-        }
-        otherMessages.push(newFileMessage)
-      }
-
-      content += otherMessages.reduce((acc, msg) => {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        return acc + `${msg.role}:${text}\n`
-      }, '') + 'assistant:\n'
-
-      content = content.trim().replace(/\!\[.+\]\(.+\)/g, '')
-    }
-
-    // Append tools prompt at the end if provided
     if (toolsPrompt) {
-      content = content.trim() + '\n\n' + toolsPrompt
+      content = content.trimEnd() + '\n\n' + toolsPrompt
     }
 
     return {
@@ -559,24 +491,7 @@ export class MiniMaxAdapter {
 
     const messages = [...request.messages]
 
-    let toolsPrompt = ''
-    // Only inject if tools are provided and not already injected by client
-    if (request.tools && request.tools.length > 0 && !hasToolPromptInjected(request.messages)) {
-      toolsPrompt = toolsToSystemPrompt(request.tools)
-
-      // Find and update the last user message
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') {
-          const currentContent = messages[i].content
-          if (typeof currentContent === 'string') {
-            messages[i] = { ...messages[i], content: currentContent + TOOL_WRAP_HINT }
-          }
-          break
-        }
-      }
-    }
-
-    const requestBody = this.messagesPrepare(messages, toolsPrompt, false)
+    const requestBody = this.messagesPrepare(messages)
 
     let msgId: string = ''
     let chatId: string = request.chatId || ''

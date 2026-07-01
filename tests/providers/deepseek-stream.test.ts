@@ -3,9 +3,17 @@ import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 
 import { DeepSeekStreamHandler } from '../../src/main/proxy/adapters/deepseek-stream.ts'
+import {
+  clearToolDiagnosticEvents,
+  getToolDiagnosticEvents,
+} from '../../src/main/proxy/toolCalling/diagnostics.ts'
 
 function sse(events: unknown[]): Readable {
   return Readable.from(events.map(event => `data: ${JSON.stringify(event)}\n\n`))
+}
+
+function rawSse(lines: string[]): Readable {
+  return Readable.from(lines.map(line => `${line}\n\n`))
 }
 
 async function collect(stream: NodeJS.ReadableStream): Promise<string[]> {
@@ -276,7 +284,26 @@ test('DeepSeek non-stream keeps existing cite index when duplicate URL has inval
   assert.equal(response.choices[0].finish_reason, 'stop')
 })
 
-test('DeepSeek non-stream keeps tool call content null when citations are present', async () => {
+test('DeepSeek non-stream leaves managed XML for ToolCallingEngine to convert', async () => {
+  const managedXmlToolCall = '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath"><![CDATA[/tmp/a]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>'
+  const handler = new DeepSeekStreamHandler('deepseek-v4-pro', 'session-managed-xml', undefined, false)
+  const response: any = await handler.handleNonStream(sse([
+    {
+      v: {
+        response: {
+          thinking_enabled: false,
+          fragments: [{ type: 'RESPONSE', content: managedXmlToolCall }],
+        },
+      },
+    },
+  ]))
+
+  assert.equal(response.choices[0].message.tool_calls, undefined)
+  assert.equal(response.choices[0].finish_reason, 'stop')
+  assert.match(response.choices[0].message.content, /<\|CHAT2API\|tool_calls>/)
+})
+
+test('DeepSeek non-stream preserves bracket tool-like text as content for the engine boundary', async () => {
   const handler = new DeepSeekStreamHandler('deepseek-v4-flash-search', 'session-tool-citation', undefined, true)
   const source = sse([
     { response_message_id: '2', model_type: 'default' },
@@ -298,9 +325,49 @@ test('DeepSeek non-stream keeps tool call content null when citations are presen
 
   const response: any = await handler.handleNonStream(source)
 
-  assert.equal(response.choices[0].message.content, null)
-  assert.equal(response.choices[0].finish_reason, 'tool_calls')
-  assert.equal(response.choices[0].message.tool_calls.length, 1)
+  assert.equal(response.choices[0].message.tool_calls, undefined)
+  assert.equal(response.choices[0].finish_reason, 'stop')
+  assert.match(response.choices[0].message.content, /\[function_calls\]/)
+  assert.match(response.choices[0].message.content, /\[1\]: \[工具引用\]/)
+})
+
+test('DeepSeek non-stream records provider output diagnostics for empty assistant output', async () => {
+  clearToolDiagnosticEvents()
+  const handler = new DeepSeekStreamHandler('deepseek-v4-pro', 'session-empty-diagnostics', undefined, false)
+
+  await handler.handleNonStream(sse([
+    { response_message_id: 'msg-empty', model_type: 'default' },
+  ]))
+
+  const events = getToolDiagnosticEvents().filter((event) => event.type === 'provider_empty_output')
+  assert.equal(events.length, 1)
+  assert.equal(events[0].providerId, 'deepseek')
+  assert.equal(events[0].model, 'deepseek-v4-pro')
+  assert.equal(events[0].responseMode, 'non_streaming')
+  assert.equal((events[0] as any).contentLength, 0)
+  assert.equal((events[0] as any).reasoningLength, 0)
+  assert.equal((events[0] as any).upstreamDoneSeen, false)
+})
+
+test('DeepSeek non-stream records provider output stats without prompt or arguments', async () => {
+  clearToolDiagnosticEvents()
+  const handler = new DeepSeekStreamHandler('DeepSeek-R1', 'session-stats-diagnostics', undefined, false)
+
+  await handler.handleNonStream(rawSse([
+    `data: ${JSON.stringify({ response_message_id: 'msg-stats', model_type: 'default' })}`,
+    `data: ${JSON.stringify({ v: { response: { thinking_enabled: true, fragments: [{ type: 'THINK', content: 'reasoning text' }] } } })}`,
+    `data: ${JSON.stringify({ p: 'response/fragments', o: 'APPEND', v: [{ id: 1, type: 'RESPONSE', content: 'answer text' }] })}`,
+    'data: [DONE]',
+  ]))
+
+  const events = getToolDiagnosticEvents().filter((event) => event.type === 'provider_output_observed')
+  assert.equal(events.length, 1)
+  assert.equal((events[0] as any).contentLength, 'answer text'.length)
+  assert.equal((events[0] as any).reasoningLength, 'reasoning text'.length)
+  assert.equal((events[0] as any).fragmentTypes.includes('THINK'), true)
+  assert.equal((events[0] as any).fragmentTypes.includes('RESPONSE'), true)
+  assert.equal((events[0] as any).prompt, undefined)
+  assert.equal((events[0] as any).argumentsText, undefined)
 })
 
 test('DeepSeek non-search responses preserve search text at fragment start', async () => {

@@ -57,6 +57,7 @@ export type ToolDiagnosticEventType =
   | 'tool_availability_drift_detected'
   | 'tool_availability_retry_result'
   | 'provider_empty_output'
+  | 'provider_output_observed'
 
 export interface ToolDiagnosticEvent {
   type: ToolDiagnosticEventType
@@ -72,6 +73,11 @@ export interface ToolDiagnosticEvent {
   headerVersion?: number
   retryResult?: 'skipped' | 'attempted' | 'succeeded' | 'failed'
   responseMode?: 'streaming' | 'non_streaming'
+  contentLength?: number
+  reasoningLength?: number
+  fragmentTypes?: string[]
+  upstreamDoneSeen?: boolean
+  finishReason?: string
   timestamp: number
 }
 
@@ -93,6 +99,11 @@ export function recordToolDiagnosticEvent(event: Omit<ToolDiagnosticEvent, 'time
     headerVersion: event.headerVersion,
     retryResult: event.retryResult,
     responseMode: event.responseMode,
+    contentLength: event.contentLength,
+    reasoningLength: event.reasoningLength,
+    fragmentTypes: event.fragmentTypes ? [...event.fragmentTypes] : undefined,
+    upstreamDoneSeen: event.upstreamDoneSeen,
+    finishReason: event.finishReason,
     timestamp: Date.now(),
   }
 
@@ -106,6 +117,7 @@ export function getToolDiagnosticEvents(): ToolDiagnosticEvent[] {
     toolNames: event.toolNames ? [...event.toolNames] : undefined,
     schemaHashes: event.schemaHashes ? { ...event.schemaHashes } : undefined,
     driftKinds: event.driftKinds ? [...event.driftKinds] : undefined,
+    fragmentTypes: event.fragmentTypes ? [...event.fragmentTypes] : undefined,
   }))
 }
 
