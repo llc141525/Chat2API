@@ -168,10 +168,14 @@ export function getPersistedToolCatalogStore(userDataPath: string): ToolCatalogS
   return persistedStore
 }
 
-export let toolCatalogStore: ToolCatalogStore = createToolCatalogStore()
+let toolCatalogStore: ToolCatalogStore = createToolCatalogStore()
 
 export function initPersistedCatalogStore(userDataPath: string): void {
-  toolCatalogStore = getPersistedToolCatalogStore(userDataPath)
+  try {
+    toolCatalogStore = getPersistedToolCatalogStore(userDataPath)
+  } catch (err) {
+    console.error('Failed to initialize persisted catalog store, using in-memory:', err)
+  }
 }
 
 export function resolveToolCatalog(input: ToolCatalogResolveInput): ToolCatalogResolution {
