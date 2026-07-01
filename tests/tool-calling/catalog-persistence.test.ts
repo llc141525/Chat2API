@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'fs'
 import os from 'os'
@@ -30,8 +30,17 @@ const writeTool: NormalizedToolDefinition = {
   source: 'openai',
 }
 
+const tempDirs: string[] = []
+
+after(() => {
+  for (const dir of tempDirs) {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 function tempFile(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-persist-'))
+  tempDirs.push(dir)
   return path.join(dir, 'tool-catalogs.json')
 }
 
