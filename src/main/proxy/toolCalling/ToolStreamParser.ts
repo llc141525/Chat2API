@@ -58,6 +58,11 @@ export class ToolStreamParser {
     }
 
     if (parsed.invalidToolNames.length > 0 || parsed.rawMatches.length > 0) {
+      console.warn(
+        `[ToolStreamParser] Dropping tool call buffer — invalid names: [${parsed.invalidToolNames.join(', ')}], ` +
+        `allowed names: [${[...this.plan.allowedToolNames].join(', ')}], ` +
+        `raw matches: ${parsed.rawMatches.length > 0}`,
+      )
       this.isBufferingToolCall = false
       this.buffer = ''
     }

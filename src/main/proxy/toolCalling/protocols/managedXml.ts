@@ -37,7 +37,7 @@ Tool results will be provided as Chat2API XML result blocks:
   },
 
   detectStart(buffer) {
-    return detectMarkers(buffer, [CHAT2API_START, XML_START])
+    return detectMarkers(buffer, [CHAT2API_START, XML_START, '<|CHAT2API|invoke'])
   },
 
   parse(content: string, context: ToolParseContext) {
@@ -65,6 +65,22 @@ Tool results will be provided as Chat2API XML result blocks:
       blockPattern: /<tool_calls>([\s\S]*?)<\/tool_calls>/g,
       invokePattern: /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/g,
       parameterPattern: /<parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/parameter>/g,
+      rawMatches,
+      invalidToolNames,
+      allowedNames,
+      tools: context.tools,
+      toolCalls,
+    })
+
+    // Also parse standalone <|CHAT2API|invoke> blocks without outer <|CHAT2API|tool_calls> wrapper
+    const unmatchedContent = rawMatches.reduce((acc, raw) => acc.replace(raw, ''), parseable)
+    parseBlocks(unmatchedContent, {
+      blockPattern: /(<\|CHAT2API\|invoke\s+name="[^"]+"\s*>[\s\S]*?<\/\|CHAT[^|]*\|invoke>)/g,
+      invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT[^|]*\|invoke>/g,
+      parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/(?:\|CHAT[^|]*\|)?parameter>/g,
+      fallbackParameterPatterns: [
+        /<parameter\s*=\s*"?([^"">\s]+)"?\s*>([\s\S]*?)<\/parameter>/gi,
+      ],
       rawMatches,
       invalidToolNames,
       allowedNames,

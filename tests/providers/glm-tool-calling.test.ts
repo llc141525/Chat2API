@@ -143,7 +143,9 @@ test('GLM adapter moves managed XML tool prompt to the final instruction positio
   assert.equal(countOccurrences(text, '<|CHAT2API|tool_calls>'), 1)
   assert.match(text, /^You are a coding assistant\./)
   assert.match(text, /Read tests\/agent-capability\/input\.txt/)
-  assert.doesNotMatch(text, /You are a coding assistant\.[\s\S]*## Available Tools[\s\S]*Read tests/)
+  // Tools must be placed at the END, after the user message, so the model
+  // sees them closest to its generation point (avoids lost-in-the-middle).
+  assert.match(text, /Read tests\/agent-capability\/input\.txt[\s\S]*## Available Tools/)
   assert.match(text, /## Available Tools[\s\S]*<\|CHAT2API\|tool_calls>/)
 })
 
@@ -717,4 +719,149 @@ test('applyNonStreamResponse: ignores bracket tool calls when plan expects manag
   assert.equal(result.choices[0].message.tool_calls, undefined)
   assert.match(result.choices[0].message.content, /\[function_calls\]/)
   assert.equal(result.choices[0].finish_reason, 'stop')
+})
+
+// ── Standalone <|CHAT2API|invoke> (no outer <|CHAT2API|tool_calls> wrapper) ──
+
+const standaloneInvokeXml =
+  '<|CHAT2API|invoke name="bash"><|CHAT2API|parameter name="command"><![CDATA[ls -la]]></|CHAT2API|parameter></|CHAT2API|invoke>'
+
+const standaloneInvokeWithPreamble =
+  'I will run the command.\n\n<|CHAT2API|invoke name="bash"><|CHAT2API|parameter name="command"><![CDATA[ls -la]]></|CHAT2API|parameter></|CHAT2API|invoke>'
+
+test('managedXmlProtocol.parse handles standalone <|CHAT2API|invoke> without outer wrapper', () => {
+  const parsed = managedXmlProtocol.parse(standaloneInvokeXml, {
+    tools: [{ name: 'bash', description: 'Run a command', parameters: { type: 'object', properties: { command: { type: 'string' } } }, source: 'openai' }],
+    protocol: 'managed_xml',
+  })
+
+  assert.equal(parsed.toolCalls.length, 1)
+  assert.equal(parsed.toolCalls[0].function.name, 'bash')
+  const args = JSON.parse(parsed.toolCalls[0].function.arguments)
+  assert.equal(args.command, 'ls -la')
+  assert.match(parsed.protocol, /managed_xml/)
+})
+
+test('managedXmlProtocol.parse handles standalone invoke with preamble text', () => {
+  const parsed = managedXmlProtocol.parse(standaloneInvokeWithPreamble, {
+    tools: [{ name: 'bash', description: 'Run a command', parameters: { type: 'object', properties: { command: { type: 'string' } } }, source: 'openai' }],
+    protocol: 'managed_xml',
+  })
+
+  assert.equal(parsed.toolCalls.length, 1)
+  assert.equal(parsed.toolCalls[0].function.name, 'bash')
+  assert.match(parsed.content, /I will run the command/)
+})
+
+test('managedXmlProtocol.parse rejects standalone invoke with unknown tool name', () => {
+  const parsed = managedXmlProtocol.parse(
+    '<|CHAT2API|invoke name="unknown_tool"><|CHAT2API|parameter name="x"><![CDATA[1]]></|CHAT2API|parameter></|CHAT2API|invoke>',
+    {
+      tools: [{ name: 'bash', description: 'Run a command', parameters: {}, source: 'openai' }],
+      protocol: 'managed_xml',
+    },
+  )
+
+  assert.equal(parsed.toolCalls.length, 0)
+  assert.ok(parsed.invalidToolNames.includes('unknown_tool'))
+})
+
+test('detectStart matches standalone <|CHAT2API|invoke> as a marker', () => {
+  const result = managedXmlProtocol.detectStart('<|CHAT2API|invoke name="bash">')
+  assert.ok(result.matched)
+  assert.equal(result.markerStart, 0)
+})
+
+test('detectStart matches standalone <|CHAT2API|invoke> when preceded by text', () => {
+  const result = managedXmlProtocol.detectStart('Some text here.\n<|CHAT2API|invoke name="read">')
+  assert.ok(result.matched)
+  assert.equal(result.markerStart, 16) // after "Some text here.\n"
+})
+
+test('detectStart partial-matches <|CHAT2API|inv prefix', () => {
+  const result = managedXmlProtocol.detectStart('<|CHAT2API|inv')
+  assert.ok(result.partial)
+})
+
+test('GLM stream emits standalone <|CHAT2API|invoke> as OpenAI tool_calls', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-standalone-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: standaloneInvokeXml }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-standalone-1', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"bash"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.equal((output.match(/data: \[DONE\]/g) || []).length, 1)
+  // Must NOT leak raw XML to client
+  assert.doesNotMatch(output, /<\|CHAT2API\|invoke/)
+})
+
+test('GLM stream emits standalone invoke with preamble text correctly', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-standalone-2',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: standaloneInvokeWithPreamble }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-standalone-2', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  // Should output preamble text before tool call
+  assert.match(output, /I will run the command/)
+  // Should output tool call
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"bash"/)
+  assert.doesNotMatch(output, /<\|CHAT2API\|invoke/)
+})
+
+test('standalone invoke with invalid tool name is silently dropped', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const invalidXml = '<|CHAT2API|invoke name="nonexistent"><|CHAT2API|parameter name="x"><![CDATA[1]]></|CHAT2API|parameter></|CHAT2API|invoke>'
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-standalone-3',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: invalidXml }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-standalone-3', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  // Invalid tool name → no tool_calls emitted, xml consumed silently
+  assert.doesNotMatch(output, /"tool_calls"/)
+  assert.doesNotMatch(output, /<\|CHAT2API\|invoke/)
+  assert.match(output, /"finish_reason":"stop"/)
 })

@@ -105,12 +105,26 @@ function extractManagedToolPrompt(messages: GLMMessage[]): { messages: GLMMessag
     if (message.role !== 'system' || typeof message.content !== 'string') return message
 
     const markerIndex = message.content.indexOf(TOOL_PROMPT_MARKER)
-    if (markerIndex < 0 || !message.content.includes(TOOL_PROMPT_RESULT_MARKER)) return message
+    if (markerIndex < 0) return message
 
+    // Only skip extraction when tool results appear BEFORE the tool prompt
+    // (indicating previous-turn results are mixed into the system message).
+    // Tool result references AFTER the marker are part of the format instruction
+    // and should be extracted alongside the tool prompt.
+    const toolResultIndex = message.content.indexOf(TOOL_PROMPT_RESULT_MARKER)
+    if (toolResultIndex >= 0 && toolResultIndex < markerIndex) return message
+
+    // Extract tool prompt so it can be placed at the end of the final message,
+    // closest to where the model generates its response.
     const beforePrompt = message.content.slice(0, markerIndex).trim()
     toolsPrompt = message.content.slice(markerIndex).trim()
     return { ...message, content: beforePrompt }
   })
+
+  if (toolsPrompt) {
+    const toolNamesInPrompt = [...toolsPrompt.matchAll(/Tool `([^`]+)`/g)].map((m) => m[1])
+    console.log('[GLM] Extracted tool prompt — tool names:', toolNamesInPrompt)
+  }
 
   return { messages: cleanedMessages, toolsPrompt }
 }
@@ -645,6 +659,49 @@ export class GLMAdapter {
   }
 }
 
+function convertNativeToolCallsToXml(toolCalls: any[]): string {
+  const invokes = toolCalls.map((tc) => {
+    const fn = tc.function || tc
+    const name = fn.name || tc.name || ''
+    if (!name) {
+      console.warn('[GLM] Native tool_call without name:', JSON.stringify(tc).substring(0, 200))
+      return ''
+    }
+    const args = typeof fn.arguments === 'string' ? safeParseJson(fn.arguments) : (fn.arguments || {})
+    const params = Object.entries(args as Record<string, unknown>)
+      .map(([key, value]) => {
+        const text = typeof value === 'string' ? value : JSON.stringify(value)
+        return `<|CHAT2API|parameter name="${key}"><![CDATA[${text}]]></|CHAT2API|parameter>`
+      })
+      .join('')
+    return `<|CHAT2API|invoke name="${name}">${params}</|CHAT2API|invoke>`
+  }).filter(Boolean).join('')
+
+  return invokes ? `<|CHAT2API|tool_calls>${invokes}</|CHAT2API|tool_calls>` : ''
+}
+
+function safeParseJson(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function convertNativeToolCallsFromParts(cachedParts: any[]): string {
+  const xmlParts: string[] = []
+  for (const part of cachedParts) {
+    if (!Array.isArray(part.content)) continue
+    for (const item of part.content) {
+      if (item.type === 'tool_calls' && Array.isArray(item.tool_calls) && item.tool_calls.length > 0) {
+        xmlParts.push(convertNativeToolCallsToXml(item.tool_calls))
+      }
+    }
+  }
+  return xmlParts.join('')
+}
+
 export class GLMStreamHandler {
   private conversationId: string = ''
   private model: string
@@ -652,6 +709,7 @@ export class GLMStreamHandler {
   private onEnd?: () => void
   private toolStreamParser?: ToolStreamParser
   private toolCallingPlan?: ToolCallingPlan
+  private emittedNativeToolCallIds = new Set<string>()
 
   constructor(model: string, onEnd?: () => void, initialConversationId?: string, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
@@ -807,14 +865,43 @@ export class GLMStreamHandler {
             const chunk = fullText.substring(sentContent.length)
             if (chunk) {
               sentContent += chunk
+              if (chunk.includes('<|CHAT2API|') || chunk.includes('<tool_calls>')) {
+                console.log('[GLM] Tool call marker detected in chunk:', chunk.substring(0, 200))
+              }
             }
-            
+
+            // Log unhandled content types and convert native GLM tool_calls to CHAT2API XML
+            let nativeToolCallsXml = ''
+            for (const part of cachedParts) {
+              if (!Array.isArray(part.content)) continue
+              for (const item of part.content) {
+                if (item.type === 'tool_calls' && Array.isArray(item.tool_calls)) {
+                  const newCalls = item.tool_calls.filter(
+                    (tc: any) => !this.emittedNativeToolCallIds.has(tc.id || tc.call_id || '')
+                  )
+                  if (newCalls.length > 0) {
+                    console.log('[GLM] Native tool_calls detected:', JSON.stringify(newCalls).substring(0, 300))
+                    for (const tc of newCalls) {
+                      const id = tc.id || tc.call_id || ''
+                      if (id) this.emittedNativeToolCallIds.add(id)
+                    }
+                    nativeToolCallsXml += convertNativeToolCallsToXml(newCalls)
+                  }
+                } else if (!['text', 'think', 'image', 'code', 'execution_output', 'tool_result', 'tool_calls'].includes(item.type)) {
+                  console.log('[GLM] Unhandled content type:', item.type, 'keys:', Object.keys(item).join(', '))
+                }
+              }
+            }
+
+            // Append native tool_calls XML to chunk for ToolStreamParser processing
+            const effectiveChunk = chunk + nativeToolCallsXml
+
             // Process tool call interception with shared parser buffering.
             const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
-            const outputChunks = this.toolStreamParser?.push(chunk, baseChunk, !sentRole) ?? (
-              chunk ? [{
+            const outputChunks = this.toolStreamParser?.push(effectiveChunk, baseChunk, !sentRole) ?? (
+              effectiveChunk ? [{
                 ...baseChunk,
-                choices: [{ index: 0, delta: { ...(!sentRole ? { role: 'assistant' } : {}), content: chunk }, finish_reason: null }],
+                choices: [{ index: 0, delta: { ...(!sentRole ? { role: 'assistant' } : {}), content: effectiveChunk }, finish_reason: null }],
               }] : []
             )
 
@@ -948,6 +1035,8 @@ export class GLMStreamHandler {
               })
 
               const cleanContent = fullText.trim()
+              const nonStreamNativeXml = convertNativeToolCallsFromParts(cachedParts)
+              const combinedContent = [cleanContent, nonStreamNativeXml].filter(Boolean).join('\n\n')
 
               resolve({
                 id: this.conversationId,
@@ -958,7 +1047,7 @@ export class GLMStreamHandler {
                     index: 0,
                     message: {
                       role: 'assistant',
-                      content: cleanContent,
+                      content: combinedContent,
                       reasoning_content: fullReasoning || null,
                     },
                     finish_reason: 'stop',

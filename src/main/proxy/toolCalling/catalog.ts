@@ -182,6 +182,10 @@ export function resolveToolCatalog(input: ToolCatalogResolveInput): ToolCatalogR
   return toolCatalogStore.resolveSnapshot(input)
 }
 
+export function __resetCatalogStoreForTest(newStore?: ToolCatalogStore): void {
+  toolCatalogStore = newStore ?? createToolCatalogStore()
+}
+
 function normalizeTools(tools: NormalizedToolDefinition[]): NormalizedToolDefinition[] {
   return tools
     .map((tool) => ({
@@ -270,7 +274,14 @@ function getBlockReason(
   historyToolNames: string[],
 ): string | undefined {
   if (driftKinds.includes('history_references_unknown_tool')) {
-    return 'history_references_unknown_tool'
+    const unknownNames = historyToolNames.filter(
+      (name) => !previous?.allowedToolNames.includes(name) && !next.allowedToolNames.includes(name),
+    )
+    console.warn(
+      `[catalog] History references unknown tool names, not blocking catalog update. ` +
+      `Unknown names: [${unknownNames.join(', ')}]`,
+    )
+    // Warn only — don't block catalog update
   }
 
   if (driftKinds.includes('removed_tool')) {
