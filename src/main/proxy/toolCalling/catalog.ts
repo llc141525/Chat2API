@@ -6,6 +6,7 @@ import type {
   ToolCatalogDriftKind,
   ToolCatalogSnapshot,
 } from './types.ts'
+import type { CatalogPersistenceStore } from './catalogPersistence.ts'
 
 export interface ToolCatalogResolveInput {
   sessionId: string | null
@@ -29,9 +30,16 @@ interface StoredCatalog {
   snapshot: ToolCatalogSnapshot
 }
 
-export function createToolCatalogStore(): ToolCatalogStore {
+export function createToolCatalogStore(persistence?: CatalogPersistenceStore): ToolCatalogStore {
   const sessions = new Map<string, StoredCatalog>()
   let turnCounter = 0
+
+  // Hydrate from disk on construction
+  if (persistence) {
+    for (const [sessionId, snapshot] of persistence.loadAll()) {
+      sessions.set(sessionId, { snapshot })
+    }
+  }
 
   function resolveSnapshot(input: ToolCatalogResolveInput): ToolCatalogResolution {
     const requestTools = normalizeTools(input.requestTools)
@@ -72,6 +80,7 @@ export function createToolCatalogStore(): ToolCatalogStore {
         })
         if (input.sessionId) {
           sessions.set(input.sessionId, { snapshot })
+          persistence?.save(input.sessionId, snapshot)
         }
         return {
           snapshot,
@@ -122,6 +131,7 @@ export function createToolCatalogStore(): ToolCatalogStore {
 
     if (input.sessionId) {
       sessions.set(input.sessionId, { snapshot: nextSnapshot })
+      persistence?.save(input.sessionId, nextSnapshot)
     }
 
     return {
@@ -140,6 +150,7 @@ export function createToolCatalogStore(): ToolCatalogStore {
     resolveSnapshot,
     clearSession(sessionId: string) {
       sessions.delete(sessionId)
+      persistence?.delete(sessionId)
     },
   }
 }
