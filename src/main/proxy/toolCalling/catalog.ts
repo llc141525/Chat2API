@@ -1,4 +1,7 @@
 import crypto from 'crypto'
+import path from 'path'
+
+import { createFileCatalogPersistence } from './catalogPersistence.ts'
 
 import type {
   NormalizedToolDefinition,
@@ -155,7 +158,21 @@ export function createToolCatalogStore(persistence?: CatalogPersistenceStore): T
   }
 }
 
-export const toolCatalogStore = createToolCatalogStore()
+let persistedStore: ToolCatalogStore | undefined
+
+export function getPersistedToolCatalogStore(userDataPath: string): ToolCatalogStore {
+  if (!persistedStore) {
+    const filePath = path.join(userDataPath, 'tool-catalogs.json')
+    persistedStore = createToolCatalogStore(createFileCatalogPersistence(filePath))
+  }
+  return persistedStore
+}
+
+export let toolCatalogStore: ToolCatalogStore = createToolCatalogStore()
+
+export function initPersistedCatalogStore(userDataPath: string): void {
+  toolCatalogStore = getPersistedToolCatalogStore(userDataPath)
+}
 
 export function resolveToolCatalog(input: ToolCatalogResolveInput): ToolCatalogResolution {
   return toolCatalogStore.resolveSnapshot(input)
