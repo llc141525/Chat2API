@@ -8,6 +8,11 @@ export interface ProviderToolProfile {
   preferredManagedProtocol: ToolProtocolId
   contractHeaderVersion: number
   availabilityDriftRetry: 'enabled' | 'disabled'
+  managedPromptOwner: 'ToolCallingEngine'
+  parseStreaming: boolean
+  parseNonStreaming: boolean
+  supportsIntentionalEmptyOutput: boolean
+  preservesToolHistory: boolean
   formatAssistantToolCalls(calls: Array<{ id: string; name: string; arguments: string }>): string
   formatToolResult(result: NormalizedToolResult): string
 }
@@ -18,6 +23,11 @@ const chat2ApiXmlHistoryProfile: Omit<ProviderToolProfile, 'providerId'> = {
   preferredManagedProtocol: 'managed_xml',
   contractHeaderVersion: 1,
   availabilityDriftRetry: 'enabled',
+  managedPromptOwner: 'ToolCallingEngine',
+  parseStreaming: true,
+  parseNonStreaming: true,
+  supportsIntentionalEmptyOutput: false,
+  preservesToolHistory: true,
   formatAssistantToolCalls(calls) {
     return managedXmlProtocol.formatAssistantToolCalls(calls)
   },

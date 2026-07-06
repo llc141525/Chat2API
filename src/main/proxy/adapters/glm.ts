@@ -84,6 +84,7 @@ interface ChatCompletionRequest {
   deep_research?: boolean
   tools?: any[]
   tool_choice?: any
+  conversationId?: string
 }
 
 const tokenCache = new Map<string, TokenInfo>()
@@ -366,6 +367,56 @@ export class GLMAdapter {
     const conversationParts: string[] = []
     let systemPrompt = ''
 
+    if (isMultiTurn) {
+      // Find the last assistant message with tool_calls in ORIGINAL messages,
+      // then only include the delta from there onward (server holds conversation context)
+      let lastAssistantToolIdx = -1
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'assistant' && messages[i].tool_calls && messages[i].tool_calls.length > 0) {
+          lastAssistantToolIdx = i
+          break
+        }
+      }
+
+      if (lastAssistantToolIdx !== -1) {
+        const deltaParts: string[] = []
+        for (let i = lastAssistantToolIdx; i < messages.length; i++) {
+          const msg = messages[i]
+          if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+            deltaParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
+              id: tc.id,
+              name: tc.function.name,
+              arguments: tc.function.arguments,
+            }))))
+          } else if (msg.role === 'tool' && msg.tool_call_id) {
+            deltaParts.push(toolProfile.formatToolResult({
+              toolCallId: msg.tool_call_id,
+              content: extractGLMTextContent(msg.content),
+            }))
+          } else if (msg.role === 'assistant') {
+            deltaParts.push(`Assistant: ${extractGLMTextContent(msg.content)}`)
+          } else if (msg.role === 'user') {
+            deltaParts.push(extractGLMTextContent(msg.content))
+          } else if (msg.role === 'system') {
+            systemPrompt = extractGLMTextContent(msg.content)
+          }
+        }
+
+        const userContent = deltaParts.join('\n\n')
+        let textContent = systemPrompt
+          ? `${systemPrompt}\n\nUser: ${userContent}`
+          : userContent
+
+        if (toolsPrompt) {
+          textContent = textContent.trimEnd() + '\n\n' + toolsPrompt
+        }
+
+        content.push({ type: 'text', text: textContent })
+        return [{ role: 'user', content }]
+      }
+      // No assistant tool_call found — fall through to full prompt
+    }
+
     for (const msg of messages) {
       if (msg.role === 'system') {
         systemPrompt = extractGLMTextContent(msg.content)
@@ -412,39 +463,41 @@ export class GLMAdapter {
     // Adapter only formats already-injected messages via messagesToPrompt.
     const toolsPrompt = managedToolPrompt.toolsPrompt
 
-    // Extract and upload files
-    const { fileUrls, imageUrls } = this.extractFileUrls(managedToolPrompt.messages)
+    // Extract and upload files (skip for multi-turn, server already has them via conversation_id)
     const refs: any[] = []
+    if (!request.conversationId) {
+      const { fileUrls, imageUrls } = this.extractFileUrls(managedToolPrompt.messages)
 
-    // Upload files
-    for (const fileUrl of fileUrls) {
-      try {
-        const result = await this.uploadFile(fileUrl)
-        refs.push({
-          source_id: result.source_id,
-          file_url: result.file_url || fileUrl,
-        })
-      } catch (error) {
-        console.error('[GLM] Failed to upload file:', error)
+      // Upload files
+      for (const fileUrl of fileUrls) {
+        try {
+          const result = await this.uploadFile(fileUrl)
+          refs.push({
+            source_id: result.source_id,
+            file_url: result.file_url || fileUrl,
+          })
+        } catch (error) {
+          console.error('[GLM] Failed to upload file:', error)
+        }
+      }
+
+      // Upload images
+      for (const imageUrl of imageUrls) {
+        try {
+          const result = await this.uploadFile(imageUrl)
+          refs.push({
+            source_id: result.source_id,
+            image_url: result.file_url || imageUrl,
+            width: 0,
+            height: 0,
+          })
+        } catch (error) {
+          console.error('[GLM] Failed to upload image:', error)
+        }
       }
     }
 
-    // Upload images
-    for (const imageUrl of imageUrls) {
-      try {
-        const result = await this.uploadFile(imageUrl)
-        refs.push({
-          source_id: result.source_id,
-          image_url: result.file_url || imageUrl,
-          width: 0,
-          height: 0,
-        })
-      } catch (error) {
-        console.error('[GLM] Failed to upload image:', error)
-      }
-    }
-
-    const preparedMessages = this.messagesToPrompt(managedToolPrompt.messages, refs, toolsPrompt, false)
+    const preparedMessages = this.messagesToPrompt(managedToolPrompt.messages, refs, toolsPrompt, !!request.conversationId)
 
     let assistantId = DEFAULT_ASSISTANT_ID
     let chatMode = ''
@@ -490,7 +543,7 @@ export class GLMAdapter {
       `${GLM_API_BASE}/backend-api/assistant/stream`,
       {
         assistant_id: assistantId,
-        conversation_id: '',
+        conversation_id: request.conversationId || '',
         project_id: '',
         chat_type: 'user_chat',
         messages: preparedMessages,
@@ -525,7 +578,7 @@ export class GLMAdapter {
       }
     )
 
-    return { response, conversationId: '' }
+    return { response, conversationId: request.conversationId || '' }
   }
 
   async deleteConversation(conversationId: string): Promise<boolean> {

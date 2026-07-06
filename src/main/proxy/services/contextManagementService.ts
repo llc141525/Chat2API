@@ -7,6 +7,7 @@
  */
 
 import type { ChatMessage } from '../types'
+import { preserveToolExchangePairs } from '../contextMessageMetadata.ts'
 
 /**
  * Sliding Window Strategy Configuration
@@ -279,7 +280,7 @@ export class TokenLimitStrategy {
         keptNonSystemMessages.unshift(msg)
         currentTokens += msgTokens
       } else {
-        break
+        continue
       }
     }
 
@@ -518,6 +519,13 @@ export class ContextManagementService {
         default:
           console.warn(`[ContextManagementService] Unknown strategy: ${strategyName}`)
           continue
+      }
+
+      const preservedMessages = preserveToolExchangePairs(currentMessages, result.messages)
+      result = {
+        ...result,
+        messages: preservedMessages,
+        processedCount: preservedMessages.length,
       }
 
       strategyResults.push(result)

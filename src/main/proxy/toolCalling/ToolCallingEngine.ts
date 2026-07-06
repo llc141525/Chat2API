@@ -156,6 +156,17 @@ export class ToolCallingEngine {
       plan.diagnostics.parserFormat = plan.protocol
       plan.diagnostics.parsedToolCallCount = 0
       plan.diagnostics.malformedReason = validation.failure.kind
+      plan.diagnostics.validationFailureKind = validation.failure.kind
+      recordToolDiagnosticEvent({
+        type: 'tool_validation_failed',
+        requestId: plan.diagnostics.requestId,
+        providerId: plan.providerId,
+        model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
+        catalogFingerprint: plan.catalogSnapshot?.fingerprint,
+        protocol: plan.protocol,
+        responseMode: 'non_streaming',
+        validationFailureKind: validation.failure.kind,
+      })
       return undefined
     }
 

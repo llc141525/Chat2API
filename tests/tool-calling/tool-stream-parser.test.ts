@@ -139,3 +139,26 @@ test('generated call IDs stay stable between emitted chunks and final state', ()
   assert.equal(emittedId, 'call_0')
   assert.deepEqual(parser.flush(baseChunk), [])
 })
+
+test('stream parser records content and tool-call emission facts', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  parser.push('hello ', baseChunk)
+  parser.push('<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>', baseChunk)
+
+  const observation = parser.getObservation()
+  assert.equal(observation.rawContentLength > 0, true)
+  assert.equal(observation.emittedContentLength, 'hello '.length)
+  assert.equal(observation.emittedToolCallCount, 1)
+  assert.equal(observation.suppressedMalformedToolOutput, false)
+})
+
+test('stream parser records invalid buffer suppression facts', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  parser.push('<|CHAT2API|tool_calls><|CHAT2API|invoke name="missing"><|CHAT2API|parameter name="x">1</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>', baseChunk)
+
+  const observation = parser.getObservation()
+  assert.equal(observation.rawContentLength > 0, true)
+  assert.equal(observation.emittedToolCallCount, 0)
+  assert.equal(observation.suppressedMalformedToolOutput, true)
+  assert.equal(observation.suppressedReason, 'invalid_tool_name')
+})

@@ -1,12 +1,26 @@
 import type { ToolCallingPlan } from './types.ts'
 import { getToolProtocol } from './protocols/index.ts'
 
+export interface ToolStreamObservation {
+  rawContentLength: number
+  emittedContentLength: number
+  emittedToolCallCount: number
+  suppressedMalformedToolOutput: boolean
+  suppressedReason?: 'invalid_tool_name' | 'malformed_tool_output'
+}
+
 export class ToolStreamParser {
   private readonly plan: ToolCallingPlan
   private buffer = ''
   private isBufferingToolCall = false
   private emittedToolCall = false
   private nextToolCallIndex = 0
+  private observation: ToolStreamObservation = {
+    rawContentLength: 0,
+    emittedContentLength: 0,
+    emittedToolCallCount: 0,
+    suppressedMalformedToolOutput: false,
+  }
 
   constructor(plan: ToolCallingPlan) {
     this.plan = plan
@@ -15,6 +29,7 @@ export class ToolStreamParser {
   push(content: string, baseChunk: any, includeRole: boolean = false): any[] {
     if (!content || !this.plan.shouldParseResponse) return []
 
+    this.observation.rawContentLength += content.length
     this.buffer += content
     const chunks: any[] = []
 
@@ -22,18 +37,23 @@ export class ToolStreamParser {
       const markerStart = findMarkerStart(this.buffer, this.plan)
       if (markerStart.matched) {
         if (markerStart.index > 0) {
-          chunks.push(createContentChunk(baseChunk, this.buffer.slice(0, markerStart.index), includeRole))
+          const emitted = this.buffer.slice(0, markerStart.index)
+          this.observation.emittedContentLength += emitted.length
+          chunks.push(createContentChunk(baseChunk, emitted, includeRole))
         }
         this.buffer = this.buffer.slice(markerStart.index)
         this.isBufferingToolCall = true
       } else if (markerStart.partial) {
         if (markerStart.index > 0) {
-          chunks.push(createContentChunk(baseChunk, this.buffer.slice(0, markerStart.index), includeRole))
+          const emitted = this.buffer.slice(0, markerStart.index)
+          this.observation.emittedContentLength += emitted.length
+          chunks.push(createContentChunk(baseChunk, emitted, includeRole))
           this.buffer = this.buffer.slice(markerStart.index)
         }
         this.isBufferingToolCall = true
         return chunks
       } else {
+        this.observation.emittedContentLength += this.buffer.length
         chunks.push(createContentChunk(baseChunk, this.buffer, includeRole))
         this.buffer = ''
         return chunks
@@ -49,6 +69,7 @@ export class ToolStreamParser {
           id: toolCall.id || `call_${this.nextToolCallIndex}`,
         }
         this.nextToolCallIndex += 1
+        this.observation.emittedToolCallCount += 1
         chunks.push(createToolCallChunk(baseChunk, indexedToolCall, includeRole && !this.emittedToolCall))
       }
       this.emittedToolCall = true
@@ -58,6 +79,10 @@ export class ToolStreamParser {
     }
 
     if (parsed.invalidToolNames.length > 0 || parsed.rawMatches.length > 0) {
+      this.observation.suppressedMalformedToolOutput = true
+      this.observation.suppressedReason = parsed.invalidToolNames.length > 0
+        ? 'invalid_tool_name'
+        : 'malformed_tool_output'
       console.warn(
         `[ToolStreamParser] Dropping tool call buffer — invalid names: [${parsed.invalidToolNames.join(', ')}], ` +
         `allowed names: [${[...this.plan.allowedToolNames].join(', ')}], ` +
@@ -83,6 +108,7 @@ export class ToolStreamParser {
         }
         this.nextToolCallIndex += 1
         this.emittedToolCall = true
+        this.observation.emittedToolCallCount += 1
         return createToolCallChunk(baseChunk, indexedToolCall, false)
       })
       this.buffer = ''
@@ -94,6 +120,9 @@ export class ToolStreamParser {
     const text = this.buffer
     this.buffer = ''
     this.isBufferingToolCall = false
+    if (shouldReleaseText) {
+      this.observation.emittedContentLength += text.length
+    }
     return shouldReleaseText ? [createContentChunk(baseChunk, text, false)] : []
   }
 
@@ -103,6 +132,12 @@ export class ToolStreamParser {
 
   isBuffering(): boolean {
     return this.isBufferingToolCall
+  }
+
+  getObservation(): ToolStreamObservation {
+    return {
+      ...this.observation,
+    }
   }
 }
 

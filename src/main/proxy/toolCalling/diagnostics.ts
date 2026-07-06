@@ -1,4 +1,11 @@
 import type { ToolClientAdapterId, ToolSmokeCategory } from '../../../shared/toolCalling.ts'
+import type {
+  EmptyOutputPolicy,
+  ProviderTurnOutcome,
+  ToolContractSourceStep,
+  ToolSuppressedReason,
+  ToolValidationFailureKind,
+} from './types.ts'
 
 export interface ToolCallingSmokeResult {
   success: boolean
@@ -53,7 +60,10 @@ export function buildSmokeFixture(clientAdapterId: ToolClientAdapterId) {
 export type ToolDiagnosticEventType =
   | 'tool_catalog_resolved'
   | 'tool_catalog_drift_detected'
+  | 'tool_contract_resolved'
   | 'tool_contract_injected'
+  | 'tool_validation_failed'
+  | 'tool_stream_buffer_suppressed'
   | 'tool_availability_drift_detected'
   | 'tool_availability_retry_result'
   | 'provider_empty_output'
@@ -72,6 +82,11 @@ export interface ToolDiagnosticEvent {
   protocol?: string
   headerVersion?: number
   retryResult?: 'skipped' | 'attempted' | 'succeeded' | 'failed'
+  toolSourceChain?: ToolContractSourceStep[]
+  terminalOutcome?: ProviderTurnOutcome
+  emptyOutputPolicy?: EmptyOutputPolicy
+  validationFailureKind?: ToolValidationFailureKind
+  suppressedReason?: ToolSuppressedReason
   responseMode?: 'streaming' | 'non_streaming'
   contentLength?: number
   reasoningLength?: number
@@ -98,6 +113,11 @@ export function recordToolDiagnosticEvent(event: Omit<ToolDiagnosticEvent, 'time
     protocol: event.protocol,
     headerVersion: event.headerVersion,
     retryResult: event.retryResult,
+    toolSourceChain: event.toolSourceChain ? [...event.toolSourceChain] : undefined,
+    terminalOutcome: event.terminalOutcome,
+    emptyOutputPolicy: event.emptyOutputPolicy,
+    validationFailureKind: event.validationFailureKind,
+    suppressedReason: event.suppressedReason,
     responseMode: event.responseMode,
     contentLength: event.contentLength,
     reasoningLength: event.reasoningLength,
@@ -117,6 +137,7 @@ export function getToolDiagnosticEvents(): ToolDiagnosticEvent[] {
     toolNames: event.toolNames ? [...event.toolNames] : undefined,
     schemaHashes: event.schemaHashes ? { ...event.schemaHashes } : undefined,
     driftKinds: event.driftKinds ? [...event.driftKinds] : undefined,
+    toolSourceChain: event.toolSourceChain ? [...event.toolSourceChain] : undefined,
     fragmentTypes: event.fragmentTypes ? [...event.fragmentTypes] : undefined,
   }))
 }

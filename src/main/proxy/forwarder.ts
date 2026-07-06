@@ -6,33 +6,65 @@
 import axios, { AxiosRequestConfig, AxiosResponse, AxiosError } from 'axios'
 import http2 from 'http2'
 import { PassThrough } from 'stream'
-import { Account, Provider } from '../store/types'
-import { ForwardResult, ChatCompletionRequest, ProxyContext } from './types'
-import { proxyStatusManager } from './status'
-import { storeManager } from '../store/store'
-import { DeepSeekAdapter } from './adapters/deepseek'
-import { DeepSeekStreamHandler } from './adapters/deepseek-stream'
-import { GLMAdapter, GLMStreamHandler } from './adapters/glm'
-import { KimiAdapter, KimiStreamHandler } from './adapters/kimi'
-import { MimoAdapter, MimoStreamHandler } from './adapters/mimo'
-import { QwenAdapter, QwenStreamHandler } from './adapters/qwen'
-import { QwenAiAdapter, QwenAiStreamHandler } from './adapters/qwen-ai'
-import { ZaiAdapter, ZaiStreamHandler } from './adapters/zai'
-import { MiniMaxAdapter, MiniMaxStreamHandler } from './adapters/minimax'
-import { PerplexityAdapter } from './adapters/perplexity'
-import { PerplexityStreamHandler } from './adapters/perplexity-stream'
-import { ToolCallingEngine } from './toolCalling/ToolCallingEngine'
-import type { ToolCallingTransformResult } from './toolCalling/types'
-import { preserveContextManagedMessageMetadata } from './contextMessageMetadata'
-import { sessionManager } from './sessionManager'
+import { Account, Provider } from '../store/types.ts'
+import { ForwardResult, ChatCompletionRequest, ProxyContext } from './types.ts'
+import { proxyStatusManager } from './status.ts'
+import { storeManager } from '../store/store.ts'
+import { DeepSeekAdapter } from './adapters/deepseek.ts'
+import { DeepSeekStreamHandler } from './adapters/deepseek-stream.ts'
+import { GLMAdapter, GLMStreamHandler } from './adapters/glm.ts'
+import { KimiAdapter, KimiStreamHandler } from './adapters/kimi.ts'
+import { MimoAdapter, MimoStreamHandler } from './adapters/mimo.ts'
+import { QwenAdapter, QwenStreamHandler } from './adapters/qwen.ts'
+import { QwenAiAdapter, QwenAiStreamHandler } from './adapters/qwen-ai.ts'
+import { ZaiAdapter, ZaiStreamHandler } from './adapters/zai.ts'
+import { MiniMaxAdapter, MiniMaxStreamHandler } from './adapters/minimax.ts'
+import { PerplexityAdapter } from './adapters/perplexity.ts'
+import { PerplexityStreamHandler } from './adapters/perplexity-stream.ts'
+import { ToolCallingEngine } from './toolCalling/ToolCallingEngine.ts'
+import type { ToolCallingTransformResult } from './toolCalling/types.ts'
+import { inspectNonStreamAssistantOutput } from './toolCalling/outputInspection.ts'
+import { preserveContextManagedMessageMetadata } from './contextMessageMetadata.ts'
+import { sessionManager } from './sessionManager.ts'
 import {
   createContextManagementService,
   SummaryGenerator,
   type ChatMessage as ContextChatMessage,
-} from './services/contextManagementService'
+} from './services/contextManagementService.ts'
 
 function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()
+}
+
+/**
+ * Conversation state cache for multi-turn support
+ * Stores conversation/parent-message IDs keyed by tool session key
+ */
+export interface ConversationState {
+  parentMessageId?: string
+  conversationId?: string
+  lastUsedAt: number
+}
+
+export const CONVERSATION_STATE_TTL = 5 * 60 * 1000
+export const conversationStateCache = new Map<string, ConversationState>()
+
+export function getConversationState(key: string): ConversationState | undefined {
+  const state = conversationStateCache.get(key)
+  if (state && Date.now() - state.lastUsedAt < CONVERSATION_STATE_TTL) {
+    return state
+  }
+  conversationStateCache.delete(key)
+  return undefined
+}
+
+export function setConversationState(key: string, update: Partial<ConversationState>): void {
+  const existing = conversationStateCache.get(key)
+  conversationStateCache.set(key, {
+    ...existing,
+    ...update,
+    lastUsedAt: Date.now(),
+  } as ConversationState)
 }
 
 type ProviderForwarder = {
@@ -43,7 +75,8 @@ type ProviderForwarder = {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    context: ProxyContext
   ) => Promise<ForwardResult>
 }
 
@@ -61,56 +94,56 @@ export class RequestForwarder {
     {
       name: 'deepseek',
       matches: DeepSeekAdapter.isDeepSeekProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardDeepSeek(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, context) =>
+        this.forwardDeepSeek(request, account, provider, actualModel, startTime, context),
     },
     {
       name: 'glm',
       matches: GLMAdapter.isGLMProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardGLM(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, context) =>
+        this.forwardGLM(request, account, provider, actualModel, startTime, context),
     },
     {
       name: 'kimi',
       matches: KimiAdapter.isKimiProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardKimi(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, context) =>
+        this.forwardKimi(request, account, provider, actualModel, startTime, context),
     },
     {
       name: 'qwen',
       matches: QwenAdapter.isQwenProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardQwen(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, context) =>
+        this.forwardQwen(request, account, provider, actualModel, startTime, context),
     },
     {
       name: 'qwen-ai',
       matches: QwenAiAdapter.isQwenAiProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardQwenAi(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, context) =>
+        this.forwardQwenAi(request, account, provider, actualModel, startTime, context),
     },
     {
       name: 'zai',
       matches: ZaiAdapter.isZaiProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardZai(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, context) =>
+        this.forwardZai(request, account, provider, actualModel, startTime, context),
     },
     {
       name: 'minimax',
       matches: MiniMaxAdapter.isMiniMaxProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardMiniMax(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, context) =>
+        this.forwardMiniMax(request, account, provider, actualModel, startTime, context),
     },
     {
       name: 'mimo',
       matches: MimoAdapter.isMimoProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardMimo(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, context) =>
+        this.forwardMimo(request, account, provider, actualModel, startTime, context),
     },
     {
       name: 'perplexity',
       matches: PerplexityAdapter.isPerplexityProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardPerplexity(request, account, provider, actualModel, startTime),
+      forward: (request, account, provider, actualModel, startTime, context) =>
+        this.forwardPerplexity(request, account, provider, actualModel, startTime, context),
     },
   ]
 
@@ -150,6 +183,26 @@ export class RequestForwarder {
     return engine.applyNonStreamResponse(result, transformed.plan)
   }
 
+  private inspectManagedNonStreamOutput(
+    result: any,
+    transformed: ToolCallingTransformResult,
+    startTime: number
+  ): ForwardResult | undefined {
+    const inspection = inspectNonStreamAssistantOutput({
+      result,
+      plan: transformed.plan,
+    })
+
+    if (inspection.ok) return undefined
+
+    return {
+      success: false,
+      status: 502,
+      error: inspection.error,
+      latency: Date.now() - startTime,
+    }
+  }
+
   private buildAvailabilityRetryRequest(
     originalRequest: ChatCompletionRequest,
     transformed: ToolCallingTransformResult,
@@ -171,6 +224,20 @@ export class RequestForwarder {
 
   private buildToolCatalogSessionKey(provider: Provider, account: Account, actualModel: string): string {
     return `${provider.id}:${account.id}:${actualModel}`
+  }
+
+  private buildProviderConversationStateKey(
+    provider: Provider,
+    account: Account,
+    actualModel: string,
+    request: ChatCompletionRequest,
+    context: ProxyContext
+  ): string {
+    const sessionDimension = typeof request.user === 'string' && request.user.trim().length > 0
+      ? request.user.trim()
+      : context.requestId
+
+    return `${provider.id}:${account.id}:${actualModel}:${sessionDimension}`
   }
 
   /**
@@ -353,7 +420,7 @@ export class RequestForwarder {
 
     const dedicatedForwarder = this.providerForwarders.find(forwarder => forwarder.matches(provider))
     if (dedicatedForwarder) {
-      return dedicatedForwarder.forward(request, account, provider, actualModel, startTime)
+      return dedicatedForwarder.forward(request, account, provider, actualModel, startTime, context)
     }
 
     try {
@@ -429,13 +496,16 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    context: ProxyContext
   ): Promise<ForwardResult> {
     try {
+      const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel)
+      const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
       const transformed = this.transformRequestForPromptToolUse(
         request,
         provider,
-        this.buildToolCatalogSessionKey(provider, account, actualModel)
+        toolSessionKey
       )
       const transformedRequest = {
         ...request,
@@ -443,8 +513,11 @@ export class RequestForwarder {
         tools: transformed.tools,
       }
 
+      // Check for existing conversation state (multi-turn)
+      const convState = getConversationState(conversationStateKey)
+
       const adapter = new DeepSeekAdapter(provider, account)
-      
+
       const { response, sessionId } = await adapter.chatCompletion({
         model: request.model,
         messages: transformedRequest.messages as any,
@@ -452,6 +525,7 @@ export class RequestForwarder {
         temperature: transformedRequest.temperature,
         web_search: transformedRequest.web_search,
         reasoning_effort: transformedRequest.reasoning_effort,
+        parentMessageId: convState?.parentMessageId,
       })
 
       const latency = Date.now() - startTime
@@ -475,6 +549,15 @@ export class RequestForwarder {
         }
       }
 
+      // Prepare callback for saving conversation state
+      const saveConversationState = () => {
+        const lastMessageId = handler.getLastMessageId()
+        if (lastMessageId) {
+          setConversationState(toolSessionKey, { parentMessageId: lastMessageId })
+          setConversationState(conversationStateKey, { parentMessageId: lastMessageId })
+        }
+      }
+
       // Prepare callback for deleting session
       const deleteSessionCallback = shouldDeleteSession()
         ? async () => {
@@ -486,11 +569,20 @@ export class RequestForwarder {
           }
         : undefined
 
+      // Compose state-saving with optional delete for stream end callback
+      // handler's onEnd is sync (() => void); async delete is fire-and-forget (original behavior)
+      const composedEndCallback = deleteSessionCallback
+        ? () => {
+            saveConversationState()
+            deleteSessionCallback()
+          }
+        : saveConversationState
+
       // DeepSeek always returns streaming response
       const handler = new DeepSeekStreamHandler(
         actualModel,
         sessionId,
-        deleteSessionCallback,
+        composedEndCallback,
         transformedRequest.web_search,
         transformedRequest.reasoning_effort,
         transformed.plan,
@@ -536,11 +628,22 @@ export class RequestForwarder {
         )
         result = await retryHandler.handleNonStream(retryResponse.data, retryResponse)
         this.applyToolCallsToResponse(result, transformed)
+        // Save state from retry handler (original handler's state is stale)
+        const retryMsgId = retryHandler.getLastMessageId()
+        if (retryMsgId) {
+          setConversationState(conversationStateKey, { parentMessageId: retryMsgId })
+        }
+      } else {
+        // Save state from original handler (no retry occurred)
+        saveConversationState()
       }
-      
+
       if (deleteSessionCallback) {
         await deleteSessionCallback()
       }
+
+      const emptyOutputFailure = this.inspectManagedNonStreamOutput(result, transformed, startTime)
+      if (emptyOutputFailure) return emptyOutputFailure
 
       return {
         success: true,
@@ -568,19 +671,25 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    context: ProxyContext
   ): Promise<ForwardResult> {
     try {
+      const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel)
+      const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
       const transformed = this.transformRequestForPromptToolUse(
         request,
         provider,
-        this.buildToolCatalogSessionKey(provider, account, actualModel)
+        toolSessionKey
       )
       const transformedRequest = {
         ...request,
         messages: transformed.messages,
         tools: transformed.tools,
       }
+
+      // Check for existing conversation state (multi-turn)
+      const convState = getConversationState(conversationStateKey)
 
       const adapter = new GLMAdapter(provider, account)
       const { response, conversationId } = await adapter.chatCompletion({
@@ -592,6 +701,7 @@ export class RequestForwarder {
         web_search: request.web_search,
         reasoning_effort: request.reasoning_effort,
         deep_research: request.deep_research,
+        conversationId: convState?.conversationId,
       })
 
       const latency = Date.now() - startTime
@@ -628,9 +738,20 @@ export class RequestForwarder {
           transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
             const convId = handler.getConversationId()
             if (convId) {
+              setConversationState(conversationStateKey, { conversationId: convId })
               adapter.deleteConversation(convId).catch(err => {
                 console.error('[GLM] Failed to delete session:', err)
               })
+            }
+            return originalEnd(chunk, encoding, callback)
+          }
+        } else {
+          // Save conversation state when stream ends (no deletion)
+          const originalEnd = transformedStream.end.bind(transformedStream)
+          transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
+            const convId = handler.getConversationId()
+            if (convId) {
+              setConversationState(conversationStateKey, { conversationId: convId })
             }
             return originalEnd(chunk, encoding, callback)
           }
@@ -665,6 +786,17 @@ let result = await handler.handleNonStream(response.data, response)
         const retryHandler = new GLMStreamHandler(actualModel, undefined, undefined, transformed.plan as any)
         result = await retryHandler.handleNonStream(retryResponse.data, retryResponse)
         this.applyToolCallsToResponse(result, transformed)
+        // Save state from retry handler (original handler's conversationId is stale)
+        const retryConvId = retryHandler.getConversationId()
+        if (retryConvId) {
+          setConversationState(conversationStateKey, { conversationId: retryConvId })
+        }
+      } else {
+        // Save state from original handler (no retry occurred)
+        const convId = handler.getConversationId()
+        if (convId) {
+          setConversationState(conversationStateKey, { conversationId: convId })
+        }
       }
 
       if (shouldDeleteSession()) {
@@ -673,6 +805,9 @@ let result = await handler.handleNonStream(response.data, response)
           await adapter.deleteConversation(convId)
         }
       }
+
+      const emptyOutputFailure = this.inspectManagedNonStreamOutput(result, transformed, startTime)
+      if (emptyOutputFailure) return emptyOutputFailure
 
       return {
         success: true,
@@ -784,6 +919,9 @@ let result = await handler.handleNonStream(response.data, response)
           await adapter.deleteConversation(realChatId)
         }
       }
+
+      const emptyOutputFailure = this.inspectManagedNonStreamOutput(result, transformed, startTime)
+      if (emptyOutputFailure) return emptyOutputFailure
 
       return {
         success: true,
@@ -898,6 +1036,9 @@ let result = await handler.handleNonStream(response.data, response)
         await deleteSessionCallback(sid)
       }
 
+      const emptyOutputFailure = this.inspectManagedNonStreamOutput(result, transformed, startTime)
+      if (emptyOutputFailure) return emptyOutputFailure
+
       return {
         success: true,
         status: response.status,
@@ -1009,6 +1150,9 @@ let result = await handler.handleNonStream(response.data, response)
       if (shouldDeleteSession()) {
         await adapter.deleteChat(chatId)
       }
+
+      const emptyOutputFailure = this.inspectManagedNonStreamOutput(result, transformed, startTime)
+      if (emptyOutputFailure) return emptyOutputFailure
 
       return {
         success: true,
@@ -1133,6 +1277,9 @@ let result = await handler.handleNonStream(response.data, response)
         await deleteChatCallback(chatId)
       }
 
+      const emptyOutputFailure = this.inspectManagedNonStreamOutput(result, transformed, startTime)
+      if (emptyOutputFailure) return emptyOutputFailure
+
       return {
         success: true,
         status: response.status,
@@ -1250,6 +1397,9 @@ let result = await handler.handleNonStream(response.data, response)
           await deleteChatCallback(chatId)
         }
 
+        const emptyOutputFailure = this.inspectManagedNonStreamOutput(responseData, transformed, startTime)
+        if (emptyOutputFailure) return emptyOutputFailure
+
         return {
           success: true,
           status: response.status,
@@ -1286,6 +1436,9 @@ let result = await handler.handleNonStream(response.data, response)
         if (deleteChatCallback) {
           await deleteChatCallback(chatId)
         }
+
+        const emptyOutputFailure = this.inspectManagedNonStreamOutput(result, transformed, startTime)
+        if (emptyOutputFailure) return emptyOutputFailure
 
         return {
           success: true,
@@ -1429,6 +1582,9 @@ let result = await handler.handleNonStream(response.data, response)
         await deleteSessionCallback(conversationId)
       }
 
+      const emptyOutputFailure = this.inspectManagedNonStreamOutput(parsedResult, transformed, startTime)
+      if (emptyOutputFailure) return emptyOutputFailure
+
       return {
         success: true,
         status: response.status,
@@ -1524,6 +1680,9 @@ let result = await handler.handleNonStream(response.data, response)
       if (shouldDeleteSession()) {
         await adapter.deleteSession(sessionId)
       }
+
+      const emptyOutputFailure = this.inspectManagedNonStreamOutput(result, transformed, startTime)
+      if (emptyOutputFailure) return emptyOutputFailure
       
       return {
         success: true,

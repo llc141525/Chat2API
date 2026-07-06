@@ -52,6 +52,21 @@ function managedPlan(providerId: 'glm' | 'qwen'): ToolCallingPlan {
   }
 }
 
+function bashManagedPlan(providerId: 'glm' | 'qwen'): ToolCallingPlan {
+  return {
+    mode: 'managed',
+    protocol: 'managed_xml',
+    clientAdapterId: 'standard-openai-tools',
+    providerId,
+    tools: [{ name: 'bash', description: 'Run a command', parameters: { type: 'object', properties: { command: { type: 'string' } } }, source: 'openai' }],
+    shouldInjectPrompt: true,
+    shouldParseResponse: true,
+    toolChoiceMode: 'auto',
+    allowedToolNames: new Set(['bash']),
+    diagnostics: {} as any,
+  }
+}
+
 function collect(stream: NodeJS.ReadableStream): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: string[] = []
@@ -784,7 +799,7 @@ test('detectStart partial-matches <|CHAT2API|inv prefix', () => {
 })
 
 test('GLM stream emits standalone <|CHAT2API|invoke> as OpenAI tool_calls', async () => {
-  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
   const body = [
     sseEvent({
       conversation_id: 'glm-standalone-1',
@@ -812,7 +827,7 @@ test('GLM stream emits standalone <|CHAT2API|invoke> as OpenAI tool_calls', asyn
 })
 
 test('GLM stream emits standalone invoke with preamble text correctly', async () => {
-  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
   const body = [
     sseEvent({
       conversation_id: 'glm-standalone-2',
@@ -840,7 +855,7 @@ test('GLM stream emits standalone invoke with preamble text correctly', async ()
 })
 
 test('standalone invoke with invalid tool name is silently dropped', async () => {
-  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
   const invalidXml = '<|CHAT2API|invoke name="nonexistent"><|CHAT2API|parameter name="x"><![CDATA[1]]></|CHAT2API|parameter></|CHAT2API|invoke>'
   const body = [
     sseEvent({

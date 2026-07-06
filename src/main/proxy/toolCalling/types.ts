@@ -41,6 +41,36 @@ export interface NormalizedToolResult {
 
 export type ToolCatalogSource = 'current_request' | 'session_catalog' | 'restored_from_history' | 'none'
 
+export type ToolContractSourceStep =
+  | 'current_request'
+  | 'session_catalog'
+  | 'message_history'
+  | 'safe_empty'
+
+export type ToolContractHistoryMode = 'openai_native' | 'managed_protocol'
+
+export type EmptyOutputPolicy = 'diagnose_and_fail' | 'pass_through_without_tool_semantics'
+
+export type ProviderTurnOutcome =
+  | 'content'
+  | 'tool_calls'
+  | 'provider_empty'
+  | 'runtime_suppressed_malformed_tool_output'
+  | 'adapter_parse_error'
+  | 'provider_error'
+
+export type ToolValidationFailureKind =
+  | 'unknown_tool_name'
+  | 'invalid_required_fields'
+  | 'arguments_not_object'
+  | 'arguments_invalid_json'
+  | 'malformed_container'
+  | 'schema_validation_failed'
+  | 'protocol_mismatch'
+  | 'malformed_tool_output'
+
+export type ToolSuppressedReason = 'invalid_tool_name' | 'malformed_tool_output'
+
 export type ToolCatalogDriftKind =
   | 'added_tool'
   | 'removed_tool'
@@ -69,8 +99,27 @@ export interface ToolCatalogDiagnostics {
   reason?: string
 }
 
+export interface ToolTurnContract {
+  turnId: string
+  sessionId: string | null
+  providerId: string
+  model: string
+  protocol: ToolProtocolId
+  snapshotFingerprint: string | null
+  tools: ReadonlyArray<NormalizedToolDefinition>
+  allowedToolNames: ReadonlySet<string>
+  toolChoiceMode: 'auto' | 'none' | 'required' | 'forced'
+  forcedToolName?: string
+  shouldInjectPrompt: boolean
+  shouldParseResponse: boolean
+  historyMode: ToolContractHistoryMode
+  emptyOutputPolicy: EmptyOutputPolicy
+  toolSourceChain: ReadonlyArray<ToolContractSourceStep>
+}
+
 export interface ToolCallDiagnostics {
   requestId?: string
+  turnId?: string
   clientAdapterId: string
   detectedClientType?: string
   providerId: string
@@ -94,6 +143,11 @@ export interface ToolCallDiagnostics {
   catalogFingerprint?: string
   catalogDriftKinds?: ToolCatalogDriftKind[]
   catalogBlocked?: boolean
+  toolSourceChain?: ToolContractSourceStep[]
+  terminalOutcome?: ProviderTurnOutcome
+  emptyOutputPolicy?: EmptyOutputPolicy
+  validationFailureKind?: ToolValidationFailureKind
+  suppressedReason?: ToolSuppressedReason
   availabilityDriftDetected?: boolean
   availabilityRetryResult?: 'skipped' | 'attempted' | 'succeeded' | 'failed'
 }
@@ -119,6 +173,7 @@ export interface ToolCallingPlan {
   catalogDiagnostics: ToolCatalogDiagnostics
   availabilityRetryAllowed: boolean
   availabilityRetryAttempted?: boolean
+  contract: ToolTurnContract
   diagnostics: ToolCallDiagnostics
 }
 

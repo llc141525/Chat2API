@@ -219,6 +219,28 @@ export interface AppConfig {
   managementApi: ManagementApiConfig
   /** Context management configuration */
   contextManagement: ContextManagementConfig
+  /** MCP server configurations */
+  mcpServers: Record<string, McpServerConfig>
+}
+
+export type McpServerStatus = 'available' | 'unavailable' | 'circuitOpen' | 'reconnecting'
+
+export interface McpServerCircuitState {
+  open: boolean
+  openedAt?: number
+  failureCount: number
+  lastFailureAt?: number
+}
+
+export interface McpServerConfig {
+  name: string
+  command: string
+  args?: string[]
+  env?: Record<string, string>
+  timeout?: number
+  enabled: boolean
+  status?: McpServerStatus
+  circuitState?: McpServerCircuitState
 }
 
 /**
@@ -815,6 +837,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   toolPromptConfig: undefined,
   managementApi: DEFAULT_MANAGEMENT_API_CONFIG,
   contextManagement: DEFAULT_CONTEXT_MANAGEMENT_CONFIG,
+  mcpServers: {},
 }
 
 /**

@@ -49,3 +49,15 @@ test('managed provider profiles expose contract header and availability retry de
     assert.equal(profile.availabilityDriftRetry, 'enabled')
   }
 })
+
+test('managed provider profiles expose parser ownership and empty output policy facts', () => {
+  for (const providerId of ['glm', 'qwen', 'qwen-ai']) {
+    const profile = getProviderToolProfile(providerId)
+
+    assert.equal(profile.managedPromptOwner, 'ToolCallingEngine')
+    assert.equal(profile.parseStreaming, true)
+    assert.equal(profile.parseNonStreaming, true)
+    assert.equal(profile.supportsIntentionalEmptyOutput, false)
+    assert.equal(profile.preservesToolHistory, true)
+  }
+})
