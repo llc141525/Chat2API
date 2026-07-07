@@ -223,7 +223,14 @@ function emptyParseResult(buffer: string, protocol: ToolParseResult['protocol'])
 
 function isUnterminated(protocolResult: ProtocolStructureResult): boolean {
   return protocolResult.kind === 'malformed_container'
-    && protocolResult.malformedIntent?.failureKind === 'unterminated_container'
+    && (
+      protocolResult.malformedIntent?.failureKind === 'unterminated_container'
+      || protocolResult.warnings.some((warning) => (
+        warning.kind === 'missing_container_close'
+        || warning.kind === 'missing_invoke_close'
+        || warning.kind === 'missing_parameter_close'
+      ))
+    )
 }
 
 function protocolRawMatches(protocolResult: ProtocolStructureResult, buffer: string): string[] {

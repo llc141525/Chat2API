@@ -81,6 +81,22 @@ test('Chat2API XML marker split across chunks emits a tool call', () => {
   assert.equal(chunks.at(-1)?.choices[0].delta.tool_calls[0].function.name, 'default_api:read_file')
 })
 
+test('Chat2API XML split after invoke open keeps buffering until parameters arrive', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const first = parser.push(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file">',
+    baseChunk,
+  )
+  const second = parser.push(
+    '<|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+    baseChunk,
+  )
+
+  assert.deepEqual(first, [])
+  assert.equal(parser.hasEmittedToolCall(), true)
+  assert.equal(second.at(-1)?.choices[0].delta.tool_calls[0].function.name, 'default_api:read_file')
+})
+
 test('partial Chat2API start marker is reported as buffered so stream handlers do not leak it', () => {
   const parser = new ToolStreamParser(plan('managed_xml'))
   const chunks = parser.push('<|CHAT2API|tool_calls', baseChunk)
@@ -116,6 +132,17 @@ test('stream parser rejects allowed tool calls that omit required parameters', (
     false,
     'A stream tool call with the right tool name but missing required filePath must not be emitted',
   )
+  assert.equal(parser.hasEmittedToolCall(), false)
+})
+
+test('stream parser rejects standalone invoke that omits required parameters', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const chunks = parser.push(
+    '<|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="path">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke>',
+    baseChunk,
+  )
+
+  assert.equal(chunks.some((chunk) => chunk.choices[0].delta.tool_calls), false)
   assert.equal(parser.hasEmittedToolCall(), false)
 })
 

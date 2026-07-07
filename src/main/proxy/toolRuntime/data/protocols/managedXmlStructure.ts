@@ -13,6 +13,7 @@ import type { ProtocolIntentDetection, StructureProtocolAdapter } from './Protoc
 const PROTOCOL: ToolProtocolId = 'managed_xml'
 const CHAT2API_START = '<|CHAT2API|tool_calls>'
 const CHAT2API_END = '</|CHAT2API|tool_calls>'
+const CHAT2API_INVOKE_START = '<|CHAT2API|invoke'
 const INVOKE_OPEN = /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>/g
 const PARAM_OPEN = /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>/g
 const INVOKE_CLOSE = '</|CHAT2API|invoke>'
@@ -57,6 +58,10 @@ export const managedXmlStructureAdapter: StructureProtocolAdapter = {
       return { kind: 'no_intent', protocol: PROTOCOL, content: rawOutput }
     }
 
+    if (marker.kind === 'standalone') {
+      return extractStandaloneInvoke(parseable, marker.index)
+    }
+
     const variant = marker.value === CHAT2API_START ? chat2ApiVariant() : canonicalVariant()
     const warnings = detectForeignMarkers(parseable)
     const start = marker.index
@@ -96,6 +101,47 @@ export const managedXmlStructureAdapter: StructureProtocolAdapter = {
       warnings: extraction.warnings,
     }
   },
+}
+
+function extractStandaloneInvoke(parseable: string, start: number): ProtocolStructureResult {
+  const variant = chat2ApiVariant()
+  const warnings = detectForeignMarkers(parseable)
+  variant.invokeOpen.lastIndex = start
+  const invokeMatch = variant.invokeOpen.exec(parseable)
+  if (!invokeMatch || invokeMatch.index !== start) {
+    return malformed(parseable, [warning('malformed_parameter', start, parseable.length)], 'malformed_container')
+  }
+
+  const bodyStart = variant.invokeOpen.lastIndex
+  const close = parseable.indexOf(variant.invokeClose, bodyStart)
+  if (warnings.length > 0) {
+    return malformed(parseable, warnings, 'mixed_protocol_container')
+  }
+  if (close === -1) {
+    return malformed(parseable, [warning('missing_invoke_close', start, parseable.length)], 'unterminated_container')
+  }
+
+  const body = parseable.slice(bodyStart, close)
+  const parameterResult = extractParameters(body, bodyStart, variant)
+  if (parameterResult.failureKind) {
+    return malformed(parseable, parameterResult.warnings, parameterResult.failureKind)
+  }
+
+  const blockEnd = close + variant.invokeClose.length
+  const rawBlock = parseable.slice(start, blockEnd)
+  return {
+    kind: 'container',
+    protocol: PROTOCOL,
+    extractedCalls: [{
+      callIndex: 0,
+      rawToolName: decodeXmlAttribute(invokeMatch[1]),
+      rawParameters: parameterResult.parameters,
+      rawSpan: { start, end: blockEnd },
+    }],
+    rawMatches: [rawBlock],
+    cleanContent: parseable.slice(0, start) + parseable.slice(blockEnd),
+    warnings: parameterResult.warnings,
+  }
 }
 
 function extractCalls(
@@ -350,12 +396,16 @@ function canonicalVariant(): XmlVariant {
 }
 
 function containerStarts(): string[] {
-  return [CHAT2API_START, CANONICAL_START]
+  return [CHAT2API_START, CANONICAL_START, CHAT2API_INVOKE_START]
 }
 
-function findFirstMarker(value: string): { value: string; index: number } | null {
+function findFirstMarker(value: string): { value: string; index: number; kind: 'container' | 'standalone' } | null {
   return containerStarts()
-    .map((marker) => ({ value: marker, index: value.indexOf(marker) }))
+    .map((marker) => ({
+      value: marker,
+      index: value.indexOf(marker),
+      kind: marker === CHAT2API_INVOKE_START ? 'standalone' as const : 'container' as const,
+    }))
     .filter((marker) => marker.index !== -1)
     .sort((left, right) => left.index - right.index)[0] ?? null
 }
