@@ -17,6 +17,12 @@ const INVOKE_OPEN = /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>/g
 const PARAM_OPEN = /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>/g
 const INVOKE_CLOSE = '</|CHAT2API|invoke>'
 const PARAM_CLOSE = '</|CHAT2API|parameter>'
+const CANONICAL_START = '<tool_calls>'
+const CANONICAL_END = '</tool_calls>'
+const CANONICAL_INVOKE_OPEN = /<invoke\s+name="([^"]+)"\s*>/g
+const CANONICAL_PARAM_OPEN = /<parameter\s+name="([^"]+)"\s*>/g
+const CANONICAL_INVOKE_CLOSE = '</invoke>'
+const CANONICAL_PARAM_CLOSE = '</parameter>'
 const FOREIGN_MARKERS = ['</arg_value>', '</tool_call>', '[function_calls]', '[/function_calls]', '[/call]']
 
 export const managedXmlStructureAdapter: StructureProtocolAdapter = {
@@ -24,14 +30,15 @@ export const managedXmlStructureAdapter: StructureProtocolAdapter = {
 
   detectIntent(rawOutput: string): ProtocolIntentDetection {
     const stripped = stripFencedCodeBlocks(rawOutput)
-    const index = stripped.indexOf(CHAT2API_START)
+    const marker = findFirstMarker(stripped)
+    const index = marker?.index ?? -1
     if (index !== -1) {
       return { matched: true, partial: false, markerStart: index }
     }
 
     for (let start = 0; start < stripped.length; start += 1) {
       const suffix = stripped.slice(start)
-      if (CHAT2API_START.startsWith(suffix)) {
+      if (containerStarts().some((candidate) => candidate.startsWith(suffix))) {
         return { matched: false, partial: true, markerStart: start }
       }
     }
@@ -45,13 +52,15 @@ export const managedXmlStructureAdapter: StructureProtocolAdapter = {
     }
 
     const parseable = stripFencedCodeBlocks(rawOutput)
-    if (!parseable.includes(CHAT2API_START)) {
+    const marker = findFirstMarker(parseable)
+    if (!marker) {
       return { kind: 'no_intent', protocol: PROTOCOL, content: rawOutput }
     }
 
+    const variant = marker.value === CHAT2API_START ? chat2ApiVariant() : canonicalVariant()
     const warnings = detectForeignMarkers(parseable)
-    const start = parseable.indexOf(CHAT2API_START)
-    const end = parseable.indexOf(CHAT2API_END, start + CHAT2API_START.length)
+    const start = marker.index
+    const end = parseable.indexOf(variant.containerEnd, start + variant.containerStart.length)
 
     if (warnings.length > 0) {
       return malformed(parseable, warnings, 'mixed_protocol_container')
@@ -65,10 +74,10 @@ export const managedXmlStructureAdapter: StructureProtocolAdapter = {
       )
     }
 
-    const blockEnd = end + CHAT2API_END.length
+    const blockEnd = end + variant.containerEnd.length
     const rawBlock = parseable.slice(start, blockEnd)
-    const inner = parseable.slice(start + CHAT2API_START.length, end)
-    const extraction = extractCalls(inner, start + CHAT2API_START.length)
+    const inner = parseable.slice(start + variant.containerStart.length, end)
+    const extraction = extractCalls(inner, start + variant.containerStart.length, variant)
 
     if (extraction.failureKind) {
       return malformed(parseable, extraction.warnings, extraction.failureKind)
@@ -92,6 +101,7 @@ export const managedXmlStructureAdapter: StructureProtocolAdapter = {
 function extractCalls(
   inner: string,
   offset: number,
+  variant: XmlVariant,
 ): {
   calls: ExtractedCallStructure[]
   warnings: ProtocolContainerWarning[]
@@ -100,25 +110,25 @@ function extractCalls(
   const calls: ExtractedCallStructure[] = []
   const warnings: ProtocolContainerWarning[] = []
   let invokeMatch: RegExpExecArray | null
-  INVOKE_OPEN.lastIndex = 0
+  variant.invokeOpen.lastIndex = 0
 
-  while ((invokeMatch = INVOKE_OPEN.exec(inner)) !== null) {
+  while ((invokeMatch = variant.invokeOpen.exec(inner)) !== null) {
     const invokeStart = offset + invokeMatch.index
-    const bodyStart = INVOKE_OPEN.lastIndex
-    const close = inner.indexOf(INVOKE_CLOSE, bodyStart)
+    const bodyStart = variant.invokeOpen.lastIndex
+    const close = inner.indexOf(variant.invokeClose, bodyStart)
     if (close === -1) {
       warnings.push(warning('missing_invoke_close', invokeStart, offset + inner.length))
       return { calls, warnings, failureKind: 'unterminated_container' }
     }
 
     const body = inner.slice(bodyStart, close)
-    const parameterResult = extractParameters(body, offset + bodyStart)
+    const parameterResult = extractParameters(body, offset + bodyStart, variant)
     warnings.push(...parameterResult.warnings)
     if (parameterResult.failureKind) {
       return { calls, warnings, failureKind: parameterResult.failureKind }
     }
 
-    const invokeEnd = offset + close + INVOKE_CLOSE.length
+    const invokeEnd = offset + close + variant.invokeClose.length
     calls.push({
       callIndex: calls.length,
       rawToolName: decodeXmlAttribute(invokeMatch[1]),
@@ -133,6 +143,7 @@ function extractCalls(
 function extractParameters(
   body: string,
   offset: number,
+  variant: XmlVariant,
 ): {
   parameters: ExtractedParameterStructure[]
   warnings: ProtocolContainerWarning[]
@@ -141,12 +152,12 @@ function extractParameters(
   const parameters: ExtractedParameterStructure[] = []
   const warnings: ProtocolContainerWarning[] = []
   let paramMatch: RegExpExecArray | null
-  PARAM_OPEN.lastIndex = 0
+  variant.paramOpen.lastIndex = 0
 
-  while ((paramMatch = PARAM_OPEN.exec(body)) !== null) {
+  while ((paramMatch = variant.paramOpen.exec(body)) !== null) {
     const paramStart = offset + paramMatch.index
-    const payloadStart = PARAM_OPEN.lastIndex
-    const close = body.indexOf(PARAM_CLOSE, payloadStart)
+    const payloadStart = variant.paramOpen.lastIndex
+    const close = body.indexOf(variant.paramClose, payloadStart)
     if (close === -1) {
       warnings.push(warning('missing_parameter_close', paramStart, offset + body.length))
       return { parameters, warnings, failureKind: 'unterminated_container' }
@@ -158,7 +169,7 @@ function extractParameters(
       rawName: decodeXmlAttribute(paramMatch[1]),
       rawPayload,
       payloadEncoding,
-      rawSpan: { start: paramStart, end: offset + close + PARAM_CLOSE.length },
+      rawSpan: { start: paramStart, end: offset + close + variant.paramClose.length },
     })
   }
 
@@ -185,13 +196,15 @@ function extractMalformedIntent(
   parseable: string,
   failureKind: MalformedToolIntent['failureKind'],
 ): MalformedToolIntent | undefined {
-  INVOKE_OPEN.lastIndex = 0
-  const invoke = INVOKE_OPEN.exec(parseable)
+  const marker = findFirstMarker(parseable)
+  const variant = marker?.value === CANONICAL_START ? canonicalVariant() : chat2ApiVariant()
+  variant.invokeOpen.lastIndex = 0
+  const invoke = variant.invokeOpen.exec(parseable)
   if (!invoke) {
     return undefined
   }
 
-  const parameters = extractMalformedParameters(parseable)
+  const parameters = extractMalformedParameters(parseable, variant)
   if (parameters.length === 0) {
     return undefined
   }
@@ -205,13 +218,16 @@ function extractMalformedIntent(
   }
 }
 
-function extractMalformedParameters(parseable: string): MalformedToolIntent['parameters'] {
+function extractMalformedParameters(
+  parseable: string,
+  variant: XmlVariant,
+): MalformedToolIntent['parameters'] {
   const parameters: MalformedToolIntent['parameters'] = []
   let match: RegExpExecArray | null
-  PARAM_OPEN.lastIndex = 0
+  variant.paramOpen.lastIndex = 0
 
-  while ((match = PARAM_OPEN.exec(parseable)) !== null) {
-    const payloadStart = PARAM_OPEN.lastIndex
+  while ((match = variant.paramOpen.exec(parseable)) !== null) {
+    const payloadStart = variant.paramOpen.lastIndex
     const close = findAnyClose(parseable, payloadStart)
     const rawBody = close === -1 ? parseable.slice(payloadStart) : parseable.slice(payloadStart, close)
     const { rawPayload, payloadEncoding } = unwrapPayload(rawBody)
@@ -270,7 +286,7 @@ function detectForeignMarkers(value: string): ProtocolContainerWarning[] {
 
 function hasFencedManagedXml(value: string): boolean {
   const fencedBlocks = value.match(/```[\s\S]*?```/g) ?? []
-  return fencedBlocks.some((block) => block.includes(CHAT2API_START))
+  return fencedBlocks.some((block) => containerStarts().some((marker) => block.includes(marker)))
 }
 
 function stripFencedCodeBlocks(value: string): string {
@@ -300,4 +316,46 @@ function warning(
     ...(marker ? { marker } : {}),
     span: { start, end },
   }
+}
+
+interface XmlVariant {
+  containerStart: string
+  containerEnd: string
+  invokeOpen: RegExp
+  invokeClose: string
+  paramOpen: RegExp
+  paramClose: string
+}
+
+function chat2ApiVariant(): XmlVariant {
+  return {
+    containerStart: CHAT2API_START,
+    containerEnd: CHAT2API_END,
+    invokeOpen: INVOKE_OPEN,
+    invokeClose: INVOKE_CLOSE,
+    paramOpen: PARAM_OPEN,
+    paramClose: PARAM_CLOSE,
+  }
+}
+
+function canonicalVariant(): XmlVariant {
+  return {
+    containerStart: CANONICAL_START,
+    containerEnd: CANONICAL_END,
+    invokeOpen: CANONICAL_INVOKE_OPEN,
+    invokeClose: CANONICAL_INVOKE_CLOSE,
+    paramOpen: CANONICAL_PARAM_OPEN,
+    paramClose: CANONICAL_PARAM_CLOSE,
+  }
+}
+
+function containerStarts(): string[] {
+  return [CHAT2API_START, CANONICAL_START]
+}
+
+function findFirstMarker(value: string): { value: string; index: number } | null {
+  return containerStarts()
+    .map((marker) => ({ value: marker, index: value.indexOf(marker) }))
+    .filter((marker) => marker.index !== -1)
+    .sort((left, right) => left.index - right.index)[0] ?? null
 }

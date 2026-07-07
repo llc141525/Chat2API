@@ -1,5 +1,11 @@
-import type { ToolCallingPlan } from './types.ts'
+import type { ToolCallingPlan, ToolParseResult } from './types.ts'
 import { getToolProtocol } from './protocols/index.ts'
+import {
+  assembleOpenAIToolCalls,
+  getStructureProtocolAdapter,
+  validateToolCallStructure,
+  type ProtocolStructureResult,
+} from '../toolRuntime/data/index.ts'
 
 export interface ToolStreamObservation {
   rawContentLength: number
@@ -148,9 +154,104 @@ export class ToolStreamParser {
   }
 }
 
-function parseBufferedToolCall(buffer: string, plan: ToolCallingPlan) {
+function parseBufferedToolCall(buffer: string, plan: ToolCallingPlan): ToolParseResult {
+  if (plan.protocol === 'managed_xml') {
+    const parsed = parseManagedXmlBufferedToolCall(buffer, plan)
+    if (parsed) return parsed
+  }
+
   const selected = getToolProtocol(plan.protocol)
   return selected.parse(buffer, { tools: plan.tools, protocol: plan.protocol })
+}
+
+function parseManagedXmlBufferedToolCall(buffer: string, plan: ToolCallingPlan): ToolParseResult | null {
+  const adapter = getStructureProtocolAdapter(plan.protocol)
+  const protocolResult = adapter.extractStructure(buffer)
+
+  if (protocolResult.kind === 'no_intent') {
+    return null
+  }
+
+  if (isUnterminated(protocolResult)) {
+    return emptyParseResult(buffer, 'managed_xml')
+  }
+
+  const validation = validateToolCallStructure({
+    plan: runtimePlanFromCallingPlan(plan),
+    protocolResult,
+    tools: plan.tools,
+  })
+
+  if (validation.status === 'valid_structure') {
+    return {
+      content: validation.cleanContent ?? '',
+      toolCalls: assembleOpenAIToolCalls({
+        validated: validation.validated,
+        tools: plan.tools,
+      }),
+      protocol: 'managed_xml',
+      rawMatches: protocolResult.kind === 'container' ? protocolResult.rawMatches : [],
+      invalidToolNames: [],
+    }
+  }
+
+  if (validation.status === 'invalid_structure') {
+    return {
+      content: buffer,
+      toolCalls: [],
+      protocol: 'managed_xml',
+      rawMatches: protocolRawMatches(protocolResult, buffer),
+      malformedReason: validation.failure.kind,
+      invalidToolNames: validation.failure.kind === 'unknown_tool_name' && validation.failure.toolName
+        ? [validation.failure.toolName]
+        : [],
+    }
+  }
+
+  return null
+}
+
+function emptyParseResult(buffer: string, protocol: ToolParseResult['protocol']): ToolParseResult {
+  return {
+    content: buffer,
+    toolCalls: [],
+    protocol,
+    rawMatches: [],
+    invalidToolNames: [],
+  }
+}
+
+function isUnterminated(protocolResult: ProtocolStructureResult): boolean {
+  return protocolResult.kind === 'malformed_container'
+    && protocolResult.malformedIntent?.failureKind === 'unterminated_container'
+}
+
+function protocolRawMatches(protocolResult: ProtocolStructureResult, buffer: string): string[] {
+  if (protocolResult.kind === 'container') return protocolResult.rawMatches
+  if (protocolResult.kind === 'malformed_container') return [buffer]
+  return []
+}
+
+function runtimePlanFromCallingPlan(plan: ToolCallingPlan) {
+  return {
+    profile: 'managed_buffered_structural' as const,
+    protocol: plan.protocol,
+    allowedToolNames: [...plan.allowedToolNames],
+    forcedToolName: plan.forcedToolName,
+    diagnostics: {
+      providerId: plan.providerId,
+      model: plan.diagnostics.model,
+      actualModel: plan.diagnostics.actualModel,
+      profile: 'managed_buffered_structural' as const,
+      mode: 'managed' as const,
+      protocol: plan.protocol,
+      reason: plan.diagnostics.reason,
+      toolCount: plan.tools.length,
+      toolChoiceMode: plan.toolChoiceMode,
+      forcedToolName: plan.forcedToolName,
+      allowedToolNames: [...plan.allowedToolNames],
+    },
+  }
 }
 
 function findMarkerStart(buffer: string, plan: ToolCallingPlan): { matched: boolean; partial: boolean; index: number } {

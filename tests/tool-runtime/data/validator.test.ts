@@ -167,6 +167,28 @@ test('array parameter with scalar text is rejected before OpenAI tool call assem
   assert.match(outcome.failure.detail, /tags/)
 })
 
+test('valid object and array payloads are accepted for complex schemas', () => {
+  const protocolResult = managedXmlStructureAdapter.extractStructure(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="configure"><|CHAT2API|parameter name="options">{"mode":"safe"}</|CHAT2API|parameter><|CHAT2API|parameter name="tags">["safe","fast"]</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+  )
+  const outcome = validateToolCallStructure({
+    plan: configurePlan,
+    protocolResult,
+    tools: [configureTool],
+  })
+
+  assert.equal(outcome.status, 'valid_structure')
+})
+
+test('json-looking text remains valid when schema says string', () => {
+  const protocolResult = managedXmlStructureAdapter.extractStructure(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="bash"><|CHAT2API|parameter name="argument"><![CDATA[{"not":"parsed"}]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+  )
+  const outcome = validateToolCallStructure({ plan, protocolResult, tools: [bashTool] })
+
+  assert.equal(outcome.status, 'valid_structure')
+})
+
 test('mixed protocol malformed intent is invalid structure and preserves repair facts', () => {
   const protocolResult = managedXmlStructureAdapter.extractStructure(
     '<|CHAT2API|tool_calls><|CHAT2API|invoke name="bash"><|CHAT2API|parameter name="argument"><![CDATA[pwd]]></arg_value></tool_call>',

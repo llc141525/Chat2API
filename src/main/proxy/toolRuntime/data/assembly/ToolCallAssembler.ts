@@ -1,9 +1,12 @@
 import type { ToolCall } from '../../../types.ts'
+import type { NormalizedToolDefinition } from '../../../toolCalling/types.ts'
 import type { ToolCallAssemblerInput, ValidatedParameterStructure } from '../types.ts'
+import { parseParameterPayloadForSchema } from '../validation/schemaPayload.ts'
 
 export function assembleOpenAIToolCalls(input: ToolCallAssemblerInput): ToolCall[] {
   return input.validated.map((call) => {
-    if (!input.tools.some((tool) => tool.name === call.toolName)) {
+    const tool = input.tools.find((candidate) => candidate.name === call.toolName)
+    if (!tool) {
       throw new Error(`Cannot assemble undeclared tool ${call.toolName}`)
     }
 
@@ -13,15 +16,18 @@ export function assembleOpenAIToolCalls(input: ToolCallAssemblerInput): ToolCall
       type: 'function',
       function: {
         name: call.toolName,
-        arguments: JSON.stringify(parametersToObject(call.parameters)),
+        arguments: JSON.stringify(parametersToObject(call.parameters, tool)),
       },
     }
   })
 }
 
-function parametersToObject(parameters: ValidatedParameterStructure[]): Record<string, unknown> {
+function parametersToObject(
+  parameters: ValidatedParameterStructure[],
+  tool: NormalizedToolDefinition,
+): Record<string, unknown> {
   return parameters.reduce<Record<string, unknown>>((acc, parameter) => {
-    const value = unwrapParameterPayload(parameter)
+    const value = unwrapParameterPayload(parameter, tool)
     const existing = acc[parameter.name]
 
     if (existing === undefined) {
@@ -36,6 +42,16 @@ function parametersToObject(parameters: ValidatedParameterStructure[]): Record<s
   }, {})
 }
 
-function unwrapParameterPayload(parameter: ValidatedParameterStructure): string {
-  return parameter.rawPayload
+function unwrapParameterPayload(
+  parameter: ValidatedParameterStructure,
+  tool: NormalizedToolDefinition,
+): unknown {
+  const props = tool.parameters?.properties as Record<string, unknown> | undefined
+  const schema = props?.[parameter.name]
+  const result = parseParameterPayloadForSchema(parameter.rawPayload, schema, parameter.name)
+  if (!result.ok) {
+    throw new Error(`Cannot assemble invalid payload for parameter ${parameter.name}: ${result.detail}`)
+  }
+
+  return result.value
 }
