@@ -32,6 +32,9 @@ router.get('/statistics', async (ctx: Context) => {
       totalRequests: persistentStats.totalRequests,
       successRequests: persistentStats.successRequests,
       failedRequests: persistentStats.failedRequests,
+      promptTokens: persistentStats.promptTokens || 0,
+      completionTokens: persistentStats.completionTokens || 0,
+      totalTokens: persistentStats.totalTokens || 0,
       avgLatency:
         persistentStats.successRequests > 0
           ? persistentStats.totalLatency / persistentStats.successRequests
@@ -46,6 +49,9 @@ router.get('/statistics', async (ctx: Context) => {
           totalRequests: todayStats.totalRequests,
           successRequests: todayStats.successRequests,
           failedRequests: todayStats.failedRequests,
+          promptTokens: todayStats.promptTokens || 0,
+          completionTokens: todayStats.completionTokens || 0,
+          totalTokens: todayStats.totalTokens || 0,
         },
       },
     }

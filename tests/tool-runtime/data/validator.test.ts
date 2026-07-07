@@ -21,6 +21,29 @@ const bashTool: NormalizedToolDefinition = {
   source: 'openai',
 }
 
+const configureTool: NormalizedToolDefinition = {
+  name: 'configure',
+  description: 'Apply structured settings',
+  parameters: {
+    type: 'object',
+    properties: {
+      options: {
+        type: 'object',
+        properties: {
+          mode: { type: 'string' },
+        },
+        required: ['mode'],
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+      },
+    },
+    required: ['options', 'tags'],
+  },
+  source: 'openai',
+}
+
 const plan: ToolPlan = {
   profile: 'managed_buffered_structural',
   protocol: 'managed_xml',
@@ -35,6 +58,15 @@ const plan: ToolPlan = {
     toolCount: 1,
     toolChoiceMode: 'auto',
     allowedToolNames: ['bash'],
+  },
+}
+
+const configurePlan: ToolPlan = {
+  ...plan,
+  allowedToolNames: ['configure'],
+  diagnostics: {
+    ...plan.diagnostics,
+    allowedToolNames: ['configure'],
   },
 }
 
@@ -99,6 +131,40 @@ test('missing required parameter is blocked as schema validation failed', () => 
   assert.equal(outcome.failure.kind, 'schema_validation_failed')
   assert.equal(outcome.failure.toolName, 'bash')
   assert.match(outcome.failure.detail, /Missing required parameter argument/)
+})
+
+test('object parameter with non-json text is rejected before OpenAI tool call assembly', () => {
+  const protocolResult = managedXmlStructureAdapter.extractStructure(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="configure"><|CHAT2API|parameter name="options">not json</|CHAT2API|parameter><|CHAT2API|parameter name="tags">["safe"]</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+  )
+  const outcome = validateToolCallStructure({
+    plan: configurePlan,
+    protocolResult,
+    tools: [configureTool],
+  })
+
+  assert.equal(outcome.status, 'invalid_structure')
+  if (outcome.status !== 'invalid_structure') throw new Error('expected invalid structure')
+  assert.equal(outcome.failure.kind, 'schema_validation_failed')
+  assert.equal(outcome.failure.toolName, 'configure')
+  assert.match(outcome.failure.detail, /options/)
+})
+
+test('array parameter with scalar text is rejected before OpenAI tool call assembly', () => {
+  const protocolResult = managedXmlStructureAdapter.extractStructure(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="configure"><|CHAT2API|parameter name="options">{"mode":"safe"}</|CHAT2API|parameter><|CHAT2API|parameter name="tags">safe</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+  )
+  const outcome = validateToolCallStructure({
+    plan: configurePlan,
+    protocolResult,
+    tools: [configureTool],
+  })
+
+  assert.equal(outcome.status, 'invalid_structure')
+  if (outcome.status !== 'invalid_structure') throw new Error('expected invalid structure')
+  assert.equal(outcome.failure.kind, 'schema_validation_failed')
+  assert.equal(outcome.failure.toolName, 'configure')
+  assert.match(outcome.failure.detail, /tags/)
 })
 
 test('mixed protocol malformed intent is invalid structure and preserves repair facts', () => {

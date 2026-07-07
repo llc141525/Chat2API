@@ -136,6 +136,17 @@ export function buildGLMPromptMessagesForTest(messages: GLMMessage[], refs: any[
   return (adapter as any).messagesToPrompt(managedToolPrompt.messages, refs, managedToolPrompt.toolsPrompt, false)
 }
 
+function shouldLogPromptPreview(messages: GLMMessage[]): boolean {
+  return messages.some((message) =>
+    typeof message.content === 'string' &&
+    (
+      message.content.includes('agent-capability-probe') ||
+      message.content.includes('CAPABILITY_PROBE_DONE') ||
+      message.content.includes('tests/agent-capability/input.txt')
+    ),
+  )
+}
+
 function uuid(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0
@@ -411,6 +422,10 @@ export class GLMAdapter {
           textContent = textContent.trimEnd() + '\n\n' + toolsPrompt
         }
 
+        if (shouldLogPromptPreview(messages)) {
+          console.log('[GLM] Final prompt preview:', textContent)
+        }
+
         content.push({ type: 'text', text: textContent })
         return [{ role: 'user', content }]
       }
@@ -445,6 +460,10 @@ export class GLMAdapter {
 
     if (toolsPrompt) {
       textContent = textContent.trimEnd() + '\n\n' + toolsPrompt
+    }
+
+    if (shouldLogPromptPreview(messages)) {
+      console.log('[GLM] Final prompt preview:', textContent)
     }
 
     content.push({ type: 'text', text: textContent })

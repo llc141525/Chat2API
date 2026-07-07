@@ -147,6 +147,8 @@ export class RequestLogManager {
     const todayStart = new Date(today).getTime()
     const todayEnd = todayStart + 24 * 60 * 60 * 1000
     const todayLogs = this.requestLogs.filter((entry) => entry.timestamp >= todayStart && entry.timestamp < todayEnd)
+    const tokenTotals = sumTokenUsage(this.requestLogs)
+    const todayTokenTotals = sumTokenUsage(todayLogs)
 
     return {
       total: this.requestLogs.length,
@@ -155,6 +157,12 @@ export class RequestLogManager {
       todayTotal: todayLogs.length,
       todaySuccess: todayLogs.filter((entry) => entry.status === 'success').length,
       todayError: todayLogs.filter((entry) => entry.status === 'error').length,
+      promptTokens: tokenTotals.promptTokens,
+      completionTokens: tokenTotals.completionTokens,
+      totalTokens: tokenTotals.totalTokens,
+      todayPromptTokens: todayTokenTotals.promptTokens,
+      todayCompletionTokens: todayTokenTotals.completionTokens,
+      todayTotalTokens: todayTokenTotals.totalTokens,
     }
   }
 
@@ -173,12 +181,16 @@ export class RequestLogManager {
       const successLogs = dayLogs.filter((entry) => entry.status === 'success')
       const errorLogs = dayLogs.filter((entry) => entry.status === 'error')
       const totalLatency = successLogs.reduce((sum, entry) => sum + entry.latency, 0)
+      const tokenTotals = sumTokenUsage(dayLogs)
 
       trends.push({
         date,
         total: dayLogs.length,
         success: successLogs.length,
         error: errorLogs.length,
+        promptTokens: tokenTotals.promptTokens,
+        completionTokens: tokenTotals.completionTokens,
+        totalTokens: tokenTotals.totalTokens,
         avgLatency: successLogs.length > 0 ? Math.round(totalLatency / successLogs.length) : 0,
       })
     }
@@ -264,4 +276,19 @@ function generateId(): string {
 function stripId(entry: RequestLogEntry): Omit<RequestLogEntry, 'id'> {
   const { id: _id, ...rest } = entry
   return rest
+}
+
+function sumTokenUsage(entries: RequestLogEntry[]): {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+} {
+  return entries.reduce(
+    (totals, entry) => ({
+      promptTokens: totals.promptTokens + (entry.promptTokens || 0),
+      completionTokens: totals.completionTokens + (entry.completionTokens || 0),
+      totalTokens: totals.totalTokens + (entry.totalTokens || 0),
+    }),
+    { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+  )
 }

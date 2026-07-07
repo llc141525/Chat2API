@@ -74,26 +74,28 @@ export function preserveToolExchangePairs(
     return processedMessages
   }
 
-  const originalPositions = new Map<ChatMessage, number>()
+  const originalPositions = new Map<string, number>()
   originalMessages.forEach((message, index) => {
-    originalPositions.set(message, index)
+    originalPositions.set(messageIdentity(message), index)
   })
 
-  const timeline = processedMessages.map((message, processedIndex) => ({
-    message,
-    originalIndex: originalPositions.get(message) ?? Number.POSITIVE_INFINITY + processedIndex,
-  }))
+  const restoredMessages = [...processedMessages]
 
   for (const message of missingOriginalMessages) {
-    timeline.push({
-      message,
-      originalIndex: originalPositions.get(message) ?? Number.POSITIVE_INFINITY,
+    const messageIndex = originalPositions.get(messageIdentity(message)) ?? -1
+    const insertionIndex = restoredMessages.findIndex((candidate) => {
+      const candidateIndex = originalPositions.get(messageIdentity(candidate))
+      return candidateIndex !== undefined && candidateIndex > messageIndex
     })
+
+    if (insertionIndex === -1) {
+      restoredMessages.push(message)
+    } else {
+      restoredMessages.splice(insertionIndex, 0, message)
+    }
   }
 
-  timeline.sort((left, right) => left.originalIndex - right.originalIndex)
-
-  return timeline.map((entry) => entry.message)
+  return restoredMessages
 }
 
 function messageKey(message: ChatMessage): string {

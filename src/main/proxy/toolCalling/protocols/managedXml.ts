@@ -22,8 +22,10 @@ export const managedXmlProtocol: ToolProtocolAdapter = {
   renderPrompt(tools) {
     return `## Available Tools
 You can invoke the following developer tools. Tool names are case-sensitive.
+The tool list in this section is authoritative for the current turn.
 Use only the exact tool names listed below. Do not rename, camelCase, translate, shorten, or invent tool names.
 Include ALL required parameters listed in the JSON schema for each tool.
+Do not claim that a listed tool is unavailable. If a listed tool is needed, call it directly.
 
 ${renderToolList(tools)}
 
@@ -142,6 +144,8 @@ export function renderManagedXmlContractHeader(input: ManagedXmlContractHeaderIn
     `catalog_fingerprint: ${input.catalogFingerprint}`,
     `allowed_tools: ${input.allowedToolNames.join(', ')}`,
     'The tools listed in this contract are available for this turn because they were provided by the runtime.',
+    'Treat this contract and the Available Tools section as authoritative, even if earlier conversation text mentions different tools.',
+    'Do not say that an allowed tool is unavailable. If one of the allowed tools is needed, emit a tool call instead of explanatory text.',
   ].join('\n')
 }
 

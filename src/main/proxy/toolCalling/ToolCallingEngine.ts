@@ -63,6 +63,29 @@ export class ToolCallingEngine {
     const { request, provider, actualModel, requestId, toolSessionKey } = input
     const adapter = getToolClientAdapter(this.config.clientAdapterId)
     const clientRequest = adapter.normalizeRequest(request)
+    if (this.config.diagnosticsEnabled) {
+      const rawTools = Array.isArray((request as { tools?: unknown }).tools)
+        ? (request as { tools?: unknown[] }).tools ?? []
+        : []
+      const firstRawTool = rawTools[0]
+      console.log('[ToolCallingEngine] normalizeRequest diagnostics:', JSON.stringify({
+        requestId,
+        providerId: provider.id,
+        model: request.model,
+        actualModel,
+        configuredClientAdapterId: this.config.clientAdapterId,
+        resolvedClientAdapterId: clientRequest.clientAdapterId,
+        requestedClientAdapterId: clientRequest.diagnostics.requestedClientAdapterId,
+        fallbackClientAdapterId: clientRequest.diagnostics.fallbackClientAdapterId,
+        rawToolCount: rawTools.length,
+        normalizedToolCount: clientRequest.tools.length,
+        normalizedToolNames: clientRequest.tools.map((tool) => tool.name),
+        firstRawToolKeys: firstRawTool && typeof firstRawTool === 'object'
+          ? Object.keys(firstRawTool as Record<string, unknown>)
+          : [],
+        firstRawToolPreview: firstRawTool ?? null,
+      }))
+    }
     const plan = buildToolCallingRuntimePlan({
       requestId,
       providerId: provider.id,

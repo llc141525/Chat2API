@@ -62,6 +62,54 @@ function extractUserInput(messages: Array<{ role: string; content?: string | any
   return undefined
 }
 
+interface TokenUsage {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+}
+
+function extractTokenUsageFromBody(body: unknown): TokenUsage | undefined {
+  const usage = (body as { usage?: unknown } | undefined)?.usage
+  if (!usage || typeof usage !== 'object') return undefined
+
+  const usageRecord = usage as Record<string, unknown>
+  const promptTokens = normalizeTokenCount(usageRecord.prompt_tokens)
+  const completionTokens = normalizeTokenCount(usageRecord.completion_tokens)
+  const totalTokens = normalizeTokenCount(usageRecord.total_tokens) || promptTokens + completionTokens
+
+  if (promptTokens === 0 && completionTokens === 0 && totalTokens === 0) {
+    return undefined
+  }
+
+  return { promptTokens, completionTokens, totalTokens }
+}
+
+function extractTokenUsageFromSse(content: string): TokenUsage | undefined {
+  let usage: TokenUsage | undefined
+
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue
+
+    const payload = line.slice(5).trim()
+    if (!payload || payload === '[DONE]') continue
+
+    try {
+      const parsed = JSON.parse(payload)
+      usage = extractTokenUsageFromBody(parsed) || usage
+    } catch {
+      // Ignore non-JSON SSE data.
+    }
+  }
+
+  return usage
+}
+
+function normalizeTokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0
+}
+
 /**
  * Handle Chat Completions Request
  */
@@ -276,6 +324,7 @@ router.post('/completions', async (ctx: Context) => {
     const responseBodyForLog = !request.stream && result.body
       ? JSON.stringify(result.body)
       : undefined
+    const responseTokenUsage = !request.stream ? extractTokenUsageFromBody(result.body) : undefined
 
     // For streaming requests, we'll collect content and update the log later
     let logEntryId: string | undefined
@@ -300,6 +349,9 @@ router.post('/completions', async (ctx: Context) => {
         reasoningEffort: request.reasoning_effort,
         responseStatus: 200,
         responseBody: responseBodyForLog,
+        promptTokens: responseTokenUsage?.promptTokens,
+        completionTokens: responseTokenUsage?.completionTokens,
+        totalTokens: responseTokenUsage?.totalTokens,
         latency,
         isStream: false,
       })
@@ -329,7 +381,7 @@ router.post('/completions', async (ctx: Context) => {
       logEntryId = logEntry.id
     }
 
-    storeManager.recordRequestInStats(true, latency, request.model, provider.id, account.id)
+    storeManager.recordRequestInStats(true, latency, request.model, provider.id, account.id, responseTokenUsage)
 
     if (request.stream === true && result.stream) {
       ctx.set('Content-Type', 'text/event-stream')
@@ -342,6 +394,21 @@ router.post('/completions', async (ctx: Context) => {
 
       // Collect stream content for logging (raw SSE output)
       let collectedContent = ''
+      const updateStreamingRequestLog = () => {
+        if (!logEntryId) return
+
+        const tokenUsage = extractTokenUsageFromSse(collectedContent)
+        storeManager.updateRequestLog(logEntryId, {
+          responseBody: collectedContent || undefined,
+          promptTokens: tokenUsage?.promptTokens,
+          completionTokens: tokenUsage?.completionTokens,
+          totalTokens: tokenUsage?.totalTokens,
+        })
+
+        if (tokenUsage) {
+          storeManager.addTokenUsageToStats(tokenUsage)
+        }
+      }
 
       // Handle stream errors
       result.stream.once('error', (err: Error) => {
@@ -385,12 +452,7 @@ router.post('/completions', async (ctx: Context) => {
 
         // When source stream ends normally, update log and end wrapper
         result.stream.once('end', () => {
-          // Update log with collected response
-          if (logEntryId) {
-            storeManager.updateRequestLog(logEntryId, {
-              responseBody: collectedContent || undefined,
-            })
-          }
+          updateStreamingRequestLog()
           wrapperStream.end()
         })
       } else {
@@ -412,12 +474,7 @@ router.post('/completions', async (ctx: Context) => {
         transformStream.pipe(wrapperStream, { end: false })
 
         transformStream.once('end', () => {
-          // Update log with collected response
-          if (logEntryId) {
-            storeManager.updateRequestLog(logEntryId, {
-              responseBody: collectedContent || undefined,
-            })
-          }
+          updateStreamingRequestLog()
           wrapperStream.end()
         })
       }

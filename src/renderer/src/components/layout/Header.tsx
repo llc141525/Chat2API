@@ -12,7 +12,7 @@ export function Header() {
   const { language, setLanguage } = useSettingsStore()
   const [proxyEnabled, setProxyEnabled] = useState(false)
   const [proxyLoading, setProxyLoading] = useState(false)
-  const [port, setPort] = useState(8080)
+  const [port, setPort] = useState(0)
   const [host, setHost] = useState('127.0.0.1')
 
   useEffect(() => {
@@ -32,12 +32,12 @@ export function Header() {
 
     window.electronAPI.config?.get?.().then((config) => {
       if (!config) return
-      setPort(config.proxyPort || 8080)
+      setPort(config.proxyPort ?? 0)
       setHost(config.proxyHost || '127.0.0.1')
     })
 
     const unsubscribeConfig = window.electronAPI.config?.onConfigChanged?.((config) => {
-      setPort(config.proxyPort || 8080)
+      setPort(config.proxyPort ?? 0)
       setHost(config.proxyHost || '127.0.0.1')
     })
     

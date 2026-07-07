@@ -34,6 +34,9 @@ function createEntry(id: string, timestamp: number): RequestLogEntry {
     requestBody: JSON.stringify({ token: `secret-${id}` }),
     responseBody: 'response-body',
     userInput: `hello-${id}`,
+    promptTokens: Number(id) || 0,
+    completionTokens: (Number(id) || 0) * 2,
+    totalTokens: (Number(id) || 0) * 3,
   }
 }
 
@@ -108,4 +111,39 @@ test('RequestLogManager buffers writes until flush', async (t) => {
   const persisted = readFileSync(join(root, 'request-logs.ndjson'), 'utf-8')
   assert.match(persisted, /"timestamp":1/)
   assert.match(persisted, /"timestamp":2/)
+})
+
+test('RequestLogManager aggregates token usage in stats and trends', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'request-log-manager-tokens-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+
+  const manager = new RequestLogManager({
+    storageDir: root,
+    config: createConfig({ maxEntries: 5 }),
+  })
+
+  await manager.initialize()
+  manager.addRequestLog({
+    ...createEntryInput(Date.now()),
+    promptTokens: 1,
+    completionTokens: 2,
+    totalTokens: 3,
+  })
+  manager.addRequestLog({
+    ...createEntryInput(Date.now()),
+    promptTokens: 10,
+    completionTokens: 20,
+    totalTokens: 30,
+  })
+
+  const stats = manager.getRequestLogStats()
+  assert.equal(stats.totalTokens, 33)
+  assert.equal(stats.todayTotalTokens, 33)
+
+  const todayTrend = manager.getRequestLogTrend(1)[0]
+  assert.equal(todayTrend.promptTokens, 11)
+  assert.equal(todayTrend.completionTokens, 22)
+  assert.equal(todayTrend.totalTokens, 33)
+
+  manager.flushSync()
 })

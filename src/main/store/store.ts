@@ -1009,7 +1009,20 @@ class StoreManager {
   /**
    * Get Request Log Statistics
    */
-  getRequestLogStats(): { total: number; success: number; error: number; todayTotal: number; todaySuccess: number; todayError: number } {
+  getRequestLogStats(): {
+    total: number
+    success: number
+    error: number
+    todayTotal: number
+    todaySuccess: number
+    todayError: number
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
+    todayPromptTokens: number
+    todayCompletionTokens: number
+    todayTotalTokens: number
+  } {
     this.ensureInitialized()
     return this.getRequestLogManager().getRequestLogStats()
   }
@@ -1017,7 +1030,16 @@ class StoreManager {
   /**
    * Get Request Log Trend
    */
-  getRequestLogTrend(days: number = 7): { date: string; total: number; success: number; error: number; avgLatency: number }[] {
+  getRequestLogTrend(days: number = 7): {
+    date: string
+    total: number
+    success: number
+    error: number
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
+    avgLatency: number
+  }[] {
     this.ensureInitialized()
     return this.getRequestLogManager().getRequestLogTrend(days)
   }
@@ -1055,11 +1077,15 @@ class StoreManager {
     latency: number,
     model?: string,
     providerId?: string,
-    accountId?: string
+    accountId?: string,
+    tokenUsage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }
   ): PersistentStatistics {
     this.ensureInitialized()
     const stats = this.store!.get('statistics') || DEFAULT_STATISTICS
     const today = new Date().toISOString().split('T')[0]
+    const promptTokens = normalizeTokenCount(tokenUsage?.promptTokens)
+    const completionTokens = normalizeTokenCount(tokenUsage?.completionTokens)
+    const totalTokens = normalizeTokenCount(tokenUsage?.totalTokens)
     
     const newStats: PersistentStatistics = {
       ...stats,
@@ -1067,6 +1093,9 @@ class StoreManager {
       successRequests: success ? stats.successRequests + 1 : stats.successRequests,
       failedRequests: success ? stats.failedRequests : stats.failedRequests + 1,
       totalLatency: success ? stats.totalLatency + latency : stats.totalLatency,
+      promptTokens: (stats.promptTokens || 0) + promptTokens,
+      completionTokens: (stats.completionTokens || 0) + completionTokens,
+      totalTokens: (stats.totalTokens || 0) + totalTokens,
       lastUpdated: Date.now(),
       modelUsage: { ...stats.modelUsage },
       providerUsage: { ...stats.providerUsage },
@@ -1093,12 +1122,18 @@ class StoreManager {
         successRequests: 0,
         failedRequests: 0,
         totalLatency: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
         modelUsage: {},
         providerUsage: {},
       }
     }
     
     newStats.dailyStats[today].totalRequests++
+    newStats.dailyStats[today].promptTokens = (newStats.dailyStats[today].promptTokens || 0) + promptTokens
+    newStats.dailyStats[today].completionTokens = (newStats.dailyStats[today].completionTokens || 0) + completionTokens
+    newStats.dailyStats[today].totalTokens = (newStats.dailyStats[today].totalTokens || 0) + totalTokens
     if (success) {
       newStats.dailyStats[today].successRequests++
       newStats.dailyStats[today].totalLatency += latency
@@ -1118,6 +1153,41 @@ class StoreManager {
     return newStats
   }
 
+  addTokenUsageToStats(tokenUsage: { promptTokens?: number; completionTokens?: number; totalTokens?: number }): PersistentStatistics {
+    this.ensureInitialized()
+    const stats = this.store!.get('statistics') || DEFAULT_STATISTICS
+    const today = new Date().toISOString().split('T')[0]
+    const promptTokens = normalizeTokenCount(tokenUsage.promptTokens)
+    const completionTokens = normalizeTokenCount(tokenUsage.completionTokens)
+    const totalTokens = normalizeTokenCount(tokenUsage.totalTokens)
+
+    const newStats: PersistentStatistics = {
+      ...stats,
+      promptTokens: (stats.promptTokens || 0) + promptTokens,
+      completionTokens: (stats.completionTokens || 0) + completionTokens,
+      totalTokens: (stats.totalTokens || 0) + totalTokens,
+      dailyStats: { ...stats.dailyStats },
+      lastUpdated: Date.now(),
+    }
+
+    const existingToday = newStats.dailyStats[today]
+    newStats.dailyStats[today] = {
+      date: today,
+      totalRequests: existingToday?.totalRequests || 0,
+      successRequests: existingToday?.successRequests || 0,
+      failedRequests: existingToday?.failedRequests || 0,
+      totalLatency: existingToday?.totalLatency || 0,
+      promptTokens: (existingToday?.promptTokens || 0) + promptTokens,
+      completionTokens: (existingToday?.completionTokens || 0) + completionTokens,
+      totalTokens: (existingToday?.totalTokens || 0) + totalTokens,
+      modelUsage: { ...(existingToday?.modelUsage || {}) },
+      providerUsage: { ...(existingToday?.providerUsage || {}) },
+    }
+
+    this.store!.set('statistics', newStats)
+    return newStats
+  }
+
   /**
    * Get Today Statistics
    */
@@ -1131,6 +1201,9 @@ class StoreManager {
       successRequests: 0,
       failedRequests: 0,
       totalLatency: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
       modelUsage: {},
       providerUsage: {},
     }
@@ -1761,3 +1834,9 @@ export const storeManager = new StoreManager()
 
 // Export types
 export type { StoreType }
+
+function normalizeTokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0
+}

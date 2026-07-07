@@ -127,7 +127,9 @@ test('summary keeps generated summary while restoring related tool exchange pair
 
   const result = await service.process(messages)
 
-  assert.ok(result.messages.some((message) => message.content === '[Conversation Summary]\ntrimmed summary'))
-  assert.ok(result.messages.some((message) => message.role === 'assistant' && message.tool_calls?.[0]?.id === 'call_summary'))
-  assert.ok(result.messages.some((message) => message.role === 'tool' && message.tool_call_id === 'call_summary'))
+  assert.equal(result.messages[1].content, '[Conversation Summary]\ntrimmed summary')
+  assert.equal(result.messages[2].role, 'assistant')
+  assert.equal(result.messages[2].tool_calls?.[0]?.id, 'call_summary')
+  assert.equal(result.messages[3].role, 'tool')
+  assert.equal(result.messages[3].tool_call_id, 'call_summary')
 })

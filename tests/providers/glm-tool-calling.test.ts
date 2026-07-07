@@ -236,6 +236,18 @@ test('BUG: managed_xml prompt + managed_xml history + managed_xml parse = consis
   assert.equal(parsed.toolCalls.length, 1)
 })
 
+test('managed_xml prompt marks runtime tool catalog as authoritative', () => {
+  const prompt = managedXmlProtocol.renderPrompt([{
+    name: 'skill',
+    description: 'Load a skill',
+    parameters: { type: 'object', properties: { name: { type: 'string' } } },
+    source: 'openai',
+  }])
+
+  assert.match(prompt, /authoritative for the current turn/)
+  assert.match(prompt, /Do not claim that a listed tool is unavailable/)
+})
+
 test('managed_xml parser repairs singleton array arguments from OpenCode-style tools', () => {
   const parsed = managedXmlProtocol.parse(
     '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:todowrite"><|CHAT2API|parameter name="todos"><![CDATA[{"content":"Inspect GLM","status":"in_progress"}]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',

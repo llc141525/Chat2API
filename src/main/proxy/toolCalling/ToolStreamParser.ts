@@ -116,6 +116,13 @@ export class ToolStreamParser {
       return chunks
     }
 
+    if (parsed.invalidToolNames.length > 0 || parsed.rawMatches.length > 0 || this.isBufferingToolCall) {
+      this.observation.suppressedMalformedToolOutput = true
+      this.observation.suppressedReason = parsed.invalidToolNames.length > 0
+        ? 'invalid_tool_name'
+        : 'malformed_tool_output'
+    }
+
     const shouldReleaseText = !this.emittedToolCall
     const text = this.buffer
     this.buffer = ''

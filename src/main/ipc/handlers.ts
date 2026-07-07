@@ -85,10 +85,11 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       const success = await proxyServer.start(proxyPort, proxyHost)
       if (success) {
         proxyStartTime = Date.now()
-        console.log('[App] Proxy service auto-started successfully, port:', proxyPort)
+        const actualPort = proxyServer.getPort()
+        console.log('[App] Proxy service auto-started successfully, port:', actualPort)
         const status: ProxyStatus = {
           isRunning: true,
-          port: proxyPort,
+          port: actualPort,
           host: proxyHost,
           uptime: 0,
           connections: 0,
@@ -120,9 +121,10 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       
       if (success) {
         proxyStartTime = Date.now()
+        const actualPort = proxyServer.getPort()
         const status: ProxyStatus = {
           isRunning: true,
-          port: proxyPort,
+          port: actualPort,
           host: proxyHost,
           uptime: 0,
           connections: 0,

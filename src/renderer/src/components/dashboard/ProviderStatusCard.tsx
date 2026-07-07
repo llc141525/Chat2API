@@ -12,6 +12,7 @@ export interface ProviderStats {
   status: ProviderStatus
   requestCount: number
   successCount: number
+  totalTokens?: number
   quotaUsed?: number
   quotaTotal?: number
   latency?: number
@@ -72,11 +73,6 @@ export function ProviderStatusCard({ providers, className }: ProviderStatusCardP
     }
   }
 
-  const getSuccessRate = (success: number, total: number) => {
-    if (total === 0) return 0
-    return Math.round((success / total) * 100)
-  }
-
   const scrollHeight = ITEM_HEIGHT * 7 + GAP * 6
 
   return (
@@ -98,11 +94,6 @@ export function ProviderStatusCard({ providers, className }: ProviderStatusCardP
           <ScrollArea className="pr-2" style={{ height: scrollHeight }}>
             <div className="space-y-2">
               {providers.map((provider) => {
-                const successRate = getSuccessRate(
-                  provider.successCount,
-                  provider.requestCount
-                )
-
                 return (
                   <div
                     key={provider.id}
@@ -129,8 +120,8 @@ export function ProviderStatusCard({ providers, className }: ProviderStatusCardP
                         <p className="font-medium">{provider.requestCount.toLocaleString()}</p>
                       </div>
                       <div>
-                        <span className="text-muted-foreground">{t('dashboard.successRate')}</span>
-                        <p className="font-medium text-green-500">{successRate}%</p>
+                        <span className="text-muted-foreground">{t('dashboard.totalTokens')}</span>
+                        <p className="font-medium">{(provider.totalTokens || 0).toLocaleString()}</p>
                       </div>
                       <div>
                         <span className="text-muted-foreground">{t('providers.latency')}</span>

@@ -27,6 +27,7 @@
     "enabled": "Enabled",
     "disabled": "Disabled",
     "totalRequests": "Total Requests",
+    "totalTokens": "Total Tokens",
     "successRate": "Success Rate",
     "avgLatency": "Avg Latency",
     "avgResponseTime": "Avg Response Time",

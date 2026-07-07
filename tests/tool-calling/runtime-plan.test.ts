@@ -334,6 +334,7 @@ test('managed runtime plan exposes immutable per-turn contract facts', () => {
   assert.equal(plan.contract.historyMode, 'managed_protocol')
   assert.equal(plan.contract.emptyOutputPolicy, 'diagnose_and_fail')
   assert.deepEqual(plan.contract.toolSourceChain, ['current_request'])
+  assert.equal(plan.contract.allowedToolNames.size, 1)
   assert.throws(() => {
     ;(plan.contract.allowedToolNames as Set<string>).add('other')
   }, /Cannot mutate readonly set/)

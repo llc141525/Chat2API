@@ -66,8 +66,8 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
   const validatePort = (value: string): string | undefined => {
     const port = parseInt(value, 10)
     if (isNaN(port)) return t('proxy.portMustBeNumber')
-    if (port < 1 || port > 65535) return t('proxy.portRangeError')
-    if (port < 1024 && port !== 80 && port !== 443) {
+    if (port < 0 || port > 65535) return t('proxy.portRangeError')
+    if (port > 0 && port < 1024 && port !== 80 && port !== 443) {
       return t('proxy.portPrivilege')
     }
     return undefined
@@ -280,7 +280,7 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
               <Input
                 id="port"
                 type="number"
-                placeholder="8080"
+                placeholder="0 (auto)"
                 value={formData.port}
                 onChange={(e) => handlePortChange(e.target.value)}
                 className={errors.port ? 'border-destructive' : ''}

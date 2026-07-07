@@ -4,7 +4,15 @@ import { ToolStreamParser } from '../../src/main/proxy/toolCalling/ToolStreamPar
 import type { ToolCallingPlan } from '../../src/main/proxy/toolCalling/types.ts'
 
 const tools = [
-  { name: 'default_api:read_file', parameters: { type: 'object' }, source: 'openai' as const },
+  {
+    name: 'default_api:read_file',
+    parameters: {
+      type: 'object',
+      properties: { filePath: { type: 'string' } },
+      required: ['filePath'],
+    },
+    source: 'openai' as const,
+  },
 ]
 
 function plan(protocol: ToolCallingPlan['protocol'] = 'managed_xml'): ToolCallingPlan {
@@ -96,6 +104,21 @@ test('invalid tool name is not emitted as a tool call', () => {
   assert.equal(chunks.some((chunk) => chunk.choices[0].delta.tool_calls), false)
 })
 
+test('stream parser rejects allowed tool calls that omit required parameters', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const chunks = parser.push(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="path">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+    baseChunk,
+  )
+
+  assert.equal(
+    chunks.some((chunk) => chunk.choices[0].delta.tool_calls),
+    false,
+    'A stream tool call with the right tool name but missing required filePath must not be emitted',
+  )
+  assert.equal(parser.hasEmittedToolCall(), false)
+})
+
 test('fenced code block examples are emitted as text and never as tool calls', () => {
   const parser = new ToolStreamParser(plan('managed_xml'))
   const text = '```xml\n<tool_calls><invoke name="default_api:read_file"><parameter name="filePath">fake</parameter></invoke></tool_calls>\n```'
@@ -146,7 +169,10 @@ test('stream parser records content and tool-call emission facts', () => {
   parser.push('<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>', baseChunk)
 
   const observation = parser.getObservation()
-  assert.equal(observation.rawContentLength > 0, true)
+  assert.equal(
+    observation.rawContentLength,
+    'hello '.length + '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>'.length,
+  )
   assert.equal(observation.emittedContentLength, 'hello '.length)
   assert.equal(observation.emittedToolCallCount, 1)
   assert.equal(observation.suppressedMalformedToolOutput, false)
@@ -161,4 +187,26 @@ test('stream parser records invalid buffer suppression facts', () => {
   assert.equal(observation.emittedToolCallCount, 0)
   assert.equal(observation.suppressedMalformedToolOutput, true)
   assert.equal(observation.suppressedReason, 'invalid_tool_name')
+})
+
+test('stream parser flush records malformed buffered tool suppression facts', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  parser.push('hello ', baseChunk)
+  parser.push('<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>', baseChunk)
+  parser.push('<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"', baseChunk)
+  const flushed = parser.flush(baseChunk)
+
+  assert.deepEqual(flushed, [])
+
+  const observation = parser.getObservation()
+  assert.equal(
+    observation.rawContentLength,
+    'hello '.length
+      + '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>'.length
+      + '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"'.length,
+  )
+  assert.equal(observation.emittedContentLength, 'hello '.length)
+  assert.equal(observation.emittedToolCallCount, 1)
+  assert.equal(observation.suppressedMalformedToolOutput, true)
+  assert.equal(observation.suppressedReason, 'malformed_tool_output')
 })

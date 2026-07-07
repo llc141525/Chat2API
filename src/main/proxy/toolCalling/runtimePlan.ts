@@ -209,7 +209,7 @@ function createReadonlySet<T>(values: Iterable<T>): ReadonlySet<T> {
         }
       }
 
-      const value = Reflect.get(target, prop, receiver)
+      const value = Reflect.get(target, prop, target)
       if (typeof value === 'function') {
         return value.bind(target)
       }

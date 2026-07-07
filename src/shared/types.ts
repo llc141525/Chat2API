@@ -143,6 +143,9 @@ export interface ProxyStatistics {
   totalRequests: number
   successRequests: number
   failedRequests: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
   avgLatency: number
   requestsPerMinute: number
   activeConnections: number
@@ -349,6 +352,9 @@ export interface StatisticsResponse {
     totalRequests: number
     successRequests: number
     failedRequests: number
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
   }>
 }
 
