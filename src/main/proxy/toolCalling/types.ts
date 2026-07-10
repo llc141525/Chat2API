@@ -55,6 +55,7 @@ export type ProviderTurnOutcome =
   | 'content'
   | 'tool_calls'
   | 'provider_empty'
+  | 'malformed_tool_output'
   | 'runtime_suppressed_malformed_tool_output'
   | 'adapter_parse_error'
   | 'provider_error'

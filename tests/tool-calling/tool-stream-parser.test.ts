@@ -190,6 +190,31 @@ test('generated call IDs stay stable between emitted chunks and final state', ()
   assert.deepEqual(parser.flush(baseChunk), [])
 })
 
+test('stream parser suppresses later plain text after a tool call was emitted', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const first = parser.push(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+    baseChunk,
+  )
+  const second = parser.push('|tool_calls>', baseChunk)
+
+  assert.equal(first.at(-1)?.choices[0].delta.tool_calls[0].function.name, 'default_api:read_file')
+  assert.deepEqual(second, [])
+  assert.deepEqual(parser.flush(baseChunk), [])
+})
+
+test('stream parser flush does not release a partial marker as plain text', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  parser.push('<|CHAT2API|tool_calls', baseChunk)
+
+  const flushed = parser.flush(baseChunk)
+  const observation = parser.getObservation()
+
+  assert.deepEqual(flushed, [])
+  assert.equal(observation.suppressedMalformedToolOutput, true)
+  assert.equal(observation.suppressedReason, 'malformed_tool_output')
+})
+
 test('stream parser records content and tool-call emission facts', () => {
   const parser = new ToolStreamParser(plan('managed_xml'))
   parser.push('hello ', baseChunk)

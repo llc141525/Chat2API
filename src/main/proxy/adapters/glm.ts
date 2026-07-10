@@ -26,6 +26,7 @@ import {
 import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
 
 const GLM_API_BASE = 'https://chatglm.cn/chatglm'
 const DEFAULT_ASSISTANT_ID = '65940acff94777010aa6b796'
@@ -823,12 +824,37 @@ export class GLMStreamHandler {
       }
 
       const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
+      const inspection = this.toolCallingPlan && this.toolStreamParser
+        ? inspectStreamAssistantOutput({
+            plan: this.toolCallingPlan,
+            observation: this.toolStreamParser.getObservation(),
+            finishReason,
+          })
+        : { ok: true as const, outcome: finishReason === 'tool_calls' ? 'tool_calls' : 'content' }
+
+      if (!inspection.ok) {
+        transStream.write(
+          `data: ${JSON.stringify({
+            ...baseChunk,
+            choices: [{
+              index: 0,
+              delta: {
+                content: `Error: ${inspection.error}`,
+              },
+              finish_reason: null,
+            }],
+            created: this.created,
+          })}\n\n`
+        )
+        delta = {}
+      }
+
       transStream.write(
         `data: ${JSON.stringify({
           id: this.conversationId,
           model: this.model,
           object: 'chat.completion.chunk',
-          choices: [{ index: 0, delta, finish_reason: finishReason }],
+          choices: [{ index: 0, delta, finish_reason: inspection.ok ? finishReason : 'stop' }],
           ...(includeUsage ? { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } : {}),
           created: this.created,
         })}\n\n`

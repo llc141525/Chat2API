@@ -292,10 +292,29 @@ test('RequestForwarder conversation state key: source isolates provider conversa
   assert.match(source, /buildProviderConversationStateKey/)
   assert.match(source, /request\.user\.trim\(\)\.length > 0/)
   assert.match(source, /: context\.requestId/)
-  assert.match(source, /getConversationState\(conversationStateKey\)/)
-  assert.match(source, /setConversationState\(conversationStateKey, \{ parentMessageId: lastMessageId \}\)/)
-  assert.match(source, /setConversationState\(conversationStateKey, \{ conversationId: convId \}\)/)
-  assert.doesNotMatch(source, /getConversationState\(toolSessionKey\)/)
+  assert.match(source, /getProviderConversationState\(/)
+  assert.match(source, /setProviderConversationState\(/)
   assert.match(source, /const sessionDimension = typeof request\.user === 'string'/)
   assert.match(source, /return `\$\{provider\.id\}:\$\{account\.id\}:\$\{actualModel\}:\$\{sessionDimension\}`/)
+})
+
+test('RequestForwarder source restores provider conversation state from tool session key only for managed tool follow-up turns', async () => {
+  const source = await readFile(join(__dirname, '..', '..', 'src/main/proxy/forwarder.ts'), 'utf8')
+
+  assert.match(source, /function hasManagedToolHistory/)
+  assert.match(source, /export function getProviderConversationState/)
+  assert.match(source, /if \(!input\.fallbackToolSessionKey \|\| !hasManagedToolHistory\(input\.messages\)\)/)
+  assert.match(source, /return getConversationState\(input\.fallbackToolSessionKey\)/)
+  assert.match(source, /fallbackToolSessionKey: toolSessionKey/)
+})
+
+test('RequestForwarder source saves GLM provider conversation state to both primary and tool session keys for tool follow-up turns', async () => {
+  const source = await readFile(join(__dirname, '..', '..', 'src/main/proxy/forwarder.ts'), 'utf8')
+
+  assert.match(source, /export function setProviderConversationState/)
+  assert.match(source, /setConversationState\(input\.primaryKey, input\.update\)/)
+  assert.match(source, /setConversationState\(input\.fallbackToolSessionKey, input\.update\)/)
+  assert.match(source, /update: \{ conversationId: convId \}/)
+  assert.match(source, /update: \{ conversationId: retryConvId \}/)
+  assert.match(source, /update: \{ parentMessageId: lastMessageId \}/)
 })

@@ -5,7 +5,7 @@ import {
   clearToolDiagnosticEvents,
   getToolDiagnosticEvents,
 } from '../../src/main/proxy/toolCalling/diagnostics.ts'
-import { inspectNonStreamAssistantOutput } from '../../src/main/proxy/toolCalling/outputInspection.ts'
+import { inspectNonStreamAssistantOutput, inspectStreamAssistantOutput } from '../../src/main/proxy/toolCalling/outputInspection.ts'
 import type { ToolCallingPlan } from '../../src/main/proxy/toolCalling/types.ts'
 
 function plan(emptyOutputPolicy: ToolCallingPlan['contract']['emptyOutputPolicy'] = 'diagnose_and_fail'): ToolCallingPlan {
@@ -117,4 +117,66 @@ test('intentional silence policy passes through empty output with diagnostic out
 
   assert.equal(result.ok, true)
   assert.equal(result.outcome, 'provider_empty')
+})
+
+test('whitespace-only non-stream assistant output fails under strict contract', () => {
+  const result = inspectNonStreamAssistantOutput({
+    result: {
+      choices: [{
+        message: { role: 'assistant', content: '  \n\t  ' },
+        finish_reason: 'stop',
+      }],
+    },
+    plan: plan('diagnose_and_fail'),
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.outcome, 'provider_empty')
+})
+
+test('missing non-stream message fails under strict contract', () => {
+  const result = inspectNonStreamAssistantOutput({
+    result: {
+      choices: [],
+    },
+    plan: plan('diagnose_and_fail'),
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.outcome, 'provider_empty')
+})
+
+test('stream inspection fails when only whitespace content was emitted', () => {
+  const result = inspectStreamAssistantOutput({
+    plan: plan('diagnose_and_fail'),
+    observation: {
+      rawContentLength: 3,
+      emittedContentLength: 3,
+      emittedVisibleContentLength: 0,
+      emittedToolCallCount: 0,
+      suppressedMalformedToolOutput: false,
+    },
+    finishReason: 'stop',
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.outcome, 'provider_empty')
+})
+
+test('stream inspection reports malformed tool output when buffered protocol text was suppressed', () => {
+  const result = inspectStreamAssistantOutput({
+    plan: plan('diagnose_and_fail'),
+    observation: {
+      rawContentLength: 32,
+      emittedContentLength: 0,
+      emittedVisibleContentLength: 0,
+      emittedToolCallCount: 0,
+      suppressedMalformedToolOutput: true,
+      suppressedReason: 'malformed_tool_output',
+    },
+    finishReason: 'stop',
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.outcome, 'malformed_tool_output')
 })

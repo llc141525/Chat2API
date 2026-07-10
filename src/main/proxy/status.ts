@@ -22,7 +22,7 @@ export class ProxyStatusManager {
   }
 
   private config: ProxyConfig = {
-    port: 8081,
+    port: 48763,
     host: '0.0.0.0',
     timeout: 120000,
     retryCount: 3,

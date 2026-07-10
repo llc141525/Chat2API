@@ -173,7 +173,7 @@ $nonSkillToolAfterResultSeen = $false
 $finalDoneSeen = $false
 
 $skillNeedles = @("agent-capability-probe", '"skill"')
-$toolCallNeedles = @("tool_call", "toolcall", "tool_call_delta", "call_tool", "tool.start", "tool.starting", "tool:call", "function_call")
+$toolCallNeedles = @("tool_use", "tool_call", "toolcall", "tool_call_delta", "call_tool", "tool.start", "tool.starting", "tool:call", "function_call")
 $toolResultNeedles = @("tool_result", "toolresult", "observation", "tool.finish", "tool.finished", "tool:result", '"status":"completed"', '"state":{"status":"completed"')
 $nonSkillToolNames = @("read", "bash", "grep", "glob", "list", "edit", "write", "read_file", "Get-Content", "Get-FileHash")
 

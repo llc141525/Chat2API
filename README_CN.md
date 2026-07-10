@@ -128,7 +128,7 @@ npm run build:all          # 构建所有平台
 ### 步骤 3：配置代理
 
 1. 从侧边栏导航到**代理设置**页面
-2. 设置端口（默认：8080）
+2. 设置端口（默认：48763）
 3. 选择负载均衡策略：
    - **轮询**：在账户间均匀分配请求
    - **填充优先**：使用一个账户直到达到限制
@@ -144,7 +144,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="your-api-key",
-    base_url="http://localhost:8080/v1"
+    base_url="http://localhost:48763/v1"
 )
 
 response = client.chat.completions.create(
@@ -182,7 +182,7 @@ print(response.choices[0].message.content)
 
 ## ⚙️ 设置选项
 
-- **端口**：更改代理监听端口（默认：8080）
+- **端口**：更改代理监听端口（默认：48763）
 - **路由策略**：轮询（Round Robin）或填充优先（Fill First）
 - **自动启动**：应用启动时自动启动代理
 - **主题**：浅色、深色或跟随系统

@@ -238,7 +238,7 @@ npm run start:sandbox
 
 ### 7.2 代理配置
 
-- **端口**：默认 8080，可在设置中修改
+- **端口**：默认 48763，可在设置中修改
 - **路由策略**：轮询（Round Robin）、填充优先（Fill First）、故障转移（Failover）
 - **API 密钥**：可在设置中启用 API 密钥认证
 
@@ -290,7 +290,7 @@ sudo xattr -rd com.apple.quarantine "/Applications/Chat2API.app"
 
 ### 9.2 端口被占用
 
-如果默认端口 8080 被占用，可在设置中修改代理端口。
+如果默认端口 48763 被占用，可在设置中修改代理端口。
 
 ### 9.3 提供商认证失败
 

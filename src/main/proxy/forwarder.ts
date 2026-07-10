@@ -67,6 +67,42 @@ export function setConversationState(key: string, update: Partial<ConversationSt
   } as ConversationState)
 }
 
+function hasManagedToolHistory(messages?: ChatCompletionRequest['messages']): boolean {
+  if (!messages || messages.length === 0) return false
+  return messages.some((message) => (
+    (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
+    || (message.role === 'tool' && typeof message.tool_call_id === 'string' && message.tool_call_id.length > 0)
+  ))
+}
+
+export function getProviderConversationState(input: {
+  primaryKey: string
+  fallbackToolSessionKey?: string | null
+  messages?: ChatCompletionRequest['messages']
+}): ConversationState | undefined {
+  const primary = getConversationState(input.primaryKey)
+  if (primary) return primary
+
+  if (!input.fallbackToolSessionKey || !hasManagedToolHistory(input.messages)) {
+    return undefined
+  }
+
+  return getConversationState(input.fallbackToolSessionKey)
+}
+
+export function setProviderConversationState(input: {
+  primaryKey: string
+  update: Partial<ConversationState>
+  fallbackToolSessionKey?: string | null
+  messages?: ChatCompletionRequest['messages']
+}): void {
+  setConversationState(input.primaryKey, input.update)
+  if (!input.fallbackToolSessionKey || !hasManagedToolHistory(input.messages)) {
+    return
+  }
+  setConversationState(input.fallbackToolSessionKey, input.update)
+}
+
 type ProviderForwarder = {
   name: string
   matches: (provider: Provider) => boolean
@@ -514,7 +550,11 @@ export class RequestForwarder {
       }
 
       // Check for existing conversation state (multi-turn)
-      const convState = getConversationState(conversationStateKey)
+      const convState = getProviderConversationState({
+        primaryKey: conversationStateKey,
+        fallbackToolSessionKey: toolSessionKey,
+        messages: request.messages,
+      })
 
       const adapter = new DeepSeekAdapter(provider, account)
 
@@ -553,8 +593,12 @@ export class RequestForwarder {
       const saveConversationState = () => {
         const lastMessageId = handler.getLastMessageId()
         if (lastMessageId) {
-          setConversationState(toolSessionKey, { parentMessageId: lastMessageId })
-          setConversationState(conversationStateKey, { parentMessageId: lastMessageId })
+          setProviderConversationState({
+            primaryKey: conversationStateKey,
+            fallbackToolSessionKey: toolSessionKey,
+            messages: request.messages,
+            update: { parentMessageId: lastMessageId },
+          })
         }
       }
 
@@ -631,7 +675,12 @@ export class RequestForwarder {
         // Save state from retry handler (original handler's state is stale)
         const retryMsgId = retryHandler.getLastMessageId()
         if (retryMsgId) {
-          setConversationState(conversationStateKey, { parentMessageId: retryMsgId })
+          setProviderConversationState({
+            primaryKey: conversationStateKey,
+            fallbackToolSessionKey: toolSessionKey,
+            messages: request.messages,
+            update: { parentMessageId: retryMsgId },
+          })
         }
       } else {
         // Save state from original handler (no retry occurred)
@@ -689,7 +738,11 @@ export class RequestForwarder {
       }
 
       // Check for existing conversation state (multi-turn)
-      const convState = getConversationState(conversationStateKey)
+      const convState = getProviderConversationState({
+        primaryKey: conversationStateKey,
+        fallbackToolSessionKey: toolSessionKey,
+        messages: request.messages,
+      })
 
       const adapter = new GLMAdapter(provider, account)
       const { response, conversationId } = await adapter.chatCompletion({
@@ -738,7 +791,12 @@ export class RequestForwarder {
           transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
             const convId = handler.getConversationId()
             if (convId) {
-              setConversationState(conversationStateKey, { conversationId: convId })
+              setProviderConversationState({
+                primaryKey: conversationStateKey,
+                fallbackToolSessionKey: toolSessionKey,
+                messages: request.messages,
+                update: { conversationId: convId },
+              })
               adapter.deleteConversation(convId).catch(err => {
                 console.error('[GLM] Failed to delete session:', err)
               })
@@ -751,7 +809,12 @@ export class RequestForwarder {
           transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
             const convId = handler.getConversationId()
             if (convId) {
-              setConversationState(conversationStateKey, { conversationId: convId })
+              setProviderConversationState({
+                primaryKey: conversationStateKey,
+                fallbackToolSessionKey: toolSessionKey,
+                messages: request.messages,
+                update: { conversationId: convId },
+              })
             }
             return originalEnd(chunk, encoding, callback)
           }
@@ -789,13 +852,23 @@ let result = await handler.handleNonStream(response.data, response)
         // Save state from retry handler (original handler's conversationId is stale)
         const retryConvId = retryHandler.getConversationId()
         if (retryConvId) {
-          setConversationState(conversationStateKey, { conversationId: retryConvId })
+          setProviderConversationState({
+            primaryKey: conversationStateKey,
+            fallbackToolSessionKey: toolSessionKey,
+            messages: request.messages,
+            update: { conversationId: retryConvId },
+          })
         }
       } else {
         // Save state from original handler (no retry occurred)
         const convId = handler.getConversationId()
         if (convId) {
-          setConversationState(conversationStateKey, { conversationId: convId })
+          setProviderConversationState({
+            primaryKey: conversationStateKey,
+            fallbackToolSessionKey: toolSessionKey,
+            messages: request.messages,
+            update: { conversationId: convId },
+          })
         }
       }
 

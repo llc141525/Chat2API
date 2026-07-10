@@ -10,6 +10,7 @@ import {
 export interface ToolStreamObservation {
   rawContentLength: number
   emittedContentLength: number
+  emittedVisibleContentLength: number
   emittedToolCallCount: number
   suppressedMalformedToolOutput: boolean
   suppressedReason?: 'invalid_tool_name' | 'malformed_tool_output'
@@ -24,6 +25,7 @@ export class ToolStreamParser {
   private observation: ToolStreamObservation = {
     rawContentLength: 0,
     emittedContentLength: 0,
+    emittedVisibleContentLength: 0,
     emittedToolCallCount: 0,
     suppressedMalformedToolOutput: false,
   }
@@ -38,13 +40,14 @@ export class ToolStreamParser {
     this.observation.rawContentLength += content.length
     this.buffer += content
     const chunks: any[] = []
+    const suppressPlainText = this.emittedToolCall
 
     if (!this.isBufferingToolCall) {
       const markerStart = findMarkerStart(this.buffer, this.plan)
       if (markerStart.matched) {
-        if (markerStart.index > 0) {
+        if (markerStart.index > 0 && !suppressPlainText) {
           const emitted = this.buffer.slice(0, markerStart.index)
-          this.observation.emittedContentLength += emitted.length
+          recordEmittedContent(this.observation, emitted)
           chunks.push(createContentChunk(baseChunk, emitted, includeRole))
         }
         this.buffer = this.buffer.slice(markerStart.index)
@@ -52,15 +55,19 @@ export class ToolStreamParser {
       } else if (markerStart.partial) {
         if (markerStart.index > 0) {
           const emitted = this.buffer.slice(0, markerStart.index)
-          this.observation.emittedContentLength += emitted.length
-          chunks.push(createContentChunk(baseChunk, emitted, includeRole))
+          if (!suppressPlainText) {
+            recordEmittedContent(this.observation, emitted)
+            chunks.push(createContentChunk(baseChunk, emitted, includeRole))
+          }
           this.buffer = this.buffer.slice(markerStart.index)
         }
         this.isBufferingToolCall = true
         return chunks
       } else {
-        this.observation.emittedContentLength += this.buffer.length
-        chunks.push(createContentChunk(baseChunk, this.buffer, includeRole))
+        if (!suppressPlainText) {
+          recordEmittedContent(this.observation, this.buffer)
+          chunks.push(createContentChunk(baseChunk, this.buffer, includeRole))
+        }
         this.buffer = ''
         return chunks
       }
@@ -122,6 +129,7 @@ export class ToolStreamParser {
       return chunks
     }
 
+    const wasBufferingToolCall = this.isBufferingToolCall
     if (parsed.invalidToolNames.length > 0 || parsed.rawMatches.length > 0 || this.isBufferingToolCall) {
       this.observation.suppressedMalformedToolOutput = true
       this.observation.suppressedReason = parsed.invalidToolNames.length > 0
@@ -129,12 +137,12 @@ export class ToolStreamParser {
         : 'malformed_tool_output'
     }
 
-    const shouldReleaseText = !this.emittedToolCall
+    const shouldReleaseText = !this.emittedToolCall && !wasBufferingToolCall
     const text = this.buffer
     this.buffer = ''
     this.isBufferingToolCall = false
     if (shouldReleaseText) {
-      this.observation.emittedContentLength += text.length
+      recordEmittedContent(this.observation, text)
     }
     return shouldReleaseText ? [createContentChunk(baseChunk, text, false)] : []
   }
@@ -152,6 +160,11 @@ export class ToolStreamParser {
       ...this.observation,
     }
   }
+}
+
+function recordEmittedContent(observation: ToolStreamObservation, content: string): void {
+  observation.emittedContentLength += content.length
+  observation.emittedVisibleContentLength += content.trim().length
 }
 
 function parseBufferedToolCall(buffer: string, plan: ToolCallingPlan): ToolParseResult {

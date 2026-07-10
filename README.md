@@ -128,7 +128,7 @@ For example, to get a DeepSeek token:
 ### Step 3: Configure Proxy
 
 1. Navigate to **Proxy Settings** from the sidebar
-2. Set the port (default: 8080)
+2. Set the port (default: 48763)
 3. Choose a load balancing strategy:
    - **Round Robin**: Distributes requests evenly across accounts
    - **Fill First**: Uses one account until limit is reached
@@ -144,7 +144,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="your-api-key",
-    base_url="http://localhost:8080/v1"
+    base_url="http://localhost:48763/v1"
 )
 
 response = client.chat.completions.create(
@@ -182,7 +182,7 @@ For security, you can enable API Key authentication:
 
 ## ⚙️ Settings
 
-- **Port**: Change the proxy listening port (default: 8080)
+- **Port**: Change the proxy listening port (default: 48763)
 - **Routing Strategy**: Round Robin or Fill First
 - **Auto-start**: Launch proxy automatically on app startup
 - **Theme**: Light, Dark, or System preference

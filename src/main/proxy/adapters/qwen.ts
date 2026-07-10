@@ -25,6 +25,7 @@ import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
 
 /**
  * Check if content contains tool calls (both bracket and XML formats)
@@ -557,6 +558,7 @@ export class QwenStreamHandler {
   private sentRole: boolean = false
   private thinkingContent: string = ''
   private sentThinkingRole: boolean = false
+  private finalized = false
 
   constructor(model: string, onEnd?: (sessionId: string) => void, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
@@ -621,6 +623,53 @@ export class QwenStreamHandler {
       transStream.end('data: [DONE]\n\n')
       this.onEnd?.(this.sessionId)
     }
+  }
+
+  private finalizeStream(transStream: PassThrough, safeEnd: (data?: string) => void): void {
+    if (this.finalized) return
+    this.finalized = true
+
+    const baseChunk = createBaseChunk(this.responseId || this.sessionId, this.model, this.created)
+    const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
+    for (const outChunk of flushChunks) {
+      transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+    }
+
+    const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
+    const inspection = this.toolCallingPlan && this.toolStreamParser
+      ? inspectStreamAssistantOutput({
+          plan: this.toolCallingPlan,
+          observation: this.toolStreamParser.getObservation(),
+          finishReason,
+        })
+      : { ok: true as const, outcome: finishReason === 'tool_calls' ? 'tool_calls' : 'content' }
+
+    if (!inspection.ok) {
+      transStream.write(
+        `data: ${JSON.stringify({
+          ...baseChunk,
+          choices: [{
+            index: 0,
+            delta: {
+              ...(!this.sentRole && !this.sentThinkingRole ? { role: 'assistant' } : {}),
+              content: `Error: ${inspection.error}`,
+            },
+            finish_reason: null,
+          }],
+        })}\n\n`
+      )
+      this.sentRole = true
+    }
+
+    transStream.write(
+      `data: ${JSON.stringify({
+        ...baseChunk,
+        choices: [{ index: 0, delta: {}, finish_reason: inspection.ok ? finishReason : 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      })}\n\n`
+    )
+    safeEnd('data: [DONE]\n\n')
+    this.onEnd?.(this.sessionId)
   }
 
   handleStream(stream: any, response?: AxiosResponse): PassThrough {
@@ -775,12 +824,23 @@ export class QwenStreamHandler {
                   
                   console.log('[Qwen] newContent.length:', newContent.length, 'this.content.length:', this.content.length)
                   if (newContent.length > this.content.length) {
-                    const chunk = newContent.substring(this.content.length)
+                    const shouldReplayBufferedSnapshot = Boolean(
+                      this.toolCallingPlan
+                      && this.toolStreamParser?.isBuffering()
+                      && !this.toolStreamParser.hasEmittedToolCall()
+                      && (newContent.includes('<|CHAT2API|') || newContent.includes('<tool_calls>')),
+                    )
+                    const chunk = shouldReplayBufferedSnapshot
+                      ? newContent
+                      : newContent.substring(this.content.length)
                     this.content = newContent
                     console.log('[Qwen] Writing chunk, length:', chunk.length)
 
                     // Process tool call interception
                     const baseChunk = createBaseChunk(this.responseId || this.sessionId, this.model, this.created)
+                    if (shouldReplayBufferedSnapshot && this.toolCallingPlan) {
+                      this.toolStreamParser = new ToolStreamParser(this.toolCallingPlan)
+                    }
                     const outputChunks = this.toolStreamParser?.push(chunk, baseChunk, !this.sentRole) ?? [{
                       ...baseChunk,
                       choices: [{ index: 0, delta: { ...(!this.sentRole ? { role: 'assistant' } : {}), content: chunk }, finish_reason: null }],
@@ -802,30 +862,7 @@ export class QwenStreamHandler {
                   if (msg.mime_type === 'multi_load/iframe' && !this.stopSent) {
                     this.stopSent = true
                     console.log('[Qwen] Sending stop for multi_load/iframe, content so far:', this.content.length)
-                    
-                    // Flush any remaining tool calls
-                    const baseChunk = createBaseChunk(this.responseId || this.sessionId, this.model, this.created)
-                    const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-                    
-                    for (const outChunk of flushChunks) {
-                      transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
-                    }
-                    
-                    // Check if we emitted tool calls
-                    const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-                    
-                    transStream.write(
-                      `data: ${JSON.stringify({
-                        id: this.responseId || this.sessionId,
-                        model: this.model,
-                        object: 'chat.completion.chunk',
-                        choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-                        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                        created: this.created,
-                      })}\n\n`
-                    )
-                    safeEnd('data: [DONE]\n\n')
-                    this.onEnd?.(this.sessionId)
+                    this.finalizeStream(transStream, safeEnd)
                   }
                 }
               }
@@ -854,29 +891,7 @@ export class QwenStreamHandler {
           console.log('[Qwen] Received complete event')
           if (!streamEnded && !this.stopSent) {
             this.stopSent = true
-            
-            // Flush any remaining tool calls
-            const baseChunk = createBaseChunk(this.responseId || this.sessionId, this.model, this.created)
-            const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-            
-            for (const outChunk of flushChunks) {
-              transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
-            }
-            
-            // Check if we emitted tool calls
-            const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-            
-            transStream.write(
-              `data: ${JSON.stringify({
-                id: this.responseId || this.sessionId,
-                model: this.model,
-                object: 'chat.completion.chunk',
-                choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                created: this.created,
-              })}\n\n`
-            )
-            safeEnd('data: [DONE]\n\n')
+            this.finalizeStream(transStream, safeEnd)
           }
         }
       }
@@ -907,7 +922,10 @@ export class QwenStreamHandler {
             const decompressedStr = Buffer.from(decompressed).toString('utf8')
             buffer = decompressedStr
             processBuffer()
-            safeEnd('data: [DONE]\n\n')
+            if (!this.stopSent) {
+              this.stopSent = true
+              this.finalizeStream(transStream, safeEnd)
+            }
           })
         } catch (err) {
           console.error('[Qwen] Zstd decompression error:', err)
@@ -934,7 +952,10 @@ export class QwenStreamHandler {
       console.log('[Qwen] Stream closed')
       if (streamEnded) return
       processBuffer()
-      safeEnd('data: [DONE]\n\n')
+      if (!this.stopSent) {
+        this.stopSent = true
+        this.finalizeStream(transStream, safeEnd)
+      }
     })
 
     return transStream

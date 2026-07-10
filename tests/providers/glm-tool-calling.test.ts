@@ -8,6 +8,7 @@ import { gzipSync } from 'node:zlib'
 
 import { buildGLMPromptMessagesForTest, GLMStreamHandler } from '../../src/main/proxy/adapters/glm.ts'
 import { QwenStreamHandler } from '../../src/main/proxy/adapters/qwen.ts'
+import { QwenAiStreamHandler } from '../../src/main/proxy/adapters/qwen-ai.ts'
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
 import { ToolStreamParser } from '../../src/main/proxy/toolCalling/ToolStreamParser.ts'
 import { managedXmlProtocol } from '../../src/main/proxy/toolCalling/protocols/managedXml.ts'
@@ -48,7 +49,38 @@ function managedPlan(providerId: 'glm' | 'qwen'): ToolCallingPlan {
     shouldParseResponse: true,
     toolChoiceMode: 'auto',
     allowedToolNames: new Set(['default_api:read_file']),
-    diagnostics: {} as any,
+    availabilityRetryAllowed: false,
+    contract: {
+      turnId: `${providerId}-turn`,
+      sessionId: `${providerId}-session`,
+      providerId,
+      model: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      protocol: 'managed_xml',
+      snapshotFingerprint: null,
+      tools: Object.freeze([]),
+      allowedToolNames: Object.freeze(new Set<string>(['default_api:read_file'])),
+      toolChoiceMode: 'auto',
+      shouldInjectPrompt: true,
+      shouldParseResponse: true,
+      historyMode: 'managed_protocol',
+      emptyOutputPolicy: 'diagnose_and_fail',
+      toolSourceChain: Object.freeze(['current_request', 'session_catalog', 'message_history', 'safe_empty']),
+    },
+    diagnostics: {
+      requestId: `${providerId}-request`,
+      turnId: `${providerId}-turn`,
+      clientAdapterId: 'standard-openai-tools',
+      providerId,
+      model: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      actualModel: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      toolSource: 'openai',
+      mode: 'managed',
+      protocol: 'managed_xml',
+      toolCount: 1,
+      injected: true,
+      reason: 'test',
+      emptyOutputPolicy: 'diagnose_and_fail',
+    },
   }
 }
 
@@ -63,7 +95,38 @@ function bashManagedPlan(providerId: 'glm' | 'qwen'): ToolCallingPlan {
     shouldParseResponse: true,
     toolChoiceMode: 'auto',
     allowedToolNames: new Set(['bash']),
-    diagnostics: {} as any,
+    availabilityRetryAllowed: false,
+    contract: {
+      turnId: `${providerId}-turn`,
+      sessionId: `${providerId}-session`,
+      providerId,
+      model: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      protocol: 'managed_xml',
+      snapshotFingerprint: null,
+      tools: Object.freeze([]),
+      allowedToolNames: Object.freeze(new Set<string>(['bash'])),
+      toolChoiceMode: 'auto',
+      shouldInjectPrompt: true,
+      shouldParseResponse: true,
+      historyMode: 'managed_protocol',
+      emptyOutputPolicy: 'diagnose_and_fail',
+      toolSourceChain: Object.freeze(['current_request', 'session_catalog', 'message_history', 'safe_empty']),
+    },
+    diagnostics: {
+      requestId: `${providerId}-request`,
+      turnId: `${providerId}-turn`,
+      clientAdapterId: 'standard-openai-tools',
+      providerId,
+      model: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      actualModel: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      toolSource: 'openai',
+      mode: 'managed',
+      protocol: 'managed_xml',
+      toolCount: 1,
+      injected: true,
+      reason: 'test',
+      emptyOutputPolicy: 'diagnose_and_fail',
+    },
   }
 }
 
@@ -527,6 +590,41 @@ test('Qwen stream emits managed XML as OpenAI tool_calls', async () => {
   assert.doesNotMatch(output, /<\|CHAT2API\|tool_calls>/)
 })
 
+test('Qwen stream recovers when a cumulative snapshot rewrites an in-flight managed XML tool call', async () => {
+  const handler = new QwenStreamHandler('Qwen3-Max', undefined, managedPlan('qwen'))
+  const rewrittenSnapshot = `${managedXmlToolCall.replace('</|CHAT2API|tool_calls>', '')}residue-residue`
+  const output = await collect(handler.handleStream(Readable.from([
+    sseEvent({
+      communication: { sessionid: 'qwen-session-1', reqid: 'qwen-req-1' },
+      data: {
+        messages: [{
+          mime_type: 'multi_load/iframe',
+          content: rewrittenSnapshot,
+          status: 'streaming',
+          meta_data: {},
+        }],
+      },
+    }),
+    sseEvent({
+      communication: { sessionid: 'qwen-session-1', reqid: 'qwen-req-1' },
+      data: {
+        messages: [{
+          mime_type: 'multi_load/iframe',
+          content: managedXmlToolCall,
+          status: 'complete',
+          meta_data: {},
+        }],
+      },
+    }),
+  ])))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"default_api:read_file"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.doesNotMatch(output, /residue-residue/)
+  assert.doesNotMatch(output, /\|tool_calls>/)
+})
+
 test('Qwen non-stream leaves managed XML for ToolCallingEngine to convert', async () => {
   const handler = new QwenStreamHandler('Qwen3-Max', undefined, managedPlan('qwen'))
   const result = await handler.handleNonStream(Readable.from([
@@ -559,6 +657,94 @@ test('Qwen non-stream leaves managed XML for ToolCallingEngine to convert', asyn
   assert.equal(result.choices[0].message.content, null)
   assert.equal(result.choices[0].message.tool_calls[0].function.name, 'default_api:read_file')
   assert.equal(result.choices[0].finish_reason, 'tool_calls')
+})
+
+test('Qwen stream emits a client-safe error instead of silent empty success', async () => {
+  const handler = new QwenStreamHandler('Qwen3-Max', undefined, managedPlan('qwen'))
+  const output = await collect(handler.handleStream(Readable.from([
+    sseEvent({
+      communication: { sessionid: 'qwen-session-empty', reqid: 'qwen-req-empty' },
+      data: {
+        messages: [{
+          mime_type: 'multi_load/iframe',
+          content: '   ',
+          status: 'complete',
+          meta_data: {},
+        }],
+      },
+    }),
+  ])))
+
+  assert.match(output, /Error: Provider returned empty assistant output/)
+  assert.match(output, /"finish_reason":"stop"/)
+  assert.doesNotMatch(output, /"finish_reason":"tool_calls"/)
+})
+
+test('Qwen AI stream emits managed XML as OpenAI tool_calls', async () => {
+  const handler = new QwenAiStreamHandler('qwen3.7-max', undefined, managedPlan('qwen'))
+  handler.setChatId('qwen-ai-chat-1')
+  const output = await collect(await handler.handleStream(Readable.from([
+    sseEvent({
+      'response.created': { response_id: 'qwen-ai-response-1' },
+      choices: [{
+        delta: {
+          phase: 'answer',
+          status: 'finished',
+          content: managedXmlToolCall,
+        },
+      }],
+    }),
+  ])))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"default_api:read_file"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+})
+
+test('Qwen AI stream emits a client-safe error instead of silent empty success', async () => {
+  const handler = new QwenAiStreamHandler('qwen3.7-max', undefined, managedPlan('qwen'))
+  handler.setChatId('qwen-ai-chat-empty')
+  const output = await collect(await handler.handleStream(Readable.from([
+    sseEvent({
+      'response.created': { response_id: 'qwen-ai-response-empty' },
+      choices: [{
+        delta: {
+          phase: 'answer',
+          status: 'finished',
+          content: '   ',
+        },
+      }],
+    }),
+  ])))
+
+  assert.match(output, /Error: Provider returned empty assistant output/)
+  assert.match(output, /"finish_reason":"stop"/)
+  assert.doesNotMatch(output, /"finish_reason":"tool_calls"/)
+})
+
+test('GLM stream emits a client-safe error instead of silent empty success', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-empty-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-empty-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: '   ' }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-empty-1', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /Error: Provider returned empty assistant output/)
+  assert.match(output, /"finish_reason":"stop"/)
+  assert.doesNotMatch(output, /"finish_reason":"tool_calls"/)
 })
 
 // ============================================================
