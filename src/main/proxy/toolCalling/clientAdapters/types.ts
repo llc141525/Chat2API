@@ -7,9 +7,15 @@ export interface NormalizedToolChoice {
   forcedName?: string
 }
 
+export interface PromptEmbeddedMarkers {
+  availableToolsHeader: boolean
+  managedProtocolHeader: boolean
+  mcpServerBlock: boolean
+}
+
 export interface NormalizedClientToolRequest {
   clientAdapterId: string
-  toolSource: 'openai' | 'mcp' | 'none'
+  toolSource: 'openai' | 'mcp' | 'prompt_embedded' | 'none'
   tools: NormalizedToolDefinition[]
   toolChoice: NormalizedToolChoice
   diagnostics: {
@@ -18,6 +24,9 @@ export interface NormalizedClientToolRequest {
     detectedClientType?: string
     rawToolCount: number
     normalizedToolNames: string[]
+    promptEmbeddedMarkers?: PromptEmbeddedMarkers
+    promptEmbeddedRawFingerprint?: string
+    clientSignature?: string
   }
 }
 

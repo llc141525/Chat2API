@@ -8,6 +8,7 @@
 
 import type { ChatMessage } from '../types'
 import { preserveToolExchangePairs } from '../contextMessageMetadata.ts'
+import { hasGeneralToolPromptSignature } from '../constants/signatures.ts'
 
 /**
  * Sliding Window Strategy Configuration
@@ -140,8 +141,28 @@ function getMessageContent(message: ChatMessage): string {
 }
 
 /**
+ * Check if a message contains tool definitions
+ * Tool definitions are injected into messages by prompt adapters and must be
+ * preserved across context management strategies, similar to system messages.
+ * Covers both:
+ * - Prompt-injected tool definitions (signatures like "## Available Tools", "[function_calls]")
+ * - MCP tool definitions (<tools><tool>...</tool></tools> XML format)
+ */
+function containsToolDefinitions(message: ChatMessage): boolean {
+  if (message.role === 'tool') return false
+  if (message.tool_calls && message.tool_calls.length > 0) return false
+  if (message.tool_call_id) return false
+  const content = typeof message.content === 'string' ? message.content : ''
+  if (content.length === 0) return false
+  if (hasGeneralToolPromptSignature(content)) return true
+  // MCP tool definitions use <tools><tool>...</tool></tools> XML format
+  if (/<tools>[\s\S]*?<\/tools>/i.test(content)) return true
+  return false
+}
+
+/**
  * Sliding Window Strategy
- * Keeps the most recent N messages, always preserving system messages
+ * Keeps the most recent N messages, always preserving system and tool-definition messages
  */
 export class SlidingWindowStrategy {
   private config: SlidingWindowConfig
@@ -163,17 +184,21 @@ export class SlidingWindowStrategy {
       }
     }
 
-    const systemMessages = messages.filter(msg => msg.role === 'system')
-    const nonSystemMessages = messages.filter(msg => msg.role !== 'system')
+    const protectedMessages = messages.filter(
+      msg => msg.role === 'system' || containsToolDefinitions(msg)
+    )
+    const trimableMessages = messages.filter(
+      msg => msg.role !== 'system' && !containsToolDefinitions(msg)
+    )
 
-    const maxNonSystemMessages = this.config.maxMessages - systemMessages.length
-    const keptNonSystemMessages = nonSystemMessages.slice(-maxNonSystemMessages)
+    const maxTrimableMessages = this.config.maxMessages - protectedMessages.length
+    const keptTrimableMessages = trimableMessages.slice(-Math.max(0, maxTrimableMessages))
 
-    const result = [...systemMessages, ...keptNonSystemMessages]
+    const result = [...protectedMessages, ...keptTrimableMessages]
 
     console.log(
       `[SlidingWindowStrategy] Trimmed from ${originalCount} to ${result.length} messages ` +
-        `(system: ${systemMessages.length}, non-system: ${keptNonSystemMessages.length})`
+        `(protected: ${protectedMessages.length}, trimable: ${keptTrimableMessages.length})`
     )
 
     return {
@@ -210,54 +235,57 @@ export class TokenLimitStrategy {
       }
     }
 
-    const systemMessages = messages.filter(msg => msg.role === 'system')
-    const nonSystemMessages = messages.filter(msg => msg.role !== 'system')
+    const protectedMessages = messages.filter(
+      msg => msg.role === 'system' || containsToolDefinitions(msg)
+    )
+    const nonProtectedMessages = messages.filter(
+      msg => msg.role !== 'system' && !containsToolDefinitions(msg)
+    )
 
-    const systemTokens = systemMessages.reduce(
+    const protectedTokens = protectedMessages.reduce(
       (total, msg) => total + estimateTokens(msg.content),
       0
     )
 
-    const availableTokens = this.config.maxTokens - systemTokens
+    const availableTokens = this.config.maxTokens - protectedTokens
 
     if (availableTokens <= 0) {
       console.warn(
-        `[TokenLimitStrategy] System messages already exceed token limit ` +
-          `(${systemTokens} > ${this.config.maxTokens})`
+        `[TokenLimitStrategy] Protected messages already exceed token limit ` +
+          `(${protectedTokens} > ${this.config.maxTokens})`
       )
-      // Instead of dropping all user messages, trim system messages to fit
-      // Keep the last part of system prompt (usually more relevant) + last user message
-      const reserveForUser = Math.min(this.config.maxTokens * 0.3, this.config.maxTokens)
-      const systemMax = this.config.maxTokens - reserveForUser
+      // Trim protected messages content to fit, then add non-protected messages
+      const reserveForNonProtected = Math.min(this.config.maxTokens * 0.3, this.config.maxTokens)
+      const protectedMax = this.config.maxTokens - reserveForNonProtected
       
-      const trimmedSystem = systemMessages.map(msg => {
+      const trimmedProtected = protectedMessages.map(msg => {
         if (typeof msg.content === 'string') {
-          return { ...msg, content: msg.content.slice(-systemMax) }
+          return { ...msg, content: msg.content.slice(-protectedMax) }
         }
         return msg
       })
       
-      const keptNonSystem: ChatMessage[] = []
-      let usedTokens = reserveForUser > 0 ? systemMax : 0
-      for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
-        const msg = nonSystemMessages[i]
+      const keptNonProtected: ChatMessage[] = []
+      let usedTokens = reserveForNonProtected > 0 ? protectedMax : 0
+      for (let i = nonProtectedMessages.length - 1; i >= 0; i--) {
+        const msg = nonProtectedMessages[i]
         const msgTokens = estimateTokens(msg.content)
         if (usedTokens + msgTokens <= this.config.maxTokens) {
-          keptNonSystem.unshift(msg)
+          keptNonProtected.unshift(msg)
           usedTokens += msgTokens
-        } else if (keptNonSystem.length === 0 && nonSystemMessages.length > 0) {
+        } else if (keptNonProtected.length === 0 && nonProtectedMessages.length > 0) {
           // Always keep at least the last user message
-          keptNonSystem.unshift(nonSystemMessages[nonSystemMessages.length - 1])
+          keptNonProtected.unshift(nonProtectedMessages[nonProtectedMessages.length - 1])
           break
         } else {
           break
         }
       }
       
-      const result = [...trimmedSystem, ...keptNonSystem]
+      const result = [...trimmedProtected, ...keptNonProtected]
       console.log(
-        `[TokenLimitStrategy] System exceeded limit - kept ${result.length} messages ` +
-          `(trimmed system + ${keptNonSystem.length} non-system)`
+        `[TokenLimitStrategy] Protected exceeded limit - kept ${result.length} messages ` +
+          `(trimmed protected + ${keptNonProtected.length} non-protected)`
       )
       
       return {
@@ -269,23 +297,23 @@ export class TokenLimitStrategy {
       }
     }
 
-    const keptNonSystemMessages: ChatMessage[] = []
+    const keptNonProtectedMessages: ChatMessage[] = []
     let currentTokens = 0
 
-    for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
-      const msg = nonSystemMessages[i]
+    for (let i = nonProtectedMessages.length - 1; i >= 0; i--) {
+      const msg = nonProtectedMessages[i]
       const msgTokens = estimateTokens(msg.content)
 
       if (currentTokens + msgTokens <= availableTokens) {
-        keptNonSystemMessages.unshift(msg)
+        keptNonProtectedMessages.unshift(msg)
         currentTokens += msgTokens
       } else {
         continue
       }
     }
 
-    const result = [...systemMessages, ...keptNonSystemMessages]
-    const totalTokens = systemTokens + currentTokens
+    const result = [...protectedMessages, ...keptNonProtectedMessages]
+    const totalTokens = protectedTokens + currentTokens
 
     console.log(
       `[TokenLimitStrategy] Trimmed from ${originalCount} to ${result.length} messages ` +
@@ -361,11 +389,15 @@ export class SummaryStrategy {
       }
     }
 
-    const systemMessages = messages.filter(msg => msg.role === 'system')
-    const nonSystemMessages = messages.filter(msg => msg.role !== 'system')
+    const protectedMessages = messages.filter(
+      msg => msg.role === 'system' || containsToolDefinitions(msg)
+    )
+    const trimableMessages = messages.filter(
+      msg => msg.role !== 'system' && !containsToolDefinitions(msg)
+    )
 
-    const recentMessages = nonSystemMessages.slice(-this.config.keepRecentMessages)
-    const oldMessages = nonSystemMessages.slice(0, -this.config.keepRecentMessages)
+    const recentMessages = trimableMessages.slice(-this.config.keepRecentMessages)
+    const oldMessages = trimableMessages.slice(0, -this.config.keepRecentMessages)
 
     if (oldMessages.length === 0) {
       return {
@@ -392,7 +424,7 @@ export class SummaryStrategy {
         content: `[Conversation Summary]\n${summary}`,
       }
 
-      const result = [...systemMessages, summaryMessage, ...recentMessages]
+      const result = [...protectedMessages, summaryMessage, ...recentMessages]
 
       console.log(
         `[SummaryStrategy] Compressed from ${originalCount} to ${result.length} messages ` +
@@ -408,7 +440,7 @@ export class SummaryStrategy {
       }
     } catch (error) {
       console.error('[SummaryStrategy] Failed to generate summary:', error)
-      const fallbackMessages = [...systemMessages, ...recentMessages]
+      const fallbackMessages = [...protectedMessages, ...recentMessages]
       return {
         messages: fallbackMessages,
         originalCount,

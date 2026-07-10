@@ -399,6 +399,11 @@ function containerStarts(): string[] {
   return [CHAT2API_START, CANONICAL_START, CHAT2API_INVOKE_START]
 }
 
+function isProtocolBoundary(value: string, index: number): boolean {
+  if (index <= 0) return true
+  return /\s/.test(value[index - 1] ?? '')
+}
+
 function findFirstMarker(value: string): { value: string; index: number; kind: 'container' | 'standalone' } | null {
   return containerStarts()
     .map((marker) => ({
@@ -406,6 +411,6 @@ function findFirstMarker(value: string): { value: string; index: number; kind: '
       index: value.indexOf(marker),
       kind: marker === CHAT2API_INVOKE_START ? 'standalone' as const : 'container' as const,
     }))
-    .filter((marker) => marker.index !== -1)
+    .filter((marker) => marker.index !== -1 && isProtocolBoundary(value, marker.index))
     .sort((left, right) => left.index - right.index)[0] ?? null
 }

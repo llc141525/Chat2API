@@ -144,6 +144,98 @@ For suspected Qwen-specific swallowed output:
 - Diagnostics classify empty failures without requiring raw log archaeology.
 - GLM OpenCode probe still passes.
 
+## Acceptance Run: 2026-07-10
+
+Deterministic P0 focused gate passed:
+
+```powershell
+node --test tests/tool-calling/output-inspection.test.ts tests/tool-calling/tool-stream-parser.test.ts
+```
+
+Result:
+
+- 26 tests passed.
+- Empty non-stream output fails under strict contracts.
+- Whitespace-only non-stream output fails.
+- Missing non-stream message fails.
+- Stream whitespace-only output fails as `provider_empty`.
+- Suppressed protocol output reports `malformed_tool_output`.
+- Stream parser suppresses later plain text after a tool call.
+
+Full deterministic gate passed:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Result:
+
+- 205 tests passed.
+
+OpenCode GLM probe was executed:
+
+```powershell
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
+```
+
+Result:
+
+- OpenCode exited successfully.
+- Probe failed because `.agent-probe/result.json` was not created.
+- Event stream shows the first `skill` tool call succeeded.
+- The next assistant turn was not swallowed; it emitted plain text claiming only `open_url` was directly available and did not call `read` or `bash`.
+
+Classification:
+
+- This does not reproduce the P0 swallowed/empty-reply failure.
+- The remaining real-probe failure belongs to P1 tool catalog/tool availability reliability: the model saw or trusted the wrong available-tool set after the skill turn.
+
+## Acceptance Run: 2026-07-10 Follow-Up
+
+After the P1 catalog/tool availability fixes in the working tree, P0 was re-verified together with P1.
+
+Focused deterministic gate passed:
+
+```powershell
+node --test tests/tool-calling/output-inspection.test.ts tests/tool-calling/tool-stream-parser.test.ts tests/tool-calling/catalog-fallback.test.ts tests/tool-calling/tool-catalog.test.ts tests/tool-calling/tool-engine.test.ts tests/tool-runtime/data/*.test.ts
+```
+
+Result:
+
+- 107 tests passed.
+
+Full deterministic gate passed:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Result:
+
+- 207 tests passed.
+
+Real OpenCode probes passed:
+
+```powershell
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "qwen/Qwen3.7-Max"
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "deepseek/deepseek-v4-pro"
+```
+
+Result:
+
+- All three probes returned `CAPABILITY_PROBE_PASS`.
+- `result.json` was created and matched deterministic expected values.
+- Event streams included a real `agent-capability-probe` skill invocation.
+- Event streams included at least two non-skill tool calls.
+- Event streams proved a non-skill tool call after a tool result.
+- Final assistant text included `CAPABILITY_PROBE_DONE`.
+
+P0 status:
+
+- Accepted for the verified GLM, Qwen, and DeepSeek paths.
+- The previous failed GLM probe is superseded by this follow-up run.
+
 ## Stop Conditions
 
 Stop and write a follow-up issue if:

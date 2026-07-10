@@ -130,6 +130,12 @@ interface QwenChatRequestBodyInput {
   enableWebSearch: boolean
 }
 
+interface QwenContentDeltaDecision {
+  shouldEmit: boolean
+  chunk: string
+  resetParser: boolean
+}
+
 function buildQwenChatRequestBody(input: QwenChatRequestBodyInput): any {
   const {
     request,
@@ -823,22 +829,20 @@ export class QwenStreamHandler {
                   }
                   
                   console.log('[Qwen] newContent.length:', newContent.length, 'this.content.length:', this.content.length)
-                  if (newContent.length > this.content.length) {
-                    const shouldReplayBufferedSnapshot = Boolean(
-                      this.toolCallingPlan
-                      && this.toolStreamParser?.isBuffering()
-                      && !this.toolStreamParser.hasEmittedToolCall()
-                      && (newContent.includes('<|CHAT2API|') || newContent.includes('<tool_calls>')),
-                    )
-                    const chunk = shouldReplayBufferedSnapshot
-                      ? newContent
-                      : newContent.substring(this.content.length)
+                  const deltaDecision = resolveQwenContentDelta({
+                    previousContent: this.content,
+                    nextContent: newContent,
+                    toolCallingPlan: this.toolCallingPlan,
+                    toolStreamParser: this.toolStreamParser,
+                  })
+                  if (deltaDecision.shouldEmit) {
+                    const chunk = deltaDecision.chunk
                     this.content = newContent
                     console.log('[Qwen] Writing chunk, length:', chunk.length)
 
                     // Process tool call interception
                     const baseChunk = createBaseChunk(this.responseId || this.sessionId, this.model, this.created)
-                    if (shouldReplayBufferedSnapshot && this.toolCallingPlan) {
+                    if (deltaDecision.resetParser && this.toolCallingPlan) {
                       this.toolStreamParser = new ToolStreamParser(this.toolCallingPlan)
                     }
                     const outputChunks = this.toolStreamParser?.push(chunk, baseChunk, !this.sentRole) ?? [{
@@ -1255,6 +1259,58 @@ export class QwenStreamHandler {
   getSessionId(): string {
     return this.sessionId
   }
+}
+
+function resolveQwenContentDelta(input: {
+  previousContent: string
+  nextContent: string
+  toolCallingPlan?: ToolCallingPlan
+  toolStreamParser?: ToolStreamParser
+}): QwenContentDeltaDecision {
+  const { previousContent, nextContent, toolCallingPlan, toolStreamParser } = input
+  if (nextContent === previousContent) {
+    return { shouldEmit: false, chunk: '', resetParser: false }
+  }
+
+  if (nextContent.startsWith(previousContent)) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent.slice(previousContent.length),
+      resetParser: false,
+    }
+  }
+
+  const isManagedToolRewrite = Boolean(
+    toolCallingPlan
+    && toolStreamParser
+    && (
+      toolStreamParser.isBuffering()
+      || containsManagedToolMarker(previousContent)
+      || containsManagedToolMarker(nextContent)
+    ),
+  )
+
+  if (isManagedToolRewrite) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent,
+      resetParser: true,
+    }
+  }
+
+  if (nextContent.length > previousContent.length) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent.substring(previousContent.length),
+      resetParser: false,
+    }
+  }
+
+  return { shouldEmit: false, chunk: '', resetParser: false }
+}
+
+function containsManagedToolMarker(value: string): boolean {
+  return value.includes('<|CHAT2API|') || value.includes('<tool_calls>')
 }
 
 export const qwenAdapter = {

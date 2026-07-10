@@ -165,6 +165,9 @@ function parseBlocks(content: string, options: ParseBlockOptions): void {
   let blockMatch: RegExpExecArray | null
 
   while ((blockMatch = options.blockPattern.exec(content)) !== null) {
+    if (!isProtocolBoundary(content, blockMatch.index)) {
+      continue
+    }
     options.rawMatches.push(blockMatch[0])
     let invokeMatch: RegExpExecArray | null
 
@@ -203,6 +206,11 @@ function parseBlocks(content: string, options: ParseBlockOptions): void {
       )
     }
   }
+}
+
+function isProtocolBoundary(content: string, index: number): boolean {
+  if (index <= 0) return true
+  return /\s/.test(content[index - 1] ?? '')
 }
 
 function safeParseObject(value: string): Record<string, unknown> {

@@ -15,6 +15,8 @@ The target state is that Chat2API can preserve tool definitions, parse managed p
 - Later turns lose tool definitions.
 - MCP tools fail or disappear after a tool result.
 - Models choose wrong parameter names or produce malformed arguments that are passed through.
+- OpenCode real probe can load the `agent-capability-probe` skill, then emit plain text claiming only `open_url` is available instead of calling `read` and `bash`.
+- Enabling context management can drop prompt-injected tool definitions even when summary/compact is not enabled.
 
 ## Scope
 
@@ -24,6 +26,8 @@ Primary files:
 - `src/main/proxy/toolCalling/runtimePlan.ts`
 - `src/main/proxy/toolCalling/ToolStreamParser.ts`
 - `src/main/proxy/sessionManager.ts`
+- `src/main/proxy/services/contextManagementService.ts`
+- `src/main/proxy/contextMessageMetadata.ts`
 - `src/main/proxy/toolRuntime/data/`
 - `src/main/proxy/toolRuntime/runner/`
 - `src/main/proxy/adapters/qwen.ts`
@@ -56,6 +60,30 @@ Session Store -> Message History Extraction -> Request Tools -> Safe Empty
 - Invalid tool output must be blocked, not repaired into fake confidence.
 
 ## Writing Sequence
+
+### Step 0: Protect Tool Definition Messages During Context Management
+
+Before changing parser or prompt logic, verify context management is not deleting the tool contract.
+
+Risk:
+
+- Sliding window and token-limit strategies can remove early non-system messages.
+- Some tool definitions are prompt-injected into user-shaped or provider-formatted messages, not only `role: "system"` messages.
+- `preserveToolExchangePairs` protects assistant `tool_calls` and matching tool results, but does not by itself protect original tool definition/catalog messages.
+
+Required behavior:
+
+- Messages containing managed tool prompt signatures must be protected like system messages.
+- MCP-style tool definition blocks such as `<tools><tool>...</tool></tools>` must be protected.
+- Tool result messages and assistant tool-call messages should remain governed by pair preservation, not misclassified as tool definitions.
+- If protected tool-definition messages alone exceed token limits, emit diagnostics and prefer failing/degrading explicitly over silently removing the contract.
+
+Tests to add or keep:
+
+- Sliding window keeps prompt-injected tool definitions in user/system messages.
+- Token limit keeps prompt-injected tool definitions.
+- Summary fallback keeps prompt-injected tool definitions.
+- Tool exchange pair preservation still restores assistant/tool result pairs without duplicating tool definition messages.
 
 ### Step 1: Freeze The Catalog Rules
 
@@ -173,6 +201,68 @@ Provider-risk probes:
 - Bad parameters are rejected before tool calls are emitted.
 - Valid tool calls produce OpenAI-compatible stream and non-stream outputs.
 - OpenCode probe proves skill use, multiple non-skill tools, and a post-result tool call.
+
+## Acceptance Run: 2026-07-10
+
+Focused deterministic gate passed:
+
+```powershell
+node --test tests/tool-calling/output-inspection.test.ts tests/tool-calling/tool-stream-parser.test.ts tests/tool-calling/catalog-fallback.test.ts tests/tool-calling/tool-catalog.test.ts tests/tool-calling/tool-engine.test.ts tests/tool-runtime/data/*.test.ts
+```
+
+Result:
+
+- 107 tests passed.
+- Session catalog fallback tests passed.
+- Same-session subset request reuses the full session catalog instead of shrinking tool availability.
+- ToolCallingEngine keeps the full catalog when a later request sends only a subset of tools.
+- Required parameter and object/array schema validation tests passed.
+- Stream parser still suppresses malformed and post-tool-call residue.
+
+Provider/runtime gate passed:
+
+```powershell
+node --test tests/tool-runtime/integration/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Result:
+
+- 51 tests passed.
+- Context management preserved assistant `tool_calls` and `tool_call_id` metadata.
+- GLM, Qwen, and Qwen AI managed XML provider routing tests passed.
+- Qwen stream rewrite recovery and empty-output safety tests passed.
+
+Full deterministic gate passed:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Result:
+
+- 207 tests passed.
+
+Real OpenCode probes passed:
+
+```powershell
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "qwen/Qwen3.7-Max"
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "deepseek/deepseek-v4-pro"
+```
+
+Result:
+
+- All three probes returned `CAPABILITY_PROBE_PASS`.
+- `result.json` exactly matched deterministic expected values.
+- Event streams included the real `agent-capability-probe` skill invocation.
+- Event streams included at least two non-skill tool calls.
+- Event streams proved multi-turn tool use with a non-skill tool call after a tool result.
+- Final assistant text included `CAPABILITY_PROBE_DONE`.
+
+P1 status:
+
+- Accepted for the verified GLM, Qwen, and DeepSeek paths.
+- The earlier real-probe failure where the model claimed only `open_url` was available is no longer reproduced.
 
 ## Stop Conditions
 

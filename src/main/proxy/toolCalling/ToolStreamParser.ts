@@ -1,4 +1,5 @@
 import type { ToolCallingPlan, ToolParseResult } from './types.ts'
+import { detectAvailabilityDrift } from './availabilityDrift.ts'
 import { getToolProtocol } from './protocols/index.ts'
 import {
   assembleOpenAIToolCalls,
@@ -12,6 +13,9 @@ export interface ToolStreamObservation {
   emittedContentLength: number
   emittedVisibleContentLength: number
   emittedToolCallCount: number
+  availabilityDriftDetected: boolean
+  deniedToolNames: string[]
+  mentionedUnavailableOnlyTools: string[]
   suppressedMalformedToolOutput: boolean
   suppressedReason?: 'invalid_tool_name' | 'malformed_tool_output'
 }
@@ -22,11 +26,15 @@ export class ToolStreamParser {
   private isBufferingToolCall = false
   private emittedToolCall = false
   private nextToolCallIndex = 0
+  private observedAssistantText = ''
   private observation: ToolStreamObservation = {
     rawContentLength: 0,
     emittedContentLength: 0,
     emittedVisibleContentLength: 0,
     emittedToolCallCount: 0,
+    availabilityDriftDetected: false,
+    deniedToolNames: [],
+    mentionedUnavailableOnlyTools: [],
     suppressedMalformedToolOutput: false,
   }
 
@@ -38,7 +46,9 @@ export class ToolStreamParser {
     if (!content || !this.plan.shouldParseResponse) return []
 
     this.observation.rawContentLength += content.length
+    this.observedAssistantText += content
     this.buffer += content
+    this.observeAvailabilityDrift()
     const chunks: any[] = []
     const suppressPlainText = this.emittedToolCall
 
@@ -86,6 +96,9 @@ export class ToolStreamParser {
         chunks.push(createToolCallChunk(baseChunk, indexedToolCall, includeRole && !this.emittedToolCall))
       }
       this.emittedToolCall = true
+      this.observation.availabilityDriftDetected = false
+      this.observation.deniedToolNames = []
+      this.observation.mentionedUnavailableOnlyTools = []
       this.isBufferingToolCall = false
       this.buffer = ''
       return chunks
@@ -111,6 +124,7 @@ export class ToolStreamParser {
   flush(baseChunk: any): any[] {
     if (!this.buffer) return []
 
+    this.observeAvailabilityDrift()
     const parsed = parseBufferedToolCall(this.buffer, this.plan)
     if (parsed.toolCalls.length > 0) {
       const chunks = parsed.toolCalls.map((toolCall) => {
@@ -122,6 +136,9 @@ export class ToolStreamParser {
         this.nextToolCallIndex += 1
         this.emittedToolCall = true
         this.observation.emittedToolCallCount += 1
+        this.observation.availabilityDriftDetected = false
+        this.observation.deniedToolNames = []
+        this.observation.mentionedUnavailableOnlyTools = []
         return createToolCallChunk(baseChunk, indexedToolCall, false)
       })
       this.buffer = ''
@@ -158,7 +175,25 @@ export class ToolStreamParser {
   getObservation(): ToolStreamObservation {
     return {
       ...this.observation,
+      deniedToolNames: [...this.observation.deniedToolNames],
+      mentionedUnavailableOnlyTools: [...this.observation.mentionedUnavailableOnlyTools],
     }
+  }
+
+  private observeAvailabilityDrift(): void {
+    if (this.emittedToolCall || this.observedAssistantText.trim().length === 0) {
+      return
+    }
+
+    const detection = detectAvailabilityDrift(this.plan, this.observedAssistantText)
+    if (!detection.detected) return
+
+    this.observation.availabilityDriftDetected = true
+    this.observation.deniedToolNames = [...detection.deniedToolNames]
+    this.observation.mentionedUnavailableOnlyTools = [...detection.mentionedUnavailableOnlyTools]
+    this.plan.diagnostics.availabilityDriftDetected = true
+    this.plan.diagnostics.deniedToolNames = [...detection.deniedToolNames]
+    this.plan.diagnostics.mentionedUnavailableOnlyTools = [...detection.mentionedUnavailableOnlyTools]
   }
 }
 
@@ -281,6 +316,7 @@ function findMarkerStart(buffer: string, plan: ToolCallingPlan): { matched: bool
 
   for (let index = 0; index < buffer.length; index += 1) {
     if (isInsideRange(index, ranges)) continue
+    if (!isProtocolBoundary(buffer, index)) continue
 
     const suffix = buffer.slice(index)
     const detection = protocol.detectStart(suffix)
@@ -295,6 +331,11 @@ function findMarkerStart(buffer: string, plan: ToolCallingPlan): { matched: bool
   return partialIndex === -1
     ? { matched: false, partial: false, index: -1 }
     : { matched: false, partial: true, index: partialIndex }
+}
+
+function isProtocolBoundary(content: string, index: number): boolean {
+  if (index <= 0) return true
+  return /\s/.test(content[index - 1] ?? '')
 }
 
 function fencedRanges(content: string): Array<{ start: number; end: number }> {

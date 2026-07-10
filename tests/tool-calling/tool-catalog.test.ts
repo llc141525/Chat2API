@@ -128,6 +128,29 @@ test('removed historical tools block instead of silently shrinking availability'
   assert.equal(result.diagnostics.reason, 'historical_tool_removed')
 })
 
+test('same-session subset request reuses the full session catalog instead of shrinking it', () => {
+  const store = createToolCatalogStore()
+  const first = store.resolveSnapshot({
+    sessionId: 'subset-session',
+    requestTools: [bashTool, writeTool],
+    hasManagedToolHistory: false,
+    historyToolNames: [],
+  })
+
+  const second = store.resolveSnapshot({
+    sessionId: 'subset-session',
+    requestTools: [bashTool],
+    hasManagedToolHistory: true,
+    historyToolNames: [],
+  })
+
+  assert.equal(second.blocked, false)
+  assert.equal(second.diagnostics.source, 'session_catalog')
+  assert.deepEqual(second.diagnostics.driftKinds, ['current_request_subset_of_session_catalog'])
+  assert.equal(second.snapshot?.fingerprint, first.snapshot?.fingerprint)
+  assert.deepEqual(second.snapshot?.allowedToolNames, ['bash', 'write'])
+})
+
 test('schema changes for historical tools block', () => {
   const store = createToolCatalogStore()
   store.resolveSnapshot({

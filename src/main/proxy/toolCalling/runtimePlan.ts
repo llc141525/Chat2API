@@ -25,9 +25,11 @@ export function buildToolCallingRuntimePlan(input: {
   const requestTools = input.clientRequest.tools
   const forcedName = input.clientRequest.toolChoice.forcedName
 
+  const isPromptEmbedded = input.clientRequest.toolSource === 'prompt_embedded'
   const catalogResolution = resolveToolCatalog({
     sessionId: input.toolSessionKey ?? null,
-    requestTools,
+    requestTools: isPromptEmbedded ? [] : requestTools,
+    promptEmbeddedTools: isPromptEmbedded ? requestTools : undefined,
     hasManagedToolHistory: hasExistingManagedXmlContext(input.messages),
     historyToolNames: extractManagedHistoryToolNames(input.messages),
   })
@@ -183,6 +185,7 @@ function extractManagedHistoryToolNames(messages?: ChatMessage[]): string[] {
 function buildToolSourceChain(source: ToolCatalogSource): ToolContractSourceStep[] {
   if (source === 'current_request') return ['current_request']
   if (source === 'session_catalog') return ['current_request', 'session_catalog']
+  if (source === 'prompt_embedded') return ['current_request', 'prompt_embedded']
   if (source === 'restored_from_history') return ['current_request', 'session_catalog', 'message_history']
   return ['current_request', 'session_catalog', 'message_history', 'safe_empty']
 }

@@ -1,6 +1,7 @@
 import type { ChatCompletionRequest, ChatCompletionTool } from '../../types.ts'
 import type { NormalizedToolDefinition } from '../types.ts'
 import type { NormalizedClientToolRequest, NormalizedToolChoice, ToolClientAdapter } from './types.ts'
+import { extractPromptEmbeddedTools } from './promptEmbeddedToolExtractor.ts'
 
 export function normalizeOpenAiTools(
   tools: ChatCompletionTool[] | undefined,
@@ -34,17 +35,49 @@ export const standardOpenAiToolsAdapter: ToolClientAdapter = {
   id: 'standard-openai-tools',
   displayName: 'Standard OpenAI Tools',
   normalizeRequest(request): NormalizedClientToolRequest {
-    const tools = normalizeOpenAiTools(request.tools, 'openai')
-    const toolChoice = normalizeToolChoice(request, new Set(tools.map((tool) => tool.name)))
+    const openAiTools = normalizeOpenAiTools(request.tools, 'openai')
 
+    if (openAiTools.length > 0) {
+      const toolChoice = normalizeToolChoice(request, new Set(openAiTools.map((tool) => tool.name)))
+      return {
+        clientAdapterId: 'standard-openai-tools',
+        toolSource: 'openai',
+        tools: openAiTools,
+        toolChoice,
+        diagnostics: {
+          rawToolCount: request.tools?.length ?? 0,
+          normalizedToolNames: openAiTools.map((tool) => tool.name),
+        },
+      }
+    }
+
+    // No OpenAI tools — check if the client embedded its catalog in system prompt text
+    const embedded = extractPromptEmbeddedTools(request.messages ?? [])
+    if (embedded.tools.length > 0) {
+      const toolChoice = normalizeToolChoice(request, new Set(embedded.tools.map((tool) => tool.name)))
+      return {
+        clientAdapterId: 'standard-openai-tools',
+        toolSource: 'prompt_embedded',
+        tools: embedded.tools,
+        toolChoice,
+        diagnostics: {
+          rawToolCount: 0,
+          normalizedToolNames: embedded.tools.map((tool) => tool.name),
+          promptEmbeddedMarkers: embedded.markers,
+          promptEmbeddedRawFingerprint: embedded.rawFingerprint,
+        },
+      }
+    }
+
+    const toolChoice = normalizeToolChoice(request, new Set<string>())
     return {
       clientAdapterId: 'standard-openai-tools',
-      toolSource: tools.length > 0 ? 'openai' : 'none',
-      tools,
+      toolSource: 'none',
+      tools: [],
       toolChoice,
       diagnostics: {
-        rawToolCount: request.tools?.length ?? 0,
-        normalizedToolNames: tools.map((tool) => tool.name),
+        rawToolCount: 0,
+        normalizedToolNames: [],
       },
     }
   },

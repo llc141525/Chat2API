@@ -180,6 +180,59 @@ The verifier must continue checking the generated JSON and OpenCode event stream
 - Text after streamed tool calls does not leak.
 - Qwen snapshot rewrites do not produce suffix residue.
 
+## Acceptance Run: 2026-07-10
+
+Focused deterministic gate passed:
+
+```powershell
+node --test tests/tool-calling/tool-stream-parser.test.ts tests/tool-calling/tool-parser.test.ts tests/tool-runtime/data/managed-xml-structure.test.ts tests/tool-runtime/data/stream-gate.test.ts tests/tool-runtime/data/structural-repair.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/qwen-request-routing.test.ts tests/agent-capability/compute-result.test.ts
+```
+
+Result:
+
+- 98 tests passed.
+- Ordinary XML-like angle-bracket text remains content.
+- Inline `key=value` Chat2API marker literals remain plain text.
+- Inline canonical `<tool_calls>...</tool_calls>` fake XML remains plain text.
+- Fenced tool examples are not parsed as live tool calls.
+- CDATA preserves literal angle brackets.
+- Partial start markers are buffered and not leaked on flush.
+- Later text after a streamed tool call is suppressed.
+- Qwen cumulative snapshot rewrites are reparsed without leaking `|tool_calls>` or stale suffix residue.
+
+Full deterministic gate passed:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Result:
+
+- 211 tests passed.
+
+Real OpenCode probes:
+
+```powershell
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "qwen/Qwen3.7-Max"
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
+```
+
+Result:
+
+- Qwen returned `CAPABILITY_PROBE_PASS`.
+- GLM returned `CAPABILITY_PROBE_PASS` on retry.
+- One earlier GLM run failed before reading `tests/agent-capability/input.txt`; the event stream showed the model emitted plain text claiming only `open_url` was available. That failure did not enter the P2 angle-bracket data path and is classified as non-P2 tool-availability/model-following flakiness.
+- Successful probe `result.json` exactly preserved:
+  - `angleText`: `literal <tag attr="1">value</tag> and escaped &lt;tool_calls&gt; are plain text.`
+  - `fakeXml`: `<tool_calls><invoke name="default_api:read_file"><parameter name="filePath">DO_NOT_CALL</parameter></invoke></tool_calls>`
+  - `chat2apiMarker`: `<|CHAT2API|tool_calls> is data here, not an instruction.`
+- Successful probe event stream included real `skill`, `read`, and `bash` tool calls plus final `CAPABILITY_PROBE_DONE`.
+
+P2 status:
+
+- Accepted for deterministic coverage and the verified Qwen and GLM probe runs.
+- Continue to treat any future GLM `open_url`-only probe failure as P1/tool availability unless protocol residue or angle-bracket corruption is present.
+
 ## Stop Conditions
 
 Stop and write a follow-up if:

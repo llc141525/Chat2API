@@ -23,6 +23,7 @@ export function inspectNonStreamAssistantOutput(input: {
     toolCalls,
     finishReason,
     validationFailureKind: input.plan.diagnostics.validationFailureKind,
+    availabilityRetryResult: input.plan.diagnostics.availabilityRetryResult,
   })
   input.plan.diagnostics.terminalOutcome = outcome
   if (outcome === 'malformed_tool_output') {
@@ -50,11 +51,15 @@ export function inspectNonStreamAssistantOutput(input: {
     catalogFingerprint: input.plan.catalogSnapshot?.fingerprint,
     responseMode: 'non_streaming',
     contentLength: content.length,
-    terminalOutcome: outcome,
-    emptyOutputPolicy: input.plan.contract.emptyOutputPolicy,
-    validationFailureKind: input.plan.diagnostics.validationFailureKind,
-    suppressedReason: outcome === 'malformed_tool_output' ? 'malformed_tool_output' : undefined,
-  })
+      terminalOutcome: outcome,
+      emptyOutputPolicy: input.plan.contract.emptyOutputPolicy,
+      validationFailureKind: input.plan.diagnostics.validationFailureKind,
+      suppressedReason: outcome === 'malformed_tool_output' ? 'malformed_tool_output' : undefined,
+      availabilityDriftDetected: input.plan.diagnostics.availabilityDriftDetected,
+      allowedToolNames: [...input.plan.allowedToolNames],
+      deniedToolNames: input.plan.diagnostics.deniedToolNames,
+      mentionedUnavailableOnlyTools: input.plan.diagnostics.mentionedUnavailableOnlyTools,
+    })
 
   if (input.plan.contract.emptyOutputPolicy === 'pass_through_without_tool_semantics') {
     return { ok: true, outcome }
@@ -91,6 +96,11 @@ export function inspectStreamAssistantOutput(input: {
       terminalOutcome: outcome,
       finishReason: input.finishReason,
       suppressedReason: observation.suppressedReason,
+      availabilityDriftDetected: observation.availabilityDriftDetected,
+      allowedToolNames: [...plan.allowedToolNames],
+      deniedToolNames: observation.deniedToolNames,
+      mentionedUnavailableOnlyTools: observation.mentionedUnavailableOnlyTools,
+      contentSentToClient: observation.emittedContentLength > 0,
     })
     return { ok: true, outcome }
   }
@@ -107,6 +117,11 @@ export function inspectStreamAssistantOutput(input: {
     emptyOutputPolicy: plan.contract.emptyOutputPolicy,
     finishReason: input.finishReason,
     suppressedReason: observation.suppressedReason,
+    availabilityDriftDetected: observation.availabilityDriftDetected,
+    allowedToolNames: [...plan.allowedToolNames],
+    deniedToolNames: observation.deniedToolNames,
+    mentionedUnavailableOnlyTools: observation.mentionedUnavailableOnlyTools,
+    contentSentToClient: observation.emittedContentLength > 0,
   })
 
   if (plan.contract.emptyOutputPolicy === 'pass_through_without_tool_semantics') {
@@ -125,9 +140,11 @@ function classifyNonStreamOutput(input: {
   toolCalls: any[]
   finishReason?: string
   validationFailureKind?: ToolCallingPlan['diagnostics']['validationFailureKind']
+  availabilityRetryResult?: ToolCallingPlan['diagnostics']['availabilityRetryResult']
 }): ProviderTurnOutcome {
-  const { content, toolCalls, validationFailureKind } = input
+  const { content, toolCalls, validationFailureKind, availabilityRetryResult } = input
   if (toolCalls.length > 0) return 'tool_calls'
+  if (availabilityRetryResult === 'failed') return 'tool_availability_drift'
   if (content.trim().length > 0) return 'content'
   if (validationFailureKind === 'malformed_tool_output' || validationFailureKind === 'malformed_container') {
     return 'malformed_tool_output'
@@ -137,6 +154,7 @@ function classifyNonStreamOutput(input: {
 
 function classifyStreamOutput(observation: ToolStreamObservation): ProviderTurnOutcome {
   if (observation.emittedToolCallCount > 0) return 'tool_calls'
+  if (observation.availabilityDriftDetected) return 'tool_availability_drift'
   if (observation.emittedVisibleContentLength > 0) return 'content'
   if (observation.suppressedMalformedToolOutput) return 'malformed_tool_output'
   return 'provider_empty'
@@ -147,6 +165,9 @@ function isSuccessfulOutcome(outcome: ProviderTurnOutcome): boolean {
 }
 
 function buildInspectionError(outcome: ProviderTurnOutcome, turnId: string): string {
+  if (outcome === 'tool_availability_drift') {
+    return `Provider refused the authoritative tool catalog for managed tool turn ${turnId}`
+  }
   if (outcome === 'malformed_tool_output') {
     return `Provider returned malformed tool output without usable assistant content for managed tool turn ${turnId}`
   }

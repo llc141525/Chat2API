@@ -169,7 +169,7 @@ export class ToolCallingEngine {
       ? validateRepaired(adapter, firstValidation.malformedIntent, plan)
       : firstValidation
 
-    if (validation.status === 'plain_text') {
+  if (validation.status === 'plain_text') {
       plan.diagnostics.parserFormat = 'unknown'
       plan.diagnostics.parsedToolCallCount = 0
       return maybeBuildAvailabilityRetry(message.content, plan)
@@ -302,16 +302,44 @@ function maybeBuildAvailabilityRetry(
     return undefined
   }
 
-  if (plan.availabilityRetryAttempted) {
-    plan.diagnostics.availabilityRetryResult = 'skipped'
-    return undefined
-  }
-
   const detection = detectAvailabilityDrift(plan, content)
   if (!detection.detected) return undefined
 
-  plan.availabilityRetryAttempted = true
   plan.diagnostics.availabilityDriftDetected = true
+  plan.diagnostics.deniedToolNames = [...detection.deniedToolNames]
+  plan.diagnostics.mentionedUnavailableOnlyTools = [...detection.mentionedUnavailableOnlyTools]
+
+  if (plan.availabilityRetryAttempted) {
+    plan.diagnostics.availabilityRetryResult = 'failed'
+    recordToolDiagnosticEvent({
+      type: 'tool_availability_drift_detected',
+      requestId: plan.diagnostics.requestId,
+      providerId: plan.providerId,
+      model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
+      catalogFingerprint: plan.catalogSnapshot.fingerprint,
+      toolNames: [...plan.catalogSnapshot.allowedToolNames],
+      allowedToolNames: [...plan.allowedToolNames],
+      deniedToolNames: [...detection.deniedToolNames],
+      mentionedUnavailableOnlyTools: [...detection.mentionedUnavailableOnlyTools],
+      availabilityDriftDetected: true,
+      responseMode: 'non_streaming',
+    })
+    recordToolDiagnosticEvent({
+      type: 'tool_availability_retry_result',
+      requestId: plan.diagnostics.requestId,
+      providerId: plan.providerId,
+      model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
+      catalogFingerprint: plan.catalogSnapshot.fingerprint,
+      retryResult: 'failed',
+      deniedToolNames: [...detection.deniedToolNames],
+      mentionedUnavailableOnlyTools: [...detection.mentionedUnavailableOnlyTools],
+      availabilityDriftDetected: true,
+      responseMode: 'non_streaming',
+    })
+    return undefined
+  }
+
+  plan.availabilityRetryAttempted = true
   plan.diagnostics.availabilityRetryResult = 'attempted'
 
   recordToolDiagnosticEvent({
@@ -321,6 +349,10 @@ function maybeBuildAvailabilityRetry(
     model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
     catalogFingerprint: plan.catalogSnapshot.fingerprint,
     toolNames: [...plan.catalogSnapshot.allowedToolNames],
+    allowedToolNames: [...plan.allowedToolNames],
+    deniedToolNames: [...detection.deniedToolNames],
+    mentionedUnavailableOnlyTools: [...detection.mentionedUnavailableOnlyTools],
+    availabilityDriftDetected: true,
     responseMode: 'non_streaming',
   })
   recordToolDiagnosticEvent({
@@ -330,6 +362,9 @@ function maybeBuildAvailabilityRetry(
     model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
     catalogFingerprint: plan.catalogSnapshot.fingerprint,
     retryResult: 'attempted',
+    deniedToolNames: [...detection.deniedToolNames],
+    mentionedUnavailableOnlyTools: [...detection.mentionedUnavailableOnlyTools],
+    availabilityDriftDetected: true,
     responseMode: 'non_streaming',
   })
 

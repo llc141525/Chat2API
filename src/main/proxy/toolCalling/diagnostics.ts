@@ -74,9 +74,13 @@ export interface ToolDiagnosticEvent {
   requestId?: string
   providerId?: string
   model?: string
+  availabilityDriftDetected?: boolean
   catalogSource?: string
   catalogFingerprint?: string
   toolNames?: string[]
+  allowedToolNames?: string[]
+  deniedToolNames?: string[]
+  mentionedUnavailableOnlyTools?: string[]
   schemaHashes?: Record<string, string>
   driftKinds?: string[]
   protocol?: string
@@ -93,6 +97,7 @@ export interface ToolDiagnosticEvent {
   fragmentTypes?: string[]
   upstreamDoneSeen?: boolean
   finishReason?: string
+  contentSentToClient?: boolean
   timestamp: number
 }
 
@@ -105,9 +110,15 @@ export function recordToolDiagnosticEvent(event: Omit<ToolDiagnosticEvent, 'time
     requestId: event.requestId,
     providerId: event.providerId,
     model: event.model,
+    availabilityDriftDetected: event.availabilityDriftDetected,
     catalogSource: event.catalogSource,
     catalogFingerprint: event.catalogFingerprint,
     toolNames: event.toolNames ? [...event.toolNames] : undefined,
+    allowedToolNames: event.allowedToolNames ? [...event.allowedToolNames] : undefined,
+    deniedToolNames: event.deniedToolNames ? [...event.deniedToolNames] : undefined,
+    mentionedUnavailableOnlyTools: event.mentionedUnavailableOnlyTools
+      ? [...event.mentionedUnavailableOnlyTools]
+      : undefined,
     schemaHashes: event.schemaHashes ? { ...event.schemaHashes } : undefined,
     driftKinds: event.driftKinds ? [...event.driftKinds] : undefined,
     protocol: event.protocol,
@@ -124,6 +135,7 @@ export function recordToolDiagnosticEvent(event: Omit<ToolDiagnosticEvent, 'time
     fragmentTypes: event.fragmentTypes ? [...event.fragmentTypes] : undefined,
     upstreamDoneSeen: event.upstreamDoneSeen,
     finishReason: event.finishReason,
+    contentSentToClient: event.contentSentToClient,
     timestamp: Date.now(),
   }
 
@@ -135,6 +147,11 @@ export function getToolDiagnosticEvents(): ToolDiagnosticEvent[] {
   return toolDiagnosticEvents.map((event) => ({
     ...event,
     toolNames: event.toolNames ? [...event.toolNames] : undefined,
+    allowedToolNames: event.allowedToolNames ? [...event.allowedToolNames] : undefined,
+    deniedToolNames: event.deniedToolNames ? [...event.deniedToolNames] : undefined,
+    mentionedUnavailableOnlyTools: event.mentionedUnavailableOnlyTools
+      ? [...event.mentionedUnavailableOnlyTools]
+      : undefined,
     schemaHashes: event.schemaHashes ? { ...event.schemaHashes } : undefined,
     driftKinds: event.driftKinds ? [...event.driftKinds] : undefined,
     toolSourceChain: event.toolSourceChain ? [...event.toolSourceChain] : undefined,

@@ -15,7 +15,7 @@ export type ToolProtocolId =
   | 'anthropic_tool_use'
   | 'codex_responses'
 
-export type ToolSource = 'openai' | 'mcp'
+export type ToolSource = 'openai' | 'mcp' | 'prompt_embedded'
 
 export interface NormalizedToolDefinition {
   name: string
@@ -39,11 +39,12 @@ export interface NormalizedToolResult {
   content: string
 }
 
-export type ToolCatalogSource = 'current_request' | 'session_catalog' | 'restored_from_history' | 'none'
+export type ToolCatalogSource = 'current_request' | 'session_catalog' | 'prompt_embedded' | 'restored_from_history' | 'none'
 
 export type ToolContractSourceStep =
   | 'current_request'
   | 'session_catalog'
+  | 'prompt_embedded'
   | 'message_history'
   | 'safe_empty'
 
@@ -54,6 +55,7 @@ export type EmptyOutputPolicy = 'diagnose_and_fail' | 'pass_through_without_tool
 export type ProviderTurnOutcome =
   | 'content'
   | 'tool_calls'
+  | 'tool_availability_drift'
   | 'provider_empty'
   | 'malformed_tool_output'
   | 'runtime_suppressed_malformed_tool_output'
@@ -75,11 +77,14 @@ export type ToolSuppressedReason = 'invalid_tool_name' | 'malformed_tool_output'
 export type ToolCatalogDriftKind =
   | 'added_tool'
   | 'removed_tool'
+  | 'current_request_subset_of_session_catalog'
   | 'schema_changed'
   | 'missing_current_tools_with_session_catalog'
   | 'missing_current_tools_without_catalog'
   | 'history_references_unknown_tool'
   | 'restored_from_history'
+  | 'prompt_embedded_only_catalog'
+  | 'schema_degraded_from_prompt'
 
 export interface ToolCatalogSnapshot {
   sessionId: string | null
@@ -87,7 +92,7 @@ export interface ToolCatalogSnapshot {
   tools: ReadonlyArray<NormalizedToolDefinition>
   allowedToolNames: ReadonlyArray<string>
   schemaHashes: Readonly<Record<string, string>>
-  source: 'current_request' | 'session_catalog' | 'restored_from_history'
+  source: 'current_request' | 'session_catalog' | 'prompt_embedded' | 'restored_from_history'
   createdTurnIndex: number
   updatedTurnIndex: number
 }
@@ -151,6 +156,8 @@ export interface ToolCallDiagnostics {
   suppressedReason?: ToolSuppressedReason
   availabilityDriftDetected?: boolean
   availabilityRetryResult?: 'skipped' | 'attempted' | 'succeeded' | 'failed'
+  deniedToolNames?: string[]
+  mentionedUnavailableOnlyTools?: string[]
 }
 
 export interface AvailabilityRetryRequest {
