@@ -1,22 +1,4 @@
-/**
- * ADR-001: ToolCallingEngine is the SINGLE OWNER of tool prompt injection.
- *
- * Ownership means:
- * - Only ToolCallingEngine.transformRequest() decides whether to inject a
- *   managed tool prompt into the outgoing messages.
- * - Provider Adapters MUST NOT import hasToolPromptInjected, toolsToSystemPrompt,
- *   TOOL_WRAP_HINT, or shouldInjectToolPrompt.
- * - PromptAdapters (src/main/proxy/adapters/prompt/) may use hasToolPromptInjected
- *   ONLY for formatting decisions (checking whether a prompt already exists).
- *   They must never re-inject or modify the tool prompt content.
- *
- * If you need to change how/when tool prompts are injected, change it here —
- * never in an adapter.
- *
- * See AGENTS.md → Tool Injection Rules for full invariant definitions.
- */
-
-import type { ChatCompletionRequest, ChatMessage } from '../types.ts'
+import type { ChatCompletionRequest } from '../types.ts'
 import type { Provider } from '../../store/types.ts'
 import {
   DEFAULT_TOOL_CALLING_CONFIG,
@@ -33,11 +15,9 @@ import {
 import { getToolProtocol } from './protocols/index.ts'
 import { getToolClientAdapter } from './clientAdapters/index.ts'
 import { buildToolCallingRuntimePlan } from './runtimePlan.ts'
-import { getProviderToolProfile } from './providerProfiles.ts'
-import { renderManagedXmlContractHeader } from './protocols/managedXml.ts'
-import { buildAvailabilityRetryClarification, detectAvailabilityDrift } from './availabilityDrift.ts'
-import { recordToolDiagnosticEvent } from './diagnostics.ts'
-import type { AvailabilityRetryRequest, ToolCallingPlan, ToolCallingTransformResult } from './types.ts'
+import type { NormalizedToolDefinition, ToolCallingPlan, ToolCallingTransformResult, ToolProtocolId } from './types.ts'
+import type { ToolManifest } from './ToolManifest.ts'
+import { createToolManifest } from './ToolManifest.ts'
 
 export class ToolCallingEngine {
   private readonly config: ToolCallingConfig
@@ -165,30 +145,28 @@ export class ToolCallingEngine {
       }
     }
 
-    recordToolDiagnosticEvent({
-      type: 'tool_contract_injected',
-      requestId,
-      providerId: provider.id,
-      model: actualModel,
-      catalogFingerprint: plan.catalogSnapshot?.fingerprint,
-      toolNames: plan.catalogSnapshot ? [...plan.catalogSnapshot.allowedToolNames] : undefined,
-      protocol: plan.protocol,
-      headerVersion: profile.contractHeaderVersion,
-      responseMode: request.stream ? 'streaming' : 'non_streaming',
-    })
+    const toolManifest = this.createToolManifest(plan)
     return {
-      messages: injectPrompt(request.messages, renderPrompt(plan, this.config, profile.contractHeaderVersion)),
+      messages: request.messages,
       tools: undefined,
       plan,
+      toolManifest,
     }
   }
 
-  applyNonStreamResponse(
-    result: any,
-    plan: ToolCallingPlan,
-    opts?: { summaryContaminated?: boolean }
-  ): AvailabilityRetryRequest | undefined {
-    if (!plan.shouldParseResponse) return undefined
+  createToolManifest(plan: ToolCallingPlan): ToolManifest {
+    return createToolManifest({
+      protocol: plan.protocol,
+      catalogFingerprint: plan.catalogSnapshot?.fingerprint ?? '',
+      allowedToolNames: [...plan.allowedToolNames],
+      tools: plan.tools.map(t => ({ ...t })),
+      renderedPrompt: renderPrompt(plan.protocol, plan.tools, this.config),
+      contractHeaderVersion: 1,
+    })
+  }
+
+  applyNonStreamResponse(result: any, plan: ToolCallingPlan): void {
+    if (!plan.shouldParseResponse) return
 
     const message = result?.choices?.[0]?.message
     if (!message || typeof message.content !== 'string') return undefined
@@ -275,154 +253,7 @@ function renderPrompt(
     .replace(/\{\{format\}\}/g, plan.protocol)
 }
 
-function injectPrompt(messages: ChatMessage[], prompt: string): ChatMessage[] {
-  const lastSystemIndex = findLastStringSystemMessageIndex(messages)
-  if (lastSystemIndex !== -1) {
-    return messages.map((message, index) => (
-      index === lastSystemIndex
-        ? { ...message, content: `${message.content}\n\n${prompt}` }
-        : message
-    ))
-  }
-
-  return [{ role: 'system', content: prompt }, ...messages]
-}
-
-function findLastStringSystemMessageIndex(messages: ChatMessage[]): number {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (message.role === 'system' && typeof message.content === 'string') {
-      return index
-    }
-  }
-  return -1
-}
-
-function runtimePlanFromCallingPlan(plan: ToolCallingPlan) {
-  return {
-    profile: 'managed_buffered_structural' as const,
-    protocol: plan.protocol,
-    allowedToolNames: [...plan.allowedToolNames],
-    forcedToolName: plan.forcedToolName,
-    diagnostics: {
-      providerId: plan.providerId,
-      model: plan.diagnostics.model,
-      actualModel: plan.diagnostics.actualModel,
-      profile: 'managed_buffered_structural' as const,
-      mode: 'managed' as const,
-      protocol: plan.protocol,
-      reason: plan.diagnostics.reason,
-      toolCount: plan.tools.length,
-      toolChoiceMode: plan.toolChoiceMode,
-      forcedToolName: plan.forcedToolName,
-      allowedToolNames: [...plan.allowedToolNames],
-    },
-  }
-}
-
-function validateRepaired(
-  adapter: ReturnType<typeof getStructureProtocolAdapter>,
-  malformedIntent: MalformedToolIntent,
-  plan: ToolCallingPlan,
-) {
-  const repaired = repairStructure(malformedIntent)
-  if (repaired.status !== 'repaired') {
-    return {
-      status: 'invalid_structure' as const,
-      failure: {
-        kind: 'malformed_container' as const,
-        selectedProtocol: plan.protocol,
-        detail: repaired.reason,
-      },
-    }
-  }
-
-  return validateToolCallStructure({
-    plan: runtimePlanFromCallingPlan(plan),
-    protocolResult: adapter.extractStructure(repaired.repairedText),
-    tools: plan.tools,
-  })
-}
-
-function maybeBuildAvailabilityRetry(
-  content: string,
-  plan: ToolCallingPlan,
-  opts?: { summaryContaminated?: boolean }
-): AvailabilityRetryRequest | undefined {
-  if (!plan.availabilityRetryAllowed || !plan.catalogSnapshot) {
-    return undefined
-  }
-
-  const detection = detectAvailabilityDrift(plan, content, opts)
-  if (!detection.detected) return undefined
-
-  plan.diagnostics.availabilityDriftDetected = true
-  plan.diagnostics.deniedToolNames = [...detection.deniedToolNames]
-  plan.diagnostics.mentionedUnavailableOnlyTools = [...detection.mentionedUnavailableOnlyTools]
-
-  if (plan.availabilityRetryAttempted) {
-    plan.diagnostics.availabilityRetryResult = 'failed'
-    recordToolDiagnosticEvent({
-      type: 'tool_availability_drift_detected',
-      requestId: plan.diagnostics.requestId,
-      providerId: plan.providerId,
-      model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
-      catalogFingerprint: plan.catalogSnapshot.fingerprint,
-      toolNames: [...plan.catalogSnapshot.allowedToolNames],
-      allowedToolNames: [...plan.allowedToolNames],
-      deniedToolNames: [...detection.deniedToolNames],
-      mentionedUnavailableOnlyTools: [...detection.mentionedUnavailableOnlyTools],
-      availabilityDriftDetected: true,
-      responseMode: 'non_streaming',
-    })
-    recordToolDiagnosticEvent({
-      type: 'tool_availability_retry_result',
-      requestId: plan.diagnostics.requestId,
-      providerId: plan.providerId,
-      model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
-      catalogFingerprint: plan.catalogSnapshot.fingerprint,
-      retryResult: 'failed',
-      deniedToolNames: [...detection.deniedToolNames],
-      mentionedUnavailableOnlyTools: [...detection.mentionedUnavailableOnlyTools],
-      availabilityDriftDetected: true,
-      responseMode: 'non_streaming',
-    })
-    return undefined
-  }
-
-  plan.availabilityRetryAttempted = true
-  plan.diagnostics.availabilityRetryResult = 'attempted'
-
-  recordToolDiagnosticEvent({
-    type: 'tool_availability_drift_detected',
-    requestId: plan.diagnostics.requestId,
-    providerId: plan.providerId,
-    model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
-    catalogFingerprint: plan.catalogSnapshot.fingerprint,
-    toolNames: [...plan.catalogSnapshot.allowedToolNames],
-    allowedToolNames: [...plan.allowedToolNames],
-    deniedToolNames: [...detection.deniedToolNames],
-    mentionedUnavailableOnlyTools: [...detection.mentionedUnavailableOnlyTools],
-    availabilityDriftDetected: true,
-    responseMode: 'non_streaming',
-  })
-  recordToolDiagnosticEvent({
-    type: 'tool_availability_retry_result',
-    requestId: plan.diagnostics.requestId,
-    providerId: plan.providerId,
-    model: plan.diagnostics.actualModel ?? plan.diagnostics.model,
-    catalogFingerprint: plan.catalogSnapshot.fingerprint,
-    retryResult: 'attempted',
-    deniedToolNames: [...detection.deniedToolNames],
-    mentionedUnavailableOnlyTools: [...detection.mentionedUnavailableOnlyTools],
-    availabilityDriftDetected: true,
-    responseMode: 'non_streaming',
-  })
-
-  return {
-    type: 'availability_retry',
-    catalogFingerprint: plan.catalogSnapshot.fingerprint,
-    clarification: buildAvailabilityRetryClarification(plan, detection),
-    subkind: detection.subkind,
-  }
+function parseSelectedProtocol(content: string, plan: ToolCallingPlan) {
+  const selected = getToolProtocol(plan.protocol)
+  return selected.parse(content, { tools: plan.tools, protocol: plan.protocol })
 }

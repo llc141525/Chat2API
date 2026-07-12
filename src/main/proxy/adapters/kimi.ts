@@ -270,6 +270,87 @@ export class KimiAdapter {
     return { response, conversationId: '' }
   }
 
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{ response: AxiosResponse; conversationId: string }> {
+    const { accessToken } = await this.acquireToken()
+
+    // === NEW: Build from assembly, not from embedded strings in messages ===
+    let toolsPrompt = ''
+
+    // Summary text (non-authoritative) goes before tool contract
+    if (assembly.summaryText) {
+      toolsPrompt = assembly.summaryText
+    }
+
+    // Tool contract (authoritative, injected AFTER summary to take precedence)
+    if (assembly.toolManifest) {
+      const toolContractText = assembly.toolManifest.renderedPrompt
+      toolsPrompt = toolsPrompt
+        ? `${toolsPrompt}\n\n${toolContractText}`
+        : toolContractText
+    }
+
+    const content = this.messagesPrepare([...assembly.messages] as KimiMessage[], toolsPrompt, false)
+
+    // Determine if thinking and web search should be enabled
+    // Priority: explicit parameters > model name detection
+    const modelForDetection = request.originalModel || request.model
+    const modelLower = modelForDetection.toLowerCase()
+
+    let enableThinking = request.enableThinking ?? false
+    let enableWebSearch = request.enableWebSearch ?? false
+
+    // Auto-enable based on model name (if not explicitly set)
+    if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
+      enableThinking = true
+      console.log('[Kimi] Thinking mode enabled (from model name)')
+    }
+    if (!enableWebSearch && modelLower.includes('search')) {
+      enableWebSearch = true
+      console.log('[Kimi] Web search enabled (from model name)')
+    }
+
+    const payload = createKimiChatPayload({
+      model: request.model,
+      content,
+      enableWebSearch,
+      enableThinking,
+    })
+    const frameBuffer = encodeKimiGrpcFrame(payload)
+
+    console.log('[Kimi] Request body length:', frameBuffer.length, 'JSON length:', frameBuffer.length - 5)
+
+    const response = await axios.post(
+      `${KIMI_API_BASE}/apiv2/kimi.gateway.chat.v1.ChatService/Chat`,
+      frameBuffer,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/connect+json',
+          ...FAKE_HEADERS,
+        },
+        timeout: 120000,
+        validateStatus: () => true,
+        responseType: 'stream',
+      }
+    )
+
+    console.log('[Kimi] Completion response status:', response.status)
+
+    if (response.status === 401) {
+      accessTokenMap.delete(this.token)
+      throw new Error('Token invalid or expired')
+    }
+
+    if (response.status !== 200) {
+      throw new Error(`Completion request failed: HTTP ${response.status}`)
+    }
+
+    return { response, conversationId: '' }
+  }
+
   async deleteConversation(conversationId: string): Promise<boolean> {
     try {
       const { accessToken } = await this.acquireToken()

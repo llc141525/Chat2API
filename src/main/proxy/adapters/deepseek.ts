@@ -451,6 +451,70 @@ export class DeepSeekAdapter {
     return { response, sessionId }
   }
 
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{ response: import('axios').AxiosResponse; sessionId: string }> {
+    const token = await this.acquireToken()
+
+    const sessionId = await this.createSession()
+    console.log('[DeepSeek] Created new session:', sessionId)
+
+    const challenge = await this.getChallenge('/api/v0/chat/completion')
+    const challengeAnswer = await this.calculateChallengeAnswer(challenge)
+
+    // Build messages from assembly (already clean, no embedded tool contracts)
+    const messages = [...assembly.messages] as DeepSeekMessage[]
+
+    let prompt = this.messagesToPrompt(messages, false)
+
+    // Enhance prompt with summary at the start and tool contract at the end
+    if (assembly.summaryText) {
+      prompt = `${assembly.summaryText}\n\n${prompt}`
+    }
+    if (assembly.toolManifest) {
+      prompt = `${prompt}\n\n${assembly.toolManifest.renderedPrompt}`
+    }
+
+    const { modelType, searchEnabled, thinkingEnabled } = resolveDeepSeekChatOptions(request, prompt)
+
+    if (request.web_search || request.model.toLowerCase().includes('search')) {
+      console.log('[DeepSeek] Web search enabled')
+    }
+
+    if (request.reasoning_effort || thinkingEnabled) {
+      console.log('[DeepSeek] Reasoning mode enabled, effort:', request.reasoning_effort)
+    }
+
+    const response = await axios.post(
+      `${DEEPSEEK_API_BASE}/v0/chat/completion`,
+      {
+        chat_session_id: sessionId,
+        parent_message_id: null,
+        prompt,
+        model_type: modelType,
+        ref_file_ids: [],
+        search_enabled: searchEnabled,
+        thinking_enabled: thinkingEnabled,
+        preempt: false,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...FAKE_HEADERS,
+          Referer: `https://chat.deepseek.com/a/chat/s/${sessionId}`,
+          Cookie: generateCookie(),
+          'X-Ds-Pow-Response': challengeAnswer,
+        },
+        timeout: 120000,
+        validateStatus: () => true,
+        responseType: 'stream',
+      }
+    )
+
+    return { response, sessionId }
+  }
+
   async deleteAllChats(): Promise<boolean> {
     try {
       const token = await this.acquireToken()

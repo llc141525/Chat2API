@@ -5,6 +5,7 @@ import type {
   ToolProtocolId,
 } from './types.ts'
 import { managedXmlProtocol } from './protocols/managedXml.ts'
+import { managedBracketProtocol } from './protocols/managedBracket.ts'
 
 export interface ProviderToolProfile {
   providerId: 'deepseek' | 'kimi' | 'glm' | 'qwen' | 'qwen-ai' | string
@@ -60,13 +61,34 @@ function managedProviderProfile(
 }
 
 const profiles: Record<string, ProviderToolProfile> = {
-  deepseek: managedProviderProfile('deepseek', 'accepted', 'openai_chat_completions'),
-  kimi: managedProviderProfile('kimi', 'experimental', 'grpc_web_stream'),
-  glm: managedProviderProfile('glm', 'accepted', 'openai_chat_completions'),
-  minimax: managedProviderProfile('minimax', 'experimental', 'polling_stream'),
-  qwen: managedProviderProfile('qwen', 'accepted', 'openai_chat_completions'),
-  'qwen-ai': managedProviderProfile('qwen-ai', 'accepted', 'openai_chat_completions'),
-  zai: managedProviderProfile('zai', 'experimental', 'provider_chat_api', ['captcha_or_risk_control']),
+  deepseek: {
+    providerId: 'deepseek',
+    ...chat2ApiXmlHistoryProfile,
+  },
+  kimi: {
+    providerId: 'kimi',
+    ...chat2ApiXmlHistoryProfile,
+  },
+  glm: {
+    providerId: 'glm',
+    ...chat2ApiXmlHistoryProfile,
+  },
+  qwen: {
+    providerId: 'qwen',
+    ...chat2ApiXmlHistoryProfile,
+  },
+  zai: {
+    providerId: 'zai',
+    managedSupport: true,
+    supportsNativeTools: false,
+    preferredManagedProtocol: 'managed_bracket',
+    formatAssistantToolCalls(calls) {
+      return managedBracketProtocol.formatAssistantToolCalls(calls)
+    },
+    formatToolResult(result) {
+      return managedBracketProtocol.formatToolResult(result)
+    },
+  },
 }
 
 export function getProviderToolProfile(providerId: string): ProviderToolProfile {

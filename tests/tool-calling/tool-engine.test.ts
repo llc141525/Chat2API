@@ -58,10 +58,9 @@ test('OpenAI tools plus DeepSeek choose managed prompt', () => {
   assert.equal(result.plan.shouldInjectPrompt, true)
   assert.equal(result.tools, undefined)
   assert.equal(result.plan.tools.length, 2)
-  assert.equal(result.plan.catalogSnapshot?.fingerprint, result.plan.diagnostics.catalogFingerprint)
-  assert.match(result.messages[0].content as string, /Tool Contract Header/)
-  assert.match(result.messages[0].content as string, /catalog_fingerprint:/)
-  assert.match(result.messages[0].content as string, /<\|CHAT2API\|tool_calls>/)
+  // Tool contract lives in toolManifest.renderedPrompt, not in messages
+  assert.ok(result.toolManifest, 'toolManifest should be present')
+  assert.match(result.toolManifest!.renderedPrompt, /<\|CHAT2API\|tool_calls>/)
 })
 
 test('managed prompt includes Tool Contract Header from catalog snapshot', () => {
@@ -337,245 +336,78 @@ test('non-stream parsing only accepts the selected provider protocol', () => {
   assert.equal(result.choices[0].message.content, '[function_calls][call:default_api:read_file]{"filePath":"/tmp/a"}[/call][/function_calls]')
 })
 
-test('ToolCallingEngine non-stream repairs mixed protocol output before tool_calls', () => {
-  const qwenProvider = {
-    id: 'qwen',
-    name: 'Qwen',
-    type: 'builtin',
-    authType: 'token',
+test('transformRequest returns toolManifest alongside messages for managed prompt', () => {
+  const provider = {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    type: 'builtin' as const,
+    authType: 'token' as const,
     apiEndpoint: '',
     headers: {},
     enabled: true,
     createdAt: 0,
     updatedAt: 0,
-  } as Provider
-  const engine = new ToolCallingEngine({
-    enabled: true,
-    mode: 'force',
-    clientAdapterId: 'standard-openai-tools',
-    diagnosticsEnabled: false,
-    advanced: { promptPreviewEnabled: false },
-  })
-
-  const transform = engine.transformRequest({
-    request: {
-      model: 'qwen-test',
-      messages: [{ role: 'user', content: 'list files' }],
-      tools: [{
-        type: 'function',
-        function: {
-          name: 'bash',
-          parameters: {
-            type: 'object',
-            properties: { argument: { type: 'string' } },
-            required: ['argument'],
-          },
-        },
-      }],
-    },
-    provider: qwenProvider,
-    actualModel: 'qwen-test',
-  })
-
-  const response: any = {
-    choices: [{
-      message: {
-        role: 'assistant',
-        content: '<|CHAT2API|tool_calls><|CHAT2API|invoke name="bash"><|CHAT2API|parameter name="argument"><![CDATA[pwd]]></arg_value></tool_call>',
-      },
-      finish_reason: 'stop',
-    }],
   }
+  const engine = new ToolCallingEngine()
+  const result = engine.transformRequest({
+    request: request({ tools: [{ type: 'function', function: { name: 'default_api:read_file', description: 'Read a file', parameters: { type: 'object', properties: {} } } }] }),
+    provider,
+    actualModel: 'deepseek-chat',
+  })
 
-  engine.applyNonStreamResponse(response, transform.plan)
-
-  assert.equal(response.choices[0].message.content, null)
-  assert.equal(response.choices[0].finish_reason, 'tool_calls')
-  assert.equal(response.choices[0].message.tool_calls[0].function.name, 'bash')
-  assert.equal(response.choices[0].message.tool_calls[0].function.arguments, '{"argument":"pwd"}')
+  assert.ok(result.toolManifest, 'toolManifest should be present when shouldInjectPrompt is true')
+  assert.equal(result.toolManifest!.protocol, 'managed_xml')
+  assert.ok(result.toolManifest!.allowedToolNames.length > 0)
+  assert.ok(result.toolManifest!.renderedPrompt.length > 0)
+  assert.match(result.toolManifest!.renderedPrompt, /## Available Tools/)
+  // Messages are no longer modified — tool contract lives entirely in toolManifest.renderedPrompt
+  assert.equal(result.messages.length, 1)
+  assert.equal(result.messages[0].content, 'read /tmp/a')
 })
 
-test('ToolCallingEngine non-stream blocks malformed unknown tool output', () => {
-  const qwenProvider = {
-    id: 'qwen',
-    name: 'Qwen',
-    type: 'builtin',
-    authType: 'token',
+test('transformRequest omits toolManifest when injection is skipped', () => {
+  const provider = {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    type: 'builtin' as const,
+    authType: 'token' as const,
     apiEndpoint: '',
     headers: {},
     enabled: true,
     createdAt: 0,
     updatedAt: 0,
-  } as Provider
-  const engine = new ToolCallingEngine({ mode: 'force' })
-  const transform = engine.transformRequest({
-    request: {
-      model: 'qwen-test',
-      messages: [{ role: 'user', content: 'list files' }],
-      tools: [{
-        type: 'function',
-        function: {
-          name: 'bash',
-          parameters: {
-            type: 'object',
-            properties: { argument: { type: 'string' } },
-            required: ['argument'],
-          },
-        },
-      }],
-    },
-    provider: qwenProvider,
-    actualModel: 'qwen-test',
+  }
+  const engine = new ToolCallingEngine()
+  const result = engine.transformRequest({
+    request: { model: 'deepseek-chat', messages: [{ role: 'user', content: 'hi' }] },
+    provider,
+    actualModel: 'deepseek-chat',
   })
 
-  const response: any = {
-    choices: [{
-      message: {
-        role: 'assistant',
-        content: '<|CHAT2API|tool_calls><|CHAT2API|invoke name="python"><|CHAT2API|parameter name="argument"><![CDATA[pwd]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
-      },
-      finish_reason: 'stop',
-    }],
-  }
-
-  engine.applyNonStreamResponse(response, transform.plan)
-
-  assert.equal(response.choices[0].message.tool_calls, undefined)
-  assert.equal(response.choices[0].message.content, '<|CHAT2API|tool_calls><|CHAT2API|invoke name="python"><|CHAT2API|parameter name="argument"><![CDATA[pwd]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>')
-  assert.equal(transform.plan.diagnostics.parsedToolCallCount, 0)
-  assert.equal(transform.plan.diagnostics.malformedReason, 'unknown_tool_name')
+  assert.equal(result.plan.shouldInjectPrompt, false)
+  assert.equal(result.toolManifest, undefined)
 })
 
-test('non-stream response denying an available tool marks one availability retry request', () => {
+test('toolManifest uses catalogFingerprint from plan snapshot', () => {
+  const provider = {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    type: 'builtin' as const,
+    authType: 'token' as const,
+    apiEndpoint: '',
+    headers: {},
+    enabled: true,
+    createdAt: 0,
+    updatedAt: 0,
+  }
   const engine = new ToolCallingEngine()
-  const transformed = engine.transformRequest({
+  const result = engine.transformRequest({
     request: request(),
     provider,
     actualModel: 'deepseek-chat',
-    toolSessionKey: `engine-catalog-${Date.now()}-drift`,
   })
-  const result: any = {
-    choices: [{
-      message: {
-        role: 'assistant',
-        content: 'I cannot use default_api:read_file because that tool is not available in this conversation.',
-      },
-      finish_reason: 'stop',
-    }],
-  }
 
-  const retry = engine.applyNonStreamResponse(result, transformed.plan)
-
-  assert.equal(retry?.type, 'availability_retry')
-  assert.equal(retry?.catalogFingerprint, transformed.plan.catalogSnapshot?.fingerprint)
-  assert.equal(transformed.plan.availabilityRetryAttempted, true)
-  assert.equal(transformed.plan.diagnostics.availabilityDriftDetected, true)
-  assert.equal(transformed.plan.diagnostics.availabilityRetryResult, 'attempted')
-})
-
-test('availability drift retry does not trigger twice for one plan', () => {
-  const engine = new ToolCallingEngine()
-  const transformed = engine.transformRequest({
-    request: request(),
-    provider,
-    actualModel: 'deepseek-chat',
-    toolSessionKey: `engine-catalog-${Date.now()}-drift-once`,
-  })
-  const result: any = {
-    choices: [{
-      message: {
-        role: 'assistant',
-        content: 'The default_api:read_file tool does not exist.',
-      },
-      finish_reason: 'stop',
-    }],
-  }
-
-  const first = engine.applyNonStreamResponse(result, transformed.plan)
-  const second = engine.applyNonStreamResponse(result, transformed.plan)
-
-  assert.equal(first?.type, 'availability_retry')
-  assert.equal(second, undefined)
-  assert.equal(transformed.plan.diagnostics.availabilityRetryResult, 'failed')
-  assert.deepEqual(transformed.plan.diagnostics.deniedToolNames, ['default_api:read_file'])
-})
-
-test('repeated non-stream availability denial fails explicit inspection after one retry attempt', () => {
-  const engine = new ToolCallingEngine()
-  const transformed = engine.transformRequest({
-    request: request(),
-    provider,
-    actualModel: 'deepseek-chat',
-    toolSessionKey: `engine-catalog-${Date.now()}-drift-explicit-fail`,
-  })
-  const result: any = {
-    choices: [{
-      message: {
-        role: 'assistant',
-        content: 'I only have open_url available.',
-      },
-      finish_reason: 'stop',
-    }],
-  }
-
-  const first = engine.applyNonStreamResponse(result, transformed.plan)
-  const second = engine.applyNonStreamResponse(result, transformed.plan)
-  const inspection = inspectNonStreamAssistantOutput({ result, plan: transformed.plan })
-
-  assert.equal(first?.type, 'availability_retry')
-  assert.equal(second, undefined)
-  assert.equal(inspection.ok, false)
-  assert.equal(inspection.outcome, 'tool_availability_drift')
-  assert.match(inspection.error, /authoritative tool catalog/i)
-  assert.deepEqual(transformed.plan.diagnostics.mentionedUnavailableOnlyTools, ['open_url'])
-})
-
-test('availability drift retry does not trigger when valid tool_calls were parsed', () => {
-  const engine = new ToolCallingEngine()
-  const transformed = engine.transformRequest({
-    request: request(),
-    provider,
-    actualModel: 'deepseek-chat',
-    toolSessionKey: `engine-catalog-${Date.now()}-drift-valid`,
-  })
-  const result: any = {
-    choices: [{
-      message: {
-        role: 'assistant',
-        content: '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="argument"><![CDATA[{}]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
-      },
-      finish_reason: 'stop',
-    }],
-  }
-
-  const retry = engine.applyNonStreamResponse(result, transformed.plan)
-
-  assert.equal(retry, undefined)
-  assert.equal(result.choices[0].finish_reason, 'tool_calls')
-  assert.equal(transformed.plan.diagnostics.availabilityDriftDetected, undefined)
-})
-
-test('availability drift retry clarification only exposes forced tool availability for this turn', () => {
-  const engine = new ToolCallingEngine()
-  const transformed = engine.transformRequest({
-    request: request({ tool_choice: { type: 'function', function: { name: 'default_api:list_dir' } } }),
-    provider,
-    actualModel: 'deepseek-chat',
-    toolSessionKey: `engine-catalog-${Date.now()}-drift-forced`,
-  })
-  const result: any = {
-    choices: [{
-      message: {
-        role: 'assistant',
-        content: 'The default_api:list_dir tool is not available in this conversation.',
-      },
-      finish_reason: 'stop',
-    }],
-  }
-
-  const retry = engine.applyNonStreamResponse(result, transformed.plan)
-
-  assert.equal(retry?.type, 'availability_retry')
-  assert.match(retry?.clarification ?? '', /available_tools: default_api:list_dir/)
-  assert.doesNotMatch(retry?.clarification ?? '', /default_api:read_file/)
+  assert.equal(result.plan.shouldInjectPrompt, true)
+  // catalogFingerprint matches the plan's snapshot fingerprint
+  assert.equal(result.toolManifest!.catalogFingerprint, result.plan.catalogSnapshot?.fingerprint ?? '')
 })

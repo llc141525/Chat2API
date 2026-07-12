@@ -6,26 +6,25 @@
 import axios, { AxiosRequestConfig, AxiosResponse, AxiosError } from 'axios'
 import http2 from 'http2'
 import { PassThrough } from 'stream'
-import { Account, Provider } from '../store/types.ts'
-import { ForwardResult, ChatCompletionRequest, ProxyContext } from './types.ts'
-import { proxyStatusManager } from './status.ts'
-import { storeManager } from '../store/store.ts'
-import { DeepSeekAdapter } from './adapters/deepseek.ts'
-import { DeepSeekStreamHandler } from './adapters/deepseek-stream.ts'
-import { GLMAdapter, GLMStreamHandler } from './adapters/glm.ts'
-import { KimiAdapter, KimiStreamHandler } from './adapters/kimi.ts'
-import { MimoAdapter, MimoStreamHandler } from './adapters/mimo.ts'
-import { QwenAdapter, QwenStreamHandler } from './adapters/qwen.ts'
-import { QwenAiAdapter, QwenAiStreamHandler } from './adapters/qwen-ai.ts'
-import { ZaiAdapter, ZaiStreamHandler } from './adapters/zai.ts'
-import { MiniMaxAdapter, MiniMaxStreamHandler } from './adapters/minimax.ts'
-import { PerplexityAdapter } from './adapters/perplexity.ts'
-import { PerplexityStreamHandler } from './adapters/perplexity-stream.ts'
-import { ToolCallingEngine } from './toolCalling/ToolCallingEngine.ts'
-import type { ToolCallingTransformResult } from './toolCalling/types.ts'
-import { inspectNonStreamAssistantOutput } from './toolCalling/outputInspection.ts'
-import { preserveContextManagedMessageMetadata } from './contextMessageMetadata.ts'
-import { sessionManager } from './sessionManager.ts'
+import { Account, Provider } from '../store/types'
+import { ForwardResult, ChatCompletionRequest, ProxyContext } from './types'
+import { proxyStatusManager } from './status'
+import { storeManager } from '../store/store'
+import { DeepSeekAdapter } from './adapters/deepseek'
+import { DeepSeekStreamHandler } from './adapters/deepseek-stream'
+import { GLMAdapter, GLMStreamHandler } from './adapters/glm'
+import { KimiAdapter, KimiStreamHandler } from './adapters/kimi'
+import { MimoAdapter, MimoStreamHandler } from './adapters/mimo'
+import { QwenAdapter, QwenStreamHandler } from './adapters/qwen'
+import { QwenAiAdapter, QwenAiStreamHandler } from './adapters/qwen-ai'
+import { ZaiAdapter, ZaiStreamHandler } from './adapters/zai'
+import { MiniMaxAdapter, MiniMaxStreamHandler } from './adapters/minimax'
+import { PerplexityAdapter } from './adapters/perplexity'
+import { PerplexityStreamHandler } from './adapters/perplexity-stream'
+import { ToolCallingEngine } from './toolCalling/ToolCallingEngine'
+import { buildRequestAssembly, type RequestAssembly } from './RequestAssembly.ts'
+import type { ToolCallingTransformResult } from './toolCalling/types'
+import { sessionManager } from './sessionManager'
 import {
   createContextManagementService,
   SummaryGenerator,
@@ -221,6 +220,17 @@ export class RequestForwarder {
         this.forwardPerplexity(request, account, provider, actualModel, startTime, context),
     },
   ]
+
+  /**
+   * Prepare request assembly by transforming the request and building the assembly.
+   */
+  private prepareRequest(request: ChatCompletionRequest, provider?: Provider): RequestAssembly {
+    const transformed = this.transformRequestForPromptToolUse(request, provider)
+    return buildRequestAssembly({
+      messages: request.messages,
+      toolManifest: transformed.toolManifest ?? null,
+    })
+  }
 
   /**
    * Transform request for prompt-based tool calling
@@ -475,6 +485,24 @@ export class RequestForwarder {
       : context.requestId
 
     return `${provider.id}:${account.id}:${actualModel}:${sessionDimension}`
+  }
+
+  /**
+   * Post-processing: if tool calling was planned but no tool calls were extracted,
+   * log a diagnostic warning but don't fail the request.
+   */
+  private logEmptyToolCallDiagnostic(
+    result: any,
+    methodName: string,
+    transformed: ToolCallingTransformResult
+  ): void {
+    if (transformed.plan.shouldParseResponse && result?.choices?.[0]) {
+      const choice = result.choices[0]
+      const msg = choice.message ?? {}
+      if (!msg.tool_calls && !msg.content) {
+        console.warn(`[Forwarder] ${methodName}: model returned empty content for tool-calling turn`)
+      }
+    }
   }
 
   /**
@@ -757,18 +785,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
-      const transformed = this.transformRequestForPromptToolUse(
-        request,
-        provider,
-        toolSessionKey
-      )
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
+      const assembly = this.prepareRequest(request, provider)
 
       // Check for existing conversation state (multi-turn)
       const convState = getProviderConversationState({
@@ -778,16 +795,34 @@ export class RequestForwarder {
       })
 
       const adapter = new DeepSeekAdapter(provider, account)
+      let responseResult: { response: any; sessionId: string }
 
-      const { response, sessionId } = await adapter.chatCompletion({
-        model: request.model,
-        messages: transformedRequest.messages as any,
-        stream: transformedRequest.stream,
-        temperature: transformedRequest.temperature,
-        web_search: transformedRequest.web_search,
-        reasoning_effort: transformedRequest.reasoning_effort,
-        parentMessageId: convState?.parentMessageId,
-      })
+      if (assembly.toolManifest) {
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          web_search: request.web_search,
+          reasoning_effort: request.reasoning_effort,
+        } as any)
+      } else {
+        const transformedRequest = {
+          ...request,
+          messages: transformed.messages,
+          tools: transformed.tools,
+        }
+        responseResult = await adapter.chatCompletion({
+          model: request.model,
+          messages: transformedRequest.messages as any,
+          stream: transformedRequest.stream,
+          temperature: transformedRequest.temperature,
+          web_search: transformedRequest.web_search,
+          reasoning_effort: transformedRequest.reasoning_effort,
+        })
+      }
+
+      const { response, sessionId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -878,55 +913,11 @@ export class RequestForwarder {
         }
       }
 
-// Non-streaming requests need to collect stream data and convert
-      let result = await handler.handleNonStream(response.data, response)
-
-      const retryOutcome = await this.retryManagedNonStreamResult({
-        originalRequest: request,
-        transformed,
-        initialResult: result,
-        account,
-        provider,
-        actualModel,
-        context,
-        executeRetry: async (retryRequest) => adapter.chatCompletion({
-          model: request.model,
-          messages: retryRequest.messages as any,
-          stream: false,
-          temperature: request.temperature,
-          web_search: request.web_search,
-          reasoning_effort: request.reasoning_effort,
-        }),
-        parseRetryPayload: async (retryResponse, retryRequest) => {
-          const retryHandler = new DeepSeekStreamHandler(
-            actualModel,
-            retryResponse.sessionId,
-            deleteSessionCallback,
-            retryRequest.web_search,
-            retryRequest.reasoning_effort,
-            transformed.plan,
-            request.model
-          )
-          const parsed = await retryHandler.handleNonStream(retryResponse.data, retryResponse)
-          const retryMsgId = retryHandler.getLastMessageId()
-          if (retryMsgId) {
-            setProviderConversationState({
-              primaryKey: conversationStateKey,
-              fallbackToolSessionKey: toolSessionKey,
-              messages: request.messages,
-              update: { parentMessageId: retryMsgId },
-            })
-          }
-          return parsed
-        },
-      })
-      result = retryOutcome.result
-      if (retryOutcome.retried) {
-        // Save state from retry handler (original handler's state is stale)
-      } else {
-        // Save state from original handler (no retry occurred)
-        saveConversationState()
-      }
+      // Non-streaming requests need to collect stream data and convert
+      const result = await handler.handleNonStream(response.data)
+      
+      this.applyToolCallsToResponse(result, transformed)
+      this.logEmptyToolCallDiagnostic(result, 'DeepSeek', transformed)
 
       if (deleteSessionCallback) {
         await deleteSessionCallback()
@@ -965,18 +956,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
-      const transformed = this.transformRequestForPromptToolUse(
-        request,
-        provider,
-        toolSessionKey
-      )
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
+      const assembly = this.prepareRequest(request, provider)
 
       // Check for existing conversation state (multi-turn)
       const convState = getProviderConversationState({
@@ -986,17 +966,38 @@ export class RequestForwarder {
       })
 
       const adapter = new GLMAdapter(provider, account)
-      const { response, conversationId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformedRequest.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        web_search: request.web_search,
-        reasoning_effort: request.reasoning_effort,
-        deep_research: request.deep_research,
-        conversationId: convState?.conversationId,
-      })
+      let responseResult: { response: any; conversationId: string }
+
+      if (assembly.toolManifest) {
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          web_search: request.web_search,
+          reasoning_effort: request.reasoning_effort,
+          deep_research: request.deep_research,
+        } as any)
+      } else {
+        const transformedRequest = {
+          ...request,
+          messages: transformed.messages,
+          tools: transformed.tools,
+        }
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformedRequest.messages,
+          stream: transformedRequest.stream,
+          temperature: transformedRequest.temperature,
+          web_search: transformedRequest.web_search,
+          reasoning_effort: transformedRequest.reasoning_effort,
+          deep_research: transformedRequest.deep_research,
+        })
+      }
+
+      const { response, conversationId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -1072,56 +1073,10 @@ export class RequestForwarder {
         }
       }
 
-let result = await handler.handleNonStream(response.data, response)
-
-      const retryOutcome = await this.retryManagedNonStreamResult({
-        originalRequest: request,
-        transformed,
-        initialResult: result,
-        account,
-        provider,
-        actualModel,
-        context,
-        executeRetry: async (retryRequest) => adapter.chatCompletion({
-          model: actualModel,
-          originalModel: request.model,
-          messages: retryRequest.messages as any,
-          stream: false,
-          temperature: request.temperature,
-          web_search: request.web_search,
-          reasoning_effort: request.reasoning_effort,
-          deep_research: request.deep_research,
-        }),
-        parseRetryPayload: async (retryResponse) => {
-          const retryHandler = new GLMStreamHandler(actualModel, undefined, undefined, transformed.plan as any)
-          const parsed = await retryHandler.handleNonStream(retryResponse.data, retryResponse)
-          const retryConvId = retryHandler.getConversationId()
-          if (retryConvId) {
-            setProviderConversationState({
-              primaryKey: conversationStateKey,
-              fallbackToolSessionKey: toolSessionKey,
-              messages: request.messages,
-              update: { conversationId: retryConvId },
-            })
-          }
-          return parsed
-        },
-      })
-      result = retryOutcome.result
-      if (!retryOutcome.retried) {
-        // Save state from original handler (no retry occurred)
-        const convId = handler.getConversationId()
-        if (convId) {
-          setProviderConversationState({
-            primaryKey: conversationStateKey,
-            fallbackToolSessionKey: toolSessionKey,
-            messages: request.messages,
-            update: { conversationId: convId },
-          })
-        }
-      } else {
-        // Retry path already persisted the latest conversation state
-      }
+      const result = await handler.handleNonStream(response.data)
+      
+      this.applyToolCallsToResponse(result, transformed)
+      this.logEmptyToolCallDiagnostic(result, 'GLM', transformed)
 
       if (shouldDeleteSession()) {
         const convId = handler.getConversationId()
@@ -1160,22 +1115,36 @@ let result = await handler.handleNonStream(response.data, response)
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(
-        request,
-        provider,
-        this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      )
-      
+      const assembly = this.prepareRequest(request, provider)
+
       const adapter = new KimiAdapter(provider, account)
-      const { response, conversationId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages,
-        stream: request.stream,
-        temperature: request.temperature,
-        enableThinking: !!request.reasoning_effort,
-        enableWebSearch: !!request.web_search,
-      })
+      let responseResult: { response: any; conversationId: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enableThinking: !!request.reasoning_effort,
+          enableWebSearch: !!request.web_search,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformed.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enableThinking: !!request.reasoning_effort,
+          enableWebSearch: !!request.web_search,
+        })
+      }
+
+      const { response, conversationId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -1221,29 +1190,8 @@ let result = await handler.handleNonStream(response.data, response)
 
       let result = await handler.handleNonStream(response.data)
 
-      const retryOutcome = await this.retryManagedNonStreamResult({
-        originalRequest: request,
-        transformed,
-        initialResult: result,
-        account,
-        provider,
-        actualModel,
-        context,
-        executeRetry: async (retryRequest) => adapter.chatCompletion({
-          model: actualModel,
-          originalModel: request.model,
-          messages: retryRequest.messages as any,
-          stream: false,
-          temperature: request.temperature,
-          enableThinking: !!request.reasoning_effort,
-          enableWebSearch: !!request.web_search,
-        }),
-        parseRetryPayload: async (retryResponse) => {
-          const retryHandler = new KimiStreamHandler(actualModel, retryResponse.conversationId, !!request.reasoning_effort, transformed.plan)
-          return retryHandler.handleNonStream(retryResponse.response.data)
-        },
-      })
-      result = retryOutcome.result
+      this.applyToolCallsToResponse(result, transformed)
+      this.logEmptyToolCallDiagnostic(result, 'Kimi', transformed)
 
       if (shouldDeleteSession()) {
         const realChatId = handler.getConversationId()
@@ -1285,27 +1233,41 @@ let result = await handler.handleNonStream(response.data, response)
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(
-        request,
-        provider,
-        this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      )
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
+      const assembly = this.prepareRequest(request, provider)
 
       const adapter = new QwenAdapter(provider, account)
-      const { response, sessionId, reqId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformedRequest.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        enableThinking: !!request.reasoning_effort,
-        enableWebSearch: !!request.web_search,
-      })
+      let responseResult: { response: any; sessionId: string; reqId: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enableThinking: !!request.reasoning_effort,
+          enableWebSearch: !!request.web_search,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        const transformedRequest = {
+          ...request,
+          messages: transformed.messages,
+          tools: transformed.tools,
+        }
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformedRequest.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enableThinking: !!request.reasoning_effort,
+          enableWebSearch: !!request.web_search,
+        })
+      }
+
+      const { response, sessionId, reqId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -1347,29 +1309,8 @@ let result = await handler.handleNonStream(response.data, response)
 
       let result = await handler.handleNonStream(response.data, response)
 
-      const retryOutcome = await this.retryManagedNonStreamResult({
-        originalRequest: request,
-        transformed,
-        initialResult: result,
-        account,
-        provider,
-        actualModel,
-        context,
-        executeRetry: async (retryRequest) => adapter.chatCompletion({
-          model: actualModel,
-          originalModel: request.model,
-          messages: retryRequest.messages as any,
-          stream: false,
-          temperature: request.temperature,
-          enableThinking: !!request.reasoning_effort,
-          enableWebSearch: !!request.web_search,
-        }),
-        parseRetryPayload: async (retryResponse) => {
-          const retryHandler = new QwenStreamHandler(actualModel, deleteSessionCallback, transformed.plan)
-          return retryHandler.handleNonStream(retryResponse.data, retryResponse)
-        },
-      })
-      result = retryOutcome.result
+      this.applyToolCallsToResponse(result, transformed)
+      this.logEmptyToolCallDiagnostic(result, 'Qwen', transformed)
 
       const sid = handler.getSessionId()
       if (deleteSessionCallback && sid) {
@@ -1409,26 +1350,34 @@ let result = await handler.handleNonStream(response.data, response)
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(
-        request,
-        provider,
-        this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      )
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
+      const assembly = this.prepareRequest(request, provider)
 
       const adapter = new QwenAiAdapter(provider, account)
-      const { response, chatId, parentId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformedRequest.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        enable_thinking: !!request.reasoning_effort,
-      })
+      let responseResult: { response: any; chatId: string; parentId: string | null }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enable_thinking: !!request.reasoning_effort,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformed.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enable_thinking: !!request.reasoning_effort,
+        })
+      }
+
+      const { response, chatId, parentId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -1471,29 +1420,8 @@ let result = await handler.handleNonStream(response.data, response)
 
       let result = await handler.handleNonStream(response.data)
 
-      const retryOutcome = await this.retryManagedNonStreamResult({
-        originalRequest: request,
-        transformed,
-        initialResult: result,
-        account,
-        provider,
-        actualModel,
-        context,
-        executeRetry: async (retryRequest) => adapter.chatCompletion({
-          model: actualModel,
-          originalModel: request.model,
-          messages: retryRequest.messages as any,
-          stream: false,
-          temperature: request.temperature,
-          enable_thinking: !!request.reasoning_effort,
-        }),
-        parseRetryPayload: async (retryResponse) => {
-          const retryHandler = new QwenAiStreamHandler(actualModel, undefined, transformed.plan as any)
-          retryHandler.setChatId(retryResponse.chatId)
-          return retryHandler.handleNonStream(retryResponse.data)
-        },
-      })
-      result = retryOutcome.result
+      this.applyToolCallsToResponse(result, transformed)
+      this.logEmptyToolCallDiagnostic(result, 'QwenAI', transformed)
 
       if (shouldDeleteSession()) {
         await adapter.deleteChat(chatId)
@@ -1533,22 +1461,41 @@ let result = await handler.handleNonStream(response.data, response)
     console.log('[forwardZai] actualModel:', actualModel)
     console.log('[forwardZai] provider.modelMappings:', provider.modelMappings)
     try {
-      const transformed = this.transformRequestForPromptToolUse(
-        request,
-        provider,
-        this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      )
-      
+      const assembly = this.prepareRequest(request, provider)
+
       const adapter = new ZaiAdapter(provider, account)
-      const { response, chatId, requestId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        web_search: request.web_search,
-        reasoning_effort: request.reasoning_effort,
-      })
+      let responseResult: { response: any; chatId: string; requestId: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          web_search: request.web_search,
+          reasoning_effort: request.reasoning_effort,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        const transformedRequest = {
+          ...request,
+          messages: transformed.messages,
+          tools: transformed.tools,
+        }
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformedRequest.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          web_search: request.web_search,
+          reasoning_effort: request.reasoning_effort,
+        })
+      }
+
+      const { response, chatId, requestId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -1603,31 +1550,9 @@ let result = await handler.handleNonStream(response.data, response)
 
       let result = await handler.handleNonStream(response.data)
 
-      const retryOutcome = await this.retryManagedNonStreamResult({
-        originalRequest: request,
-        transformed,
-        initialResult: result,
-        account,
-        provider,
-        actualModel,
-        context,
-        executeRetry: async (retryRequest) => adapter.chatCompletion({
-          model: actualModel,
-          originalModel: request.model,
-          messages: retryRequest.messages as any,
-          stream: false,
-          temperature: request.temperature,
-          web_search: request.web_search,
-          reasoning_effort: request.reasoning_effort,
-        }),
-        parseRetryPayload: async (retryResponse) => {
-          const retryHandler = new ZaiStreamHandler(actualModel, deleteChatCallback, transformed.plan)
-          retryHandler.setChatId(retryResponse.chatId)
-          return retryHandler.handleNonStream(retryResponse.response.data)
-        },
-      })
-      result = retryOutcome.result
-      
+      this.applyToolCallsToResponse(result, transformed)
+      this.logEmptyToolCallDiagnostic(result, 'ZAI', transformed)
+
       if (deleteChatCallback) {
         await deleteChatCallback(chatId)
       }
@@ -1667,21 +1592,34 @@ let result = await handler.handleNonStream(response.data, response)
     console.log('[forwardMiniMax] actualModel:', actualModel)
     console.log('[forwardMiniMax] provider.modelMappings:', provider.modelMappings)
     try {
-      const transformed = this.transformRequestForPromptToolUse(
-        request,
-        provider,
-        this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      )
-      
+      const assembly = this.prepareRequest(request, provider)
+
       const adapter = new MiniMaxAdapter(provider, account)
-      const { response, stream, chatId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        toolCallingPlan: transformed.plan,
-      })
+      let responseResult: { response: any; stream: any; chatId: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          toolCallingPlan: transformed.plan,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformed.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          toolCallingPlan: transformed.plan,
+        })
+      }
+
+      const { response, stream, chatId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -1731,27 +1669,9 @@ let result = await handler.handleNonStream(response.data, response)
       }
 
       if (response) {
-        let responseData = response.data
-        const retryOutcome = await this.retryManagedNonStreamResult({
-          originalRequest: request,
-          transformed,
-          initialResult: responseData,
-          account,
-          provider,
-          actualModel,
-          context,
-          executeRetry: async (retryRequest) => adapter.chatCompletion({
-            model: actualModel,
-            originalModel: request.model,
-            messages: retryRequest.messages as any,
-            stream: false,
-            temperature: request.temperature,
-            toolCallingPlan: transformed.plan,
-          }),
-          parseRetryPayload: async (retryResponse) => retryResponse.response?.data ?? responseData,
-        })
-        responseData = retryOutcome.result
-        
+        this.applyToolCallsToResponse(response.data, transformed)
+        this.logEmptyToolCallDiagnostic(response.data, 'MiniMax', transformed)
+
         if (deleteChatCallback) {
           await deleteChatCallback(chatId)
         }
@@ -1772,31 +1692,9 @@ let result = await handler.handleNonStream(response.data, response)
       if (stream) {
         const handler = new MiniMaxStreamHandler(actualModel, deleteChatCallback, transformed.plan)
         handler.setChatId(chatId)
-        let result = await handler.handleNonStream(stream.stream)
-        const retryOutcome = await this.retryManagedNonStreamResult({
-          originalRequest: request,
-          transformed,
-          initialResult: result,
-          account,
-          provider,
-          actualModel,
-          context,
-          executeRetry: async (retryRequest) => adapter.chatCompletion({
-            model: actualModel,
-            originalModel: request.model,
-            messages: retryRequest.messages as any,
-            stream: false,
-            temperature: request.temperature,
-            toolCallingPlan: transformed.plan,
-          }),
-          parseRetryPayload: async (retryResponse) => {
-            if (!retryResponse.stream) return result
-            const retryHandler = new MiniMaxStreamHandler(actualModel, deleteChatCallback, transformed.plan)
-            retryHandler.setChatId(retryResponse.chatId)
-            return retryHandler.handleNonStream(retryResponse.stream.stream)
-          },
-        })
-        result = retryOutcome.result
+        const result = await handler.handleNonStream(stream.stream)
+        this.applyToolCallsToResponse(result, transformed)
+        this.logEmptyToolCallDiagnostic(result, 'MiniMax', transformed)
 
         if (deleteChatCallback) {
           await deleteChatCallback(chatId)
@@ -1843,25 +1741,37 @@ let result = await handler.handleNonStream(response.data, response)
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(
-        request,
-        provider,
-        this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      )
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
-      const adapter = new MimoAdapter(provider, account)
+      const assembly = this.prepareRequest(request, provider)
 
-      const { response, conversationId, query } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.originalModel,
-        messages: transformedRequest.messages as any,
-        stream: transformedRequest.stream,
-        temperature: transformedRequest.temperature,
-      })
+      const adapter = new MimoAdapter(provider, account)
+      let responseResult: { response: any; conversationId: string; query: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.originalModel,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+        })
+      } else {
+        // Fallback: old path for requests without tool manifest
+        const transformedRequest = {
+          ...request,
+          messages: transformed.messages,
+          tools: transformed.tools,
+        }
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.originalModel,
+          messages: transformedRequest.messages as any,
+          stream: transformedRequest.stream,
+          temperature: transformedRequest.temperature,
+        })
+      }
+
+      const { response, conversationId, query } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -1922,30 +1832,10 @@ let result = await handler.handleNonStream(response.data, response)
         }
       }
 
-      let result = await handler.handleNonStream(response.data)
-      let parsedResult = JSON.parse(result)
-      const retryOutcome = await this.retryManagedNonStreamResult({
-        originalRequest: request,
-        transformed,
-        initialResult: parsedResult,
-        account,
-        provider,
-        actualModel,
-        context,
-        executeRetry: async (retryRequest) => adapter.chatCompletion({
-          model: actualModel,
-          originalModel: request.originalModel,
-          messages: retryRequest.messages as any,
-          stream: false,
-          temperature: request.temperature,
-        }),
-        parseRetryPayload: async (retryResponse) => {
-          const retryHandler = new MimoStreamHandler(actualModel, retryResponse.conversationId, 'separate', transformed.plan)
-          const retryResult = await retryHandler.handleNonStream(retryResponse.response.data)
-          return JSON.parse(retryResult)
-        },
-      })
-      parsedResult = retryOutcome.result
+      const result = await handler.handleNonStream(response.data)
+      const parsedResult = JSON.parse(result)
+      this.applyToolCallsToResponse(parsedResult, transformed)
+      this.logEmptyToolCallDiagnostic(parsedResult, 'Mimo', transformed)
       await adapter.generateConversationTitle(
         conversationId,
         query,
@@ -1992,20 +1882,30 @@ let result = await handler.handleNonStream(response.data, response)
   ): Promise<ForwardResult> {
     console.log('[forwardPerplexity] actualModel:', actualModel)
     try {
-      const transformed = this.transformRequestForPromptToolUse(
-        request,
-        provider,
-        this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      )
-      
+      const assembly = this.prepareRequest(request, provider)
+
       const adapter = new PerplexityAdapter(provider, account)
-      
-      const { stream, sessionId } = await adapter.chatCompletion({
-        model: actualModel,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-      })
+      let responseResult: { stream: any; sessionId: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          messages: transformed.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+        })
+      }
+
+      const { stream, sessionId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -2035,28 +1935,11 @@ let result = await handler.handleNonStream(response.data, response)
       }
 
       const handler = new PerplexityStreamHandler(actualModel, sessionId, undefined, adapter, transformed.plan)
-      let result = await handler.handleNonStream(stream)
-      const retryOutcome = await this.retryManagedNonStreamResult({
-        originalRequest: request,
-        transformed,
-        initialResult: result,
-        account,
-        provider,
-        actualModel,
-        context,
-        executeRetry: async (retryRequest) => adapter.chatCompletion({
-          model: actualModel,
-          messages: retryRequest.messages as any,
-          stream: false,
-          temperature: request.temperature,
-        }),
-        parseRetryPayload: async (retryResponse) => {
-          const retryHandler = new PerplexityStreamHandler(actualModel, retryResponse.sessionId, undefined, adapter, transformed.plan)
-          return retryHandler.handleNonStream(retryResponse.stream)
-        },
-      })
-      result = retryOutcome.result
-      
+      const result = await handler.handleNonStream(stream)
+
+      this.applyToolCallsToResponse(result, transformed)
+      this.logEmptyToolCallDiagnostic(result, 'Perplexity', transformed)
+
       if (shouldDeleteSession()) {
         await adapter.deleteSession(sessionId)
       }

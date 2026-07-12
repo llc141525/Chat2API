@@ -564,6 +564,255 @@ export class ZaiAdapter {
     return { response, chatId, requestId }
   }
 
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{ response: AxiosResponse; chatId: string; requestId: string }> {
+    const token = await this.ensureToken()
+    const userId = this.extractUserIDFromToken(token)
+
+    console.log('[Z.ai] chatCompletionWithAssembly called with request.model:', request.model)
+
+    // Z.ai API requires specific model name casing:
+    // - GLM-5.1 and GLM-5-Turbo keep uppercase
+    // - GLM-5V-Turbo uses lowercase "v" in the request model id
+    // - GLM-5 and GLM-4.7 use lowercase request model ids
+    const modelMapping: Record<string, string> = {
+      'glm-5.1': 'GLM-5.1',
+      'glm-5-turbo': 'GLM-5-Turbo',
+      'glm-5v-turbo': 'GLM-5v-Turbo',
+      'glm-5': 'glm-5',
+      'glm-4.7': 'glm-4.7',
+      // Also handle uppercase input
+      'GLM-5.1': 'GLM-5.1',
+      'GLM-5-Turbo': 'GLM-5-Turbo',
+      'GLM-5V-Turbo': 'GLM-5v-Turbo',
+      'GLM-5v-Turbo': 'GLM-5v-Turbo',
+      'GLM-5': 'glm-5',
+      'GLM-4.7': 'glm-4.7',
+    }
+    const mappedModel = modelMapping[request.model] || modelMapping[request.model.toLowerCase()] || request.model
+
+    console.log('[Z.ai] Original model:', request.model, '-> Mapped model:', mappedModel)
+
+    // === NEW: Build from assembly, not from embedded strings in messages ===
+    let systemContent = ''
+    const processedMessages: any[] = []
+
+    // Extract system text from assembly.messages (these are base instructions, NOT tool contracts)
+    for (const msg of assembly.messages) {
+      if (msg.role === 'system') {
+        systemContent += (systemContent ? '\n\n' : '') + (typeof msg.content === 'string' ? msg.content : '')
+      } else {
+        processedMessages.push(msg)
+      }
+    }
+
+    // Enhanced system text with summary and tool contract
+    let enhancedSystem = systemContent
+
+    // Summary text (non-authoritative) goes before tool contract
+    if (assembly.summaryText) {
+      enhancedSystem = enhancedSystem
+        ? `${enhancedSystem}\n\n${assembly.summaryText}`
+        : assembly.summaryText
+    }
+
+    // Tool contract (authoritative, injected AFTER summary to take precedence)
+    if (assembly.toolManifest) {
+      const toolContractText = assembly.toolManifest.renderedPrompt
+      enhancedSystem = enhancedSystem
+        ? `${enhancedSystem}\n\n${toolContractText}`
+        : toolContractText
+    }
+
+    // If system prompt exists, prepend it to the first user message
+    if (enhancedSystem && processedMessages.length > 0) {
+      const firstUserIdx = processedMessages.findIndex(m => m.role === 'user')
+      if (firstUserIdx !== -1) {
+        const firstUserMsg = processedMessages[firstUserIdx]
+        const originalContent = typeof firstUserMsg.content === 'string'
+          ? firstUserMsg.content
+          : (Array.isArray(firstUserMsg.content)
+              ? firstUserMsg.content.find((p: any) => p.type === 'text')?.text || ''
+              : '')
+
+        processedMessages[firstUserIdx] = {
+          ...firstUserMsg,
+          content: `${enhancedSystem}\n\nUser: ${originalContent}`
+        }
+      }
+    }
+
+    const signaturePrompt = this.extractLastUserMessage(processedMessages)
+
+    // Always create a new chat (single-turn mode only)
+    const chatResult = await this.createChat(mappedModel, signaturePrompt)
+    const chatId = chatResult.chatId
+    const messageId = chatResult.messageId
+    const parentMessageId = null
+    console.log('[Z.ai] Created new chat:', chatId)
+
+    const requestId = uuid()
+    const timestamp = Date.now()
+    const signature = this.generateSignature(signaturePrompt, requestId, timestamp, userId)
+
+    // Determine if thinking and web search should be enabled
+    // Priority: explicit parameters > model name detection
+    // Use originalModel for feature detection (preserves user's intent before mapping)
+    const modelForDetection = request.originalModel || request.model
+    const modelLower = modelForDetection.toLowerCase()
+
+    let enableThinking = request.reasoning_effort === false ? false : true
+    let enableWebSearch = !!request.web_search
+
+    // Auto-enable based on model name (if not explicitly set)
+    if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
+      enableThinking = true
+      console.log('[Z.ai] Thinking mode enabled (from model name)')
+    }
+    if (!enableWebSearch && modelLower.includes('search')) {
+      enableWebSearch = true
+      console.log('[Z.ai] Web search enabled (from model name)')
+    }
+
+    // Z.ai API uses auto_web_search for web search feature
+    // web_search should always be false, use auto_web_search instead
+    const features = {
+      image_generation: false,
+      web_search: false,
+      auto_web_search: enableWebSearch,
+      preview_mode: true,
+      flags: [],
+      vlm_tools_enable: false,
+      vlm_web_search_enable: false,
+      vlm_website_mode: false,
+      enable_thinking: enableThinking,
+    }
+
+    const requestBody: Record<string, any> = {
+      stream: request.stream !== false,
+      model: mappedModel,
+      messages: processedMessages,
+      signature_prompt: signaturePrompt,
+      params: {},
+      extra: {},
+      features,
+      variables: {
+        '{{USER_NAME}}': 'User',
+        '{{USER_LOCATION}}': 'Unknown',
+        '{{CURRENT_DATETIME}}': new Date().toISOString().replace('T', ' ').substring(0, 19),
+        '{{CURRENT_DATE}}': new Date().toISOString().substring(0, 10),
+        '{{CURRENT_TIME}}': new Date().toISOString().substring(11, 19),
+        '{{CURRENT_WEEKDAY}}': ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date().getDay()],
+        '{{CURRENT_TIMEZONE}}': 'Asia/Shanghai',
+        '{{USER_LANGUAGE}}': 'zh-CN',
+      },
+      chat_id: chatId,
+      id: requestId,
+      current_user_message_id: messageId,
+      current_user_message_parent_id: parentMessageId,
+      background_tasks: {
+        title_generation: true,
+        tags_generation: true,
+      },
+    }
+
+    const captchaVerifyParam = this.getCaptchaVerifyParam()
+    if (captchaVerifyParam) {
+      requestBody.captcha_verify_param = captchaVerifyParam
+    }
+
+    console.log('[Z.ai] Sending chat request (assembly path)...')
+    console.log('[Z.ai] Model:', request.model)
+    console.log('[Z.ai] ChatId:', chatId)
+    console.log('[Z.ai] MessageId (current_user_message_id):', messageId)
+    console.log('[Z.ai] ParentMessageId:', parentMessageId || '(none)')
+
+    const queryParams = new URLSearchParams({
+      timestamp: String(timestamp),
+      requestId,
+      user_id: userId,
+      version: '0.0.1',
+      platform: 'web',
+      token,
+      user_agent: ZAI_USER_AGENT,
+      language: 'zh-CN',
+      languages: 'zh-CN,zh',
+      timezone: 'Asia/Shanghai',
+      cookie_enabled: 'true',
+      screen_width: '1512',
+      screen_height: '982',
+      screen_resolution: '1512x982',
+      viewport_height: '945',
+      viewport_width: '923',
+      viewport_size: '923x945',
+      color_depth: '30',
+      pixel_ratio: '2',
+      current_url: `${ZAI_API_BASE}/c/${chatId}`,
+      pathname: `/c/${chatId}`,
+      search: '',
+      hash: '',
+      host: 'chat.z.ai',
+      hostname: 'chat.z.ai',
+      protocol: 'https:',
+      referrer: '',
+      title: 'Z.ai - Free AI Chatbot & Agent powered by GLM-5 & GLM-4.7',
+      timezone_offset: '-480',
+      local_time: new Date().toISOString(),
+      utc_time: new Date().toUTCString(),
+      is_mobile: 'false',
+      is_touch: 'false',
+      max_touch_points: '0',
+      browser_name: 'Chrome',
+      os_name: 'Mac OS',
+      signature_timestamp: String(timestamp),
+    })
+
+    const response = await axios.post(
+      `${ZAI_API_BASE}/api/v2/chat/completions?${queryParams.toString()}`,
+      requestBody,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          ...FAKE_HEADERS,
+          'X-Signature': signature,
+          'X-FE-Version': X_FE_VERSION,
+          'Cookie': `token=${token}`,
+          Referer: `${ZAI_API_BASE}/c/${chatId}`,
+          Priority: 'u=1, i',
+        },
+        responseType: 'stream',
+        timeout: 120000,
+        validateStatus: () => true,
+      }
+    )
+
+    console.log('[Z.ai] Response status:', response.status)
+    if (response.status !== 200) {
+      console.log('[Z.ai] Request body:', JSON.stringify(requestBody, null, 2))
+      console.log('[Z.ai] Signature:', signature)
+      console.log('[Z.ai] Timestamp:', timestamp)
+      console.log('[Z.ai] RequestId:', requestId)
+      console.log('[Z.ai] UserId:', userId)
+      if (response.data && typeof response.data.on === 'function') {
+        const chunks: Buffer[] = []
+        response.data.on('data', (chunk: Buffer) => chunks.push(chunk))
+        await new Promise<void>((resolve) => {
+          response.data.on('end', () => resolve())
+          response.data.on('error', () => resolve())
+        })
+        const errorBody = Buffer.concat(chunks).toString('utf8')
+        console.log('[Z.ai] Error response body:', errorBody)
+      } else if (response.data) {
+        console.log('[Z.ai] Error response data:', JSON.stringify(response.data, null, 2))
+      }
+    }
+
+    return { response, chatId, requestId }
+  }
+
   static isZaiProvider(provider: Provider): boolean {
     return provider.id === 'zai' || provider.apiEndpoint.includes('z.ai') || provider.apiEndpoint.includes('chat.z.ai')
   }
