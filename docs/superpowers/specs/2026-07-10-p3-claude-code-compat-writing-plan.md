@@ -186,3 +186,73 @@ Stop and split a follow-up if:
 - Claude Code requires a broader Anthropic API surface beyond `/v1/messages`.
 - A provider model is truly unavailable despite correct route behavior.
 - Fixing Claude Code would require bypassing the shared OpenAI-compatible tool runtime.
+
+## Acceptance Run: 2026-07-11
+
+Status: **ACCEPTED for the tested Claude Code compatibility surface**.
+
+Deterministic route gate:
+
+```powershell
+node --test tests/routes/anthropic-compatibility.test.ts
+```
+
+Result: **PASS, 11/11**. Covered text conversion, Anthropic `tools[].input_schema` preservation, assistant `tool_use` to OpenAI `tool_calls`, user `tool_result` to OpenAI `tool` messages, OpenAI non-stream `tool_calls` back to Anthropic `tool_use`, stream event ordering with `input_json_delta`, typed model/provider errors, model discovery routes, qualified provider/model ids, and Claude base URL aliases.
+
+OpenCode prerequisite gate:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Result: **PASS, 251/251**.
+
+Raw Anthropic Messages HTTP smoke:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8081/v1/messages' ...
+```
+
+Result: **PASS**. `qwen/Qwen3.7-Max` returned a valid Anthropic message object with `content: [{ type: "text", text: "CLAUDE_COMPAT_TEXT_OK" }]` and `stop_reason: "end_turn"`.
+
+Claude Code CLI text smoke:
+
+```powershell
+claude -p --bare --model 'qwen/Qwen3.7-Max' --tools "" --no-session-persistence --output-format text 'Reply with exactly CLAUDE_CLI_COMPAT_OK'
+```
+
+Result: **PASS**. Output was exactly:
+
+```text
+CLAUDE_CLI_COMPAT_OK
+```
+
+Claude Code CLI tool-use smoke, `Read`:
+
+```powershell
+claude -p --bare --verbose --model 'qwen/Qwen3.7-Max' --tools Read --permission-mode bypassPermissions --no-session-persistence --output-format stream-json 'Use the Read tool to read tests/agent-capability/input.txt, then answer only the first line prefixed with FIRST_LINE='
+```
+
+Result: **PASS**. The stream showed `tools:["Read"]`, an assistant `tool_use` named `Read`, a user `tool_result` carrying `tests/agent-capability/input.txt`, and final result:
+
+```text
+FIRST_LINE=Chat2API Agent Capability Probe
+```
+
+Claude Code CLI tool-use smoke, `Bash`:
+
+```powershell
+claude -p --bare --verbose --model 'qwen/Qwen3.7-Max' --tools Bash --permission-mode bypassPermissions --no-session-persistence --output-format stream-json 'Use Bash to run: pwd. Then answer only BASH_OK if the command succeeded.'
+```
+
+Result: **PASS**. The stream showed `tools:["Bash"]`, an assistant `tool_use` named `Bash`, a user `tool_result` with stdout `/e/Chat2API`, and final result:
+
+```text
+BASH_OK
+```
+
+Acceptance notes:
+
+- The original user-visible symptom ("selected model may not exist") did not reproduce in the text, HTTP, Read, or Bash smoke tests for `qwen/Qwen3.7-Max`.
+- The tested Claude Code tool loop preserves structured `tool_use` / `tool_result` turns through Chat2API instead of flattening them to prose.
+- This run did not individually validate every Claude Code built-in or MCP tool name such as `NotebookEdit`, `TaskCreate`, `CronCreate`, or CodeGraph MCP commands. Those depend on the Claude Code client session's enabled tool/MCP configuration. The compatibility claim here is that Chat2API's Anthropic route can carry the tool-use protocol correctly; each optional tool family still needs its own client-side availability check when enabled.

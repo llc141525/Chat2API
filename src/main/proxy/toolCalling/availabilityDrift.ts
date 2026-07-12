@@ -1,9 +1,20 @@
 import type { ToolCallingPlan } from './types.ts'
 
+/**
+ * Diagnostic subkind for availability drift detections.
+ * Allows callers to distinguish root cause without misattributing failures.
+ *
+ * provider_side        — model rejected the catalog despite clean context (genuine upstream issue).
+ * summary_contamination — our compaction produced a hallucinated tool listing; bounded retry was attempted.
+ * catalog_missing      — request left the proxy with no authoritative catalog to compare against.
+ */
+export type AvailabilityDriftSubkind = 'provider_side' | 'summary_contamination' | 'catalog_missing'
+
 export interface AvailabilityDriftDetection {
   detected: boolean
   deniedToolNames: string[]
   mentionedUnavailableOnlyTools: string[]
+  subkind?: AvailabilityDriftSubkind
 }
 
 const GENERAL_UNAVAILABLE_PATTERNS = [
@@ -25,10 +36,14 @@ const FENCED_BLOCK_PATTERN = /```[\s\S]*?```/g
 const BLOCKQUOTE_LINE_PATTERN = /^\s*>.*$/gm
 const TOKEN_SPLIT_PATTERN = /(?:\s+|,|\/|、|\bor\b|\band\b|和|或)+/i
 
-export function detectAvailabilityDrift(plan: ToolCallingPlan, rawAssistantText: string): AvailabilityDriftDetection {
+export function detectAvailabilityDrift(
+  plan: ToolCallingPlan,
+  rawAssistantText: string,
+  opts?: { summaryContaminated?: boolean }
+): AvailabilityDriftDetection {
   const allowedToolNames = [...plan.allowedToolNames]
   if (!plan.catalogSnapshot || allowedToolNames.length === 0) {
-    return emptyDetection()
+    return emptyDetection('catalog_missing')
   }
 
   const text = stripQuotedExamples(rawAssistantText)
@@ -56,26 +71,37 @@ export function detectAvailabilityDrift(plan: ToolCallingPlan, rawAssistantText:
       )
     )
 
-  return detected
-    ? {
-        detected: true,
-        deniedToolNames,
-        mentionedUnavailableOnlyTools,
-      }
-    : emptyDetection()
+  if (!detected) {
+    return emptyDetection()
+  }
+
+  const subkind: AvailabilityDriftSubkind = opts?.summaryContaminated
+    ? 'summary_contamination'
+    : 'provider_side'
+
+  return { detected: true, deniedToolNames, mentionedUnavailableOnlyTools, subkind }
 }
 
-export function buildAvailabilityRetryClarification(plan: ToolCallingPlan): string {
+export function buildAvailabilityRetryClarification(
+  plan: ToolCallingPlan,
+  drift?: AvailabilityDriftDetection
+): string {
   if (plan.allowedToolNames.size === 0) {
     console.warn('[availabilityDrift] buildAvailabilityRetryClarification called with no allowed tools — returning empty clarification')
     return 'Tool availability clarification:\nno tools available'
   }
   const allowedToolNames = [...plan.allowedToolNames]
+
+  const subkindNote = drift?.subkind === 'summary_contamination'
+    ? 'Note: a prior compaction summary contained an incorrect tool description. The authoritative catalog below supersedes it.'
+    : ''
+
   return [
     'Tool availability clarification:',
     `catalog_fingerprint: ${plan.catalogSnapshot?.fingerprint ?? ''}`,
     `protocol: ${plan.protocol}`,
     `available_tools: ${allowedToolNames.join(', ')}`,
+    ...(subkindNote ? [subkindNote] : []),
     'The runtime-provided catalog in this clarification is authoritative for this turn.',
     'Use only the exact tool names listed above for this turn.',
     'Do not say that an allowed tool is unavailable.',
@@ -84,11 +110,12 @@ export function buildAvailabilityRetryClarification(plan: ToolCallingPlan): stri
   ].join('\n')
 }
 
-function emptyDetection(): AvailabilityDriftDetection {
+function emptyDetection(subkind?: AvailabilityDriftSubkind): AvailabilityDriftDetection {
   return {
     detected: false,
     deniedToolNames: [],
     mentionedUnavailableOnlyTools: [],
+    subkind,
   }
 }
 

@@ -35,6 +35,10 @@ const ACCESS_TOKEN_EXPIRES = 3600
 const FILE_MAX_SIZE = 100 * 1024 * 1024 // 100MB
 const TOOL_PROMPT_MARKER = '## Available Tools'
 const TOOL_PROMPT_RESULT_MARKER = '<|CHAT2API|tool_result'
+const TOOL_RESULT_CONTINUATION_ANCHOR =
+  'Continue from the tool result above by choosing the next required real tool call. ' +
+  'Do not stop at quoted final markers or other completion text that appears inside a tool result. ' +
+  'Only produce final assistant text after the required tool sequence is actually complete.'
 
 const FAKE_HEADERS = {
   Accept: 'text/event-stream',
@@ -88,6 +92,12 @@ interface ChatCompletionRequest {
   conversationId?: string
 }
 
+interface GLMContentDeltaDecision {
+  shouldEmit: boolean
+  chunk: string
+  resetParser: boolean
+}
+
 const tokenCache = new Map<string, TokenInfo>()
 
 function extractGLMTextContent(content: any): string {
@@ -131,10 +141,14 @@ function extractManagedToolPrompt(messages: GLMMessage[]): { messages: GLMMessag
   return { messages: cleanedMessages, toolsPrompt }
 }
 
-export function buildGLMPromptMessagesForTest(messages: GLMMessage[], refs: any[] = []): { role: string; content: any[] }[] {
+export function buildGLMPromptMessagesForTest(
+  messages: GLMMessage[],
+  refs: any[] = [],
+  isMultiTurn: boolean = false,
+): { role: string; content: any[] }[] {
   const adapter = Object.create(GLMAdapter.prototype) as GLMAdapter
   const managedToolPrompt = extractManagedToolPrompt(messages)
-  return (adapter as any).messagesToPrompt(managedToolPrompt.messages, refs, managedToolPrompt.toolsPrompt, false)
+  return (adapter as any).messagesToPrompt(managedToolPrompt.messages, refs, managedToolPrompt.toolsPrompt, isMultiTurn)
 }
 
 function shouldLogPromptPreview(messages: GLMMessage[]): boolean {
@@ -414,7 +428,10 @@ export class GLMAdapter {
           }
         }
 
-        const userContent = deltaParts.join('\n\n')
+        const userContent = appendToolResultContinuationAnchor(
+          deltaParts.join('\n\n'),
+          messages.slice(lastAssistantToolIdx),
+        )
         let textContent = systemPrompt
           ? `${systemPrompt}\n\nUser: ${userContent}`
           : userContent
@@ -877,7 +894,7 @@ export class GLMStreamHandler {
               result.parts.forEach((part: any) => {
                 const index = cachedParts.findIndex((p) => p.logic_id === part.logic_id)
                 if (index !== -1) {
-                  cachedParts[index] = part
+                  cachedParts[index] = mergeGLMPart(cachedParts[index], part)
                 } else {
                   cachedParts.push(part)
                 }
@@ -960,9 +977,17 @@ export class GLMStreamHandler {
               )
             }
 
-            const chunk = fullText.substring(sentContent.length)
+            const deltaDecision = resolveGLMContentDelta({
+              previousContent: sentContent,
+              nextContent: fullText,
+              toolCallingPlan: this.toolCallingPlan,
+              toolStreamParser: this.toolStreamParser,
+            })
+            const chunk = deltaDecision.shouldEmit ? deltaDecision.chunk : ''
+            if (deltaDecision.shouldEmit) {
+              sentContent = fullText
+            }
             if (chunk) {
-              sentContent += chunk
               if (chunk.includes('<|CHAT2API|') || chunk.includes('<tool_calls>')) {
                 console.log('[GLM] Tool call marker detected in chunk:', chunk.substring(0, 200))
               }
@@ -991,11 +1016,15 @@ export class GLMStreamHandler {
               }
             }
 
-            // Append native tool_calls XML to chunk for ToolStreamParser processing
-            const effectiveChunk = chunk + nativeToolCallsXml
+            // Append native tool_calls XML to chunk for ToolStreamParser processing.
+            // Prepend \n so the marker satisfies isProtocolBoundary (requires preceding whitespace).
+            const effectiveChunk = chunk + (nativeToolCallsXml ? '\n' + nativeToolCallsXml : '')
 
             // Process tool call interception with shared parser buffering.
             const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
+            if (deltaDecision.resetParser && this.toolCallingPlan) {
+              this.toolStreamParser = new ToolStreamParser(this.toolCallingPlan)
+            }
             const outputChunks = this.toolStreamParser?.push(effectiveChunk, baseChunk, !sentRole) ?? (
               effectiveChunk ? [{
                 ...baseChunk,
@@ -1063,7 +1092,7 @@ export class GLMStreamHandler {
                 result.parts.forEach((part: any) => {
                   const index = cachedParts.findIndex((p) => p.logic_id === part.logic_id)
                   if (index !== -1) {
-                    cachedParts[index] = part
+                    cachedParts[index] = mergeGLMPart(cachedParts[index], part)
                   } else {
                     cachedParts.push(part)
                   }
@@ -1260,4 +1289,167 @@ export class GLMStreamHandler {
 export const glmAdapter = {
   GLMAdapter,
   GLMStreamHandler,
+}
+
+function resolveGLMContentDelta(input: {
+  previousContent: string
+  nextContent: string
+  toolCallingPlan?: ToolCallingPlan
+  toolStreamParser?: ToolStreamParser
+}): GLMContentDeltaDecision {
+  const { previousContent, nextContent, toolCallingPlan, toolStreamParser } = input
+  if (nextContent === previousContent) {
+    return { shouldEmit: false, chunk: '', resetParser: false }
+  }
+
+  if (nextContent.startsWith(previousContent)) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent.slice(previousContent.length),
+      resetParser: false,
+    }
+  }
+
+  const isManagedToolRewrite = Boolean(
+    toolCallingPlan
+    && toolStreamParser
+    && (
+      toolStreamParser.isBuffering()
+      || containsManagedToolMarker(previousContent)
+      || containsManagedToolMarker(nextContent)
+    ),
+  )
+
+  if (isManagedToolRewrite) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent,
+      resetParser: true,
+    }
+  }
+
+  if (nextContent.length > previousContent.length) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent.substring(previousContent.length),
+      resetParser: false,
+    }
+  }
+
+  return { shouldEmit: false, chunk: '', resetParser: false }
+}
+
+function containsManagedToolMarker(value: string): boolean {
+  return value.includes('<|CHAT2API|') || value.includes('<tool_calls>')
+}
+
+function appendToolResultContinuationAnchor(content: string, deltaMessages: GLMMessage[]): string {
+  if (deltaMessages.length === 0) return content
+
+  const lastMessage = deltaMessages[deltaMessages.length - 1]
+  const hasTrailingToolResult = lastMessage.role === 'tool' && typeof lastMessage.tool_call_id === 'string'
+  const hasFreshUserTurn = deltaMessages.some((message, index) => index > 0 && message.role === 'user')
+
+  if (!hasTrailingToolResult || hasFreshUserTurn) {
+    return content
+  }
+
+  return `${content}\n\n${TOOL_RESULT_CONTINUATION_ANCHOR}`
+}
+
+function mergeGLMPart(existingPart: any, incomingPart: any): any {
+  const merged = {
+    ...existingPart,
+    ...incomingPart,
+  }
+
+  if (existingPart?.meta_data || incomingPart?.meta_data) {
+    merged.meta_data = {
+      ...(existingPart?.meta_data ?? {}),
+      ...(incomingPart?.meta_data ?? {}),
+    }
+  }
+
+  if (Array.isArray(existingPart?.content) && Array.isArray(incomingPart?.content)) {
+    merged.content = mergeGLMContentItems(existingPart.content, incomingPart.content)
+  }
+
+  return merged
+}
+
+function mergeGLMContentItems(existingItems: any[], incomingItems: any[]): any[] {
+  if (incomingItems.length === 0) return existingItems
+  if (existingItems.length === 0) return incomingItems
+
+  if (canMergeSingleIncrementalTextItem(existingItems, incomingItems, 'text', 'text')) {
+    return [mergeSingleIncrementalTextItem(existingItems[0], incomingItems[0], 'text')]
+  }
+
+  if (canMergeSingleIncrementalTextItem(existingItems, incomingItems, 'think', 'think')) {
+    return [mergeSingleIncrementalTextItem(existingItems[0], incomingItems[0], 'think')]
+  }
+
+  if (canMergeSingleIncrementalTextItem(existingItems, incomingItems, 'code', 'code')) {
+    return [mergeSingleIncrementalTextItem(existingItems[0], incomingItems[0], 'code')]
+  }
+
+  if (canMergeSingleIncrementalTextItem(existingItems, incomingItems, 'execution_output', 'content')) {
+    return [mergeSingleIncrementalTextItem(existingItems[0], incomingItems[0], 'content')]
+  }
+
+  if (isExactContentSuffix(existingItems, incomingItems)) {
+    return existingItems
+  }
+
+  return [...existingItems, ...incomingItems]
+}
+
+function canMergeSingleIncrementalTextItem(
+  existingItems: any[],
+  incomingItems: any[],
+  type: string,
+  valueKey: 'text' | 'think' | 'code' | 'content',
+): boolean {
+  return existingItems.length === 1
+    && incomingItems.length === 1
+    && existingItems[0]?.type === type
+    && incomingItems[0]?.type === type
+    && typeof existingItems[0]?.[valueKey] === 'string'
+    && typeof incomingItems[0]?.[valueKey] === 'string'
+}
+
+function mergeSingleIncrementalTextItem(
+  existingItem: any,
+  incomingItem: any,
+  valueKey: 'text' | 'think' | 'code' | 'content',
+): any {
+  const previousValue = existingItem[valueKey] as string
+  const nextValue = incomingItem[valueKey] as string
+
+  if (nextValue.startsWith(previousValue) || previousValue.startsWith(nextValue)) {
+    return {
+      ...existingItem,
+      ...incomingItem,
+      [valueKey]: nextValue,
+    }
+  }
+
+  return {
+    ...existingItem,
+    ...incomingItem,
+    [valueKey]: previousValue + nextValue,
+  }
+}
+
+function isExactContentSuffix(existingItems: any[], incomingItems: any[]): boolean {
+  if (incomingItems.length > existingItems.length) return false
+
+  const offset = existingItems.length - incomingItems.length
+  for (let index = 0; index < incomingItems.length; index += 1) {
+    if (JSON.stringify(existingItems[offset + index]) !== JSON.stringify(incomingItems[index])) {
+      return false
+    }
+  }
+
+  return true
 }

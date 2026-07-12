@@ -40,6 +40,7 @@ export interface NormalizedToolResult {
 }
 
 export type ToolCatalogSource = 'current_request' | 'session_catalog' | 'prompt_embedded' | 'restored_from_history' | 'none'
+export type SessionCatalogPolicy = 'reuse-subset-ok' | 'restore-only-when-empty'
 
 export type ToolContractSourceStep =
   | 'current_request'
@@ -51,6 +52,14 @@ export type ToolContractSourceStep =
 export type ToolContractHistoryMode = 'openai_native' | 'managed_protocol'
 
 export type EmptyOutputPolicy = 'diagnose_and_fail' | 'pass_through_without_tool_semantics'
+export type ManagedToolSupportStatus = 'experimental' | 'accepted' | 'disabled'
+export type ProviderManagedTransport =
+  | 'openai_chat_completions'
+  | 'grpc_web_stream'
+  | 'polling_stream'
+  | 'http2_stream'
+  | 'provider_chat_api'
+  | 'unknown'
 
 export type ProviderTurnOutcome =
   | 'content'
@@ -158,12 +167,16 @@ export interface ToolCallDiagnostics {
   availabilityRetryResult?: 'skipped' | 'attempted' | 'succeeded' | 'failed'
   deniedToolNames?: string[]
   mentionedUnavailableOnlyTools?: string[]
+  providerManagedStatus?: ManagedToolSupportStatus
+  providerManagedTransport?: ProviderManagedTransport
+  providerRiskControlCaveats?: string[]
 }
 
 export interface AvailabilityRetryRequest {
   type: 'availability_retry'
   catalogFingerprint: string
   clarification: string
+  subkind?: 'provider_side' | 'summary_contamination' | 'catalog_missing'
 }
 
 export interface ToolCallingPlan {

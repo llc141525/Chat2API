@@ -194,7 +194,8 @@ test('DeepSeek provider config uses Web 2.0 browser headers', () => {
 })
 
 test('GLM, Kimi, and MiniMax built-in default models match current web providers', () => {
-  assert.deepEqual(glmConfig.supportedModels, ['GLM-5.1'])
+  assert.deepEqual(glmConfig.supportedModels, ['GLM-5.2', 'GLM-5.1'])
+  assert.equal(glmConfig.modelMappings?.['GLM-5.2'], 'glm-5.2')
   assert.equal(glmConfig.modelMappings?.['GLM-5.1'], 'glm-5.1')
 
   assert.deepEqual(kimiConfig.supportedModels, ['Kimi-K2.6'])
@@ -370,7 +371,7 @@ test('Z.ai default models match the latest chat.z.ai HAR model ids', () => {
   assert.match(zaiAdapterSource, /'glm-5\.1': 'GLM-5\.1'/)
   assert.match(zaiAdapterSource, /'glm-5v-turbo': 'GLM-5v-Turbo'/)
   assert.match(zaiAdapterSource, /'GLM-5V-Turbo': 'GLM-5v-Turbo'/)
-  assert.match(zaiAdapterSource, /const X_FE_VERSION = 'prod-fe-1\.1\.37'/)
+  assert.match(zaiAdapterSource, /const X_FE_VERSION = 'prod-fe-1\.1\.68'/)
   assert.match(zaiAdapterSource, /'X-Region': 'domestic'/)
   assert.match(zaiAdapterSource, /captcha_verify_param/)
   assert.match(zaiAdapterSource, /new URLSearchParams\(\{[\s\S]*token,/)
@@ -412,7 +413,7 @@ test('built-in prompt-tool stream handlers receive managed parser plans', () => 
   const forwardQwenAiStart = forwarderSource.indexOf('private async forwardQwenAi')
   const forwardQwenAiEnd = forwarderSource.indexOf('private async forwardZai')
   const forwardQwenAiSource = forwarderSource.slice(forwardQwenAiStart, forwardQwenAiEnd)
-  assert.match(forwardQwenAiSource, /new QwenAiStreamHandler\(actualModel, undefined, transformed\.plan\)/)
+  assert.match(forwardQwenAiSource, /new QwenAiStreamHandler\(actualModel, undefined, transformed\.plan/)
 
   const forwardMiniMaxStart = forwarderSource.indexOf('private async forwardMiniMax')
   const forwardMiniMaxEnd = forwarderSource.indexOf('private async forwardMimo')
@@ -432,8 +433,8 @@ test('built-in prompt-tool stream handlers receive managed parser plans', () => 
     ['Perplexity', 'src/main/proxy/adapters/perplexity-stream.ts'],
   ] as const) {
     const source = readFileSync(join(root, path), 'utf8')
-    assert.match(source, /import \{ ToolStreamParser \} from '\.\.\/toolCalling\/ToolStreamParser'/, label)
-    assert.match(source, /import type \{ ToolCallingPlan \} from '\.\.\/toolCalling\/types'/, label)
+    assert.match(source, /import \{ ToolStreamParser \} from '\.\.\/toolCalling\/ToolStreamParser(\.ts)?'/, label)
+    assert.match(source, /import type \{ ToolCallingPlan \} from '\.\.\/toolCalling\/types(\.ts)?'/, label)
     assert.match(source, /private toolStreamParser\?: ToolStreamParser/, label)
     assert.match(source, /new ToolStreamParser\(toolCallingPlan\)/, label)
     assert.match(source, /this\.toolStreamParser\.push\(/, label)
@@ -462,10 +463,14 @@ test('Anthropic Messages compatibility routes are registered', () => {
   assert.match(routesIndexSource, /anthropicRouter/)
   assert.match(serverSource, /POST \/anthropic\/v1\/messages/)
   assert.match(serverSource, /POST \/v1\/messages/)
+  assert.match(serverSource, /POST \/v1\/v1\/messages/)
+  assert.match(serverSource, /GET \/v1\/v1\/models/)
+  assert.match(serverSource, /GET \/v1\/v1\/models\/:model/)
   assert.match(serverSource, /X-API-Key, x-api-key, anthropic-version, anthropic-beta/)
   assert.match(serverSource, /ctx\.get\('x-api-key'\)/)
   assert.match(anthropicSource, /router\.post\('\/anthropic\/v1\/messages'/)
   assert.match(anthropicSource, /router\.post\('\/v1\/messages'/)
+  assert.match(anthropicSource, /router\.post\('\/v1\/v1\/messages'/)
   assert.match(anthropicSource, /anthropicToolToOpenAI/)
   assert.match(anthropicSource, /openAIResponseToAnthropic/)
 })
@@ -586,10 +591,10 @@ test('Mimo model names and conversation flow match Xiaomi AI Studio web requests
 
   assert.match(forwardMimoSource, /model:\s*actualModel/)
   assert.doesNotMatch(forwardMimoSource, /model:\s*request\.model/)
-  assert.match(forwardMimoSource, /const transformed = this\.transformRequestForPromptToolUse\(request, provider\)/)
+  assert.match(forwardMimoSource, /const transformed = this\.transformRequestForPromptToolUse\([\s\S]*?this\.buildToolCatalogSessionKey/s)
   assert.match(forwardMimoSource, /messages:\s*transformedRequest\.messages/)
   assert.match(forwardMimoSource, /new MimoStreamHandler\(actualModel, conversationId, 'separate', transformed\.plan\)/)
-  assert.match(forwardMimoSource, /this\.applyToolCallsToResponse\(.*transformed/s)
+  assert.match(forwardMimoSource, /this\.inspectManagedNonStreamOutput\(parsedResult, transformed/)
 
   const mimoAdapterSource = readFileSync(
     join(root, 'src/main/proxy/adapters/mimo.ts'),
@@ -656,9 +661,9 @@ test('forwarder delegates managed tool transformation to ToolCallingEngine', () 
     'utf8',
   )
 
-  assert.match(source, /import \{ ToolCallingEngine \} from '\.\/toolCalling\/ToolCallingEngine'/)
+  assert.match(source, /import \{ ToolCallingEngine \} from '\.\/toolCalling\/ToolCallingEngine(\.ts)?'/)
   assert.match(source, /engine\.transformRequest\(/)
-  assert.match(source, /engine\.applyNonStreamResponse\(result, transformed\.plan\)/)
+  assert.match(source, /engine\.applyNonStreamResponse\(result, transformed\.plan/)
   assert.doesNotMatch(source, /promptInjectionService\.process\(/)
   assert.doesNotMatch(source, /transformMCPToolProtocol\(/)
   assert.doesNotMatch(source, /generateToolPrompt\(/)
@@ -694,6 +699,18 @@ test('DeepSeek forwarder preserves requested model aliases for response parsing 
   )
 
   assert.match(source, /new DeepSeekStreamHandler\(\s*actualModel,[\s\S]*transformed\.plan,\s*request\.model\s*\)/)
+})
+
+test('DeepSeek forwarder maps upstream JSON envelopes like muted accounts before stream parsing', () => {
+  const source = readFileSync(
+    join(root, 'src/main/proxy/forwarder.ts'),
+    'utf8',
+  )
+
+  assert.match(source, /readDeepSeekImmediateProviderError/)
+  assert.match(source, /contentType\.includes\('application\/json'\)/)
+  assert.match(source, /DeepSeek provider error: \$\{bizMsg\} \(account is muted\)/)
+  assert.match(source, /status:\s*403/)
 })
 
 test('active source no longer exposes DS2API or DSML tool protocol markers', () => {

@@ -7,7 +7,7 @@
     "name": "Chat2API Team",
     "email": "support@chat2api.com"
   },
-  "homepage": "https://github.com/chat2api/Chat2API-Manager",
+  "homepage": "https://github.com/llc141525/Chat2API",
   "license": "GPL-3.0",
   "scripts": {
     "dev": "bash scripts/dev.sh",
@@ -249,7 +249,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "xiaoY233",
+      "owner": "llc141525",
       "repo": "Chat2API"
     }
   }

@@ -271,3 +271,28 @@ Stop and split a follow-up if:
 - Fixing Qwen requires provider request format redesign beyond catalog/tool runtime.
 - A provider natively supports a better structured tool API and should move to a separate provider profile.
 - A compatibility change would violate the single-owner prompt injection invariant.
+
+## Reopening: 2026-07-11 — Qwen Intermittent Malformed + Compaction Audit
+
+The 2026-07-10 acceptance is superseded for two surfaces. Manual reuse on 2026-07-11 surfaced:
+
+1. **Intermittent Qwen `malformed_tool_output`** — the terminal outcome from `outputInspection.ts:172` reproduces sporadically on Qwen turns. Deterministic tests did not catch it and one-shot probes are not enough evidence.
+2. **Context management summary compaction has not been re-verified end-to-end** for multi-turn tool exchanges against the P1 v2 prompt-embedded catalog path. Compaction is the load-bearing path for long OpenCode / Claude Code sessions.
+
+Follow-up plan: `2026-07-11-p0-p1-followup-plan.md` — Tracks B and C.
+
+Scope added to P1 in the follow-up (Track B — Qwen intermittent malformed):
+
+- Decide per specific root cause between (a) parser repair for benign artifacts (whitespace, control chars, order-tolerant assembly) with visible per-repair-path counters, and (b) a bounded, typed one-shot parse retry mirroring the availability drift retry mechanic. Do not silently swallow the classification.
+- Real Qwen probe gate widened to **five consecutive** `CAPABILITY_PROBE_PASS` runs so intermittent flips are visible.
+
+Scope added to P1 in the follow-up (Track C — context management compaction audit):
+
+- Preserve original insertion order across every strategy (`SlidingWindowStrategy`, `TokenLimitStrategy`, `SummaryStrategy`). Reassembling as `[...protectedMessages, ...trimableMessages]` moves protected content to the front of the array regardless of its original position and is the root of most compaction pathologies. Fix by dropping non-protected messages in place, not by role-bucketing.
+- Route `containsToolDefinitions` through the same signature registry the prompt-embedded extractor uses, so any client signature that reaches the extractor also protects its tool-definition message from compaction.
+- Guarantee `toolSessionKey` propagation across compacted turns and expose a `catalogRescueByCompaction` diagnostic so the P1 v2 session-catalog rescue is provably running when compaction prunes the prompt-embedded block.
+- Distinguish `summary_success | summary_generator_missing | summary_generator_failed | summary_not_needed` as typed strategy result subkinds instead of hiding failure behind a console warning.
+- Add a `preserveToolDefinitionMessages` guardrail pass (mirroring `preserveToolExchangePairs`) that restores protected tool-definition messages if a strategy ever drops one — guardrail only; the strategies themselves must not drop them.
+- Add a long-conversation probe that exercises real sliding-window and summary compaction within a single OpenCode session.
+
+Original P1 main status: ACCEPTED for the same-session catalog reuse, MCP name survival, schema validation, and stream/non-stream parity paths. **REOPENED** for Qwen intermittent malformed and for context management compaction correctness. Do not close this reopening until the follow-up plan's acceptance criteria are met.

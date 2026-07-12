@@ -146,6 +146,15 @@ test('DeepSeek messagesToPrompt isMultiTurn: source preserves DeepSeek markers f
     assert.match(source, /formatToolResult/)
 })
 
+test('DeepSeek messagesToPrompt separates consecutive turns with a blank line', async () => {
+    const source = await readFile(join(__dirname, '..', '..', 'src/main/proxy/adapters/deepseek.ts'), 'utf8')
+
+    assert.match(
+      source,
+      /\.join\('\\n\\n'\)/,
+    )
+})
+
 // ---- GLM messagesToPrompt isMultiTurn ----
 
 test('GLM messagesToPrompt isMultiTurn: sends delta from last assistant tool_call onward', () => {

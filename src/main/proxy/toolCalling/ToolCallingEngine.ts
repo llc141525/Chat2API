@@ -97,8 +97,21 @@ export class ToolCallingEngine {
       toolSessionKey: toolSessionKey ?? requestId ?? null,
     })
     const shouldInjectPrompt = plan.shouldInjectPrompt
+    const profile = getProviderToolProfile(provider.id)
 
     if (plan.catalogSnapshot) {
+      console.log('[ToolCallingEngine] catalog resolution:', JSON.stringify({
+        requestId,
+        providerId: provider.id,
+        model: actualModel,
+        managedStatus: profile.managedToolSupportStatus,
+        managedTransport: profile.managedTransport,
+        riskControlCaveats: profile.providerRiskControlCaveats,
+        catalogSource: plan.catalogDiagnostics.source,
+        catalogFingerprint: plan.catalogSnapshot.fingerprint,
+        toolCount: plan.catalogSnapshot.allowedToolNames.length,
+        driftKinds: plan.catalogDiagnostics.driftKinds,
+      }))
       recordToolDiagnosticEvent({
         type: 'tool_catalog_resolved',
         requestId,
@@ -132,7 +145,6 @@ export class ToolCallingEngine {
       }
     }
 
-    const profile = getProviderToolProfile(provider.id)
     recordToolDiagnosticEvent({
       type: 'tool_contract_injected',
       requestId,
@@ -151,7 +163,11 @@ export class ToolCallingEngine {
     }
   }
 
-  applyNonStreamResponse(result: any, plan: ToolCallingPlan): AvailabilityRetryRequest | undefined {
+  applyNonStreamResponse(
+    result: any,
+    plan: ToolCallingPlan,
+    opts?: { summaryContaminated?: boolean }
+  ): AvailabilityRetryRequest | undefined {
     if (!plan.shouldParseResponse) return undefined
 
     const message = result?.choices?.[0]?.message
@@ -172,7 +188,7 @@ export class ToolCallingEngine {
   if (validation.status === 'plain_text') {
       plan.diagnostics.parserFormat = 'unknown'
       plan.diagnostics.parsedToolCallCount = 0
-      return maybeBuildAvailabilityRetry(message.content, plan)
+      return maybeBuildAvailabilityRetry(message.content, plan, opts)
     }
 
     if (validation.status === 'invalid_structure') {
@@ -297,12 +313,13 @@ function validateRepaired(
 function maybeBuildAvailabilityRetry(
   content: string,
   plan: ToolCallingPlan,
+  opts?: { summaryContaminated?: boolean }
 ): AvailabilityRetryRequest | undefined {
   if (!plan.availabilityRetryAllowed || !plan.catalogSnapshot) {
     return undefined
   }
 
-  const detection = detectAvailabilityDrift(plan, content)
+  const detection = detectAvailabilityDrift(plan, content, opts)
   if (!detection.detected) return undefined
 
   plan.diagnostics.availabilityDriftDetected = true
@@ -371,6 +388,7 @@ function maybeBuildAvailabilityRetry(
   return {
     type: 'availability_retry',
     catalogFingerprint: plan.catalogSnapshot.fingerprint,
-    clarification: buildAvailabilityRetryClarification(plan),
+    clarification: buildAvailabilityRetryClarification(plan, detection),
+    subkind: detection.subkind,
   }
 }

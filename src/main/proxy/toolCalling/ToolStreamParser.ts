@@ -18,6 +18,7 @@ export interface ToolStreamObservation {
   mentionedUnavailableOnlyTools: string[]
   suppressedMalformedToolOutput: boolean
   suppressedReason?: 'invalid_tool_name' | 'malformed_tool_output'
+  malformedDetails?: string
 }
 
 export class ToolStreamParser {
@@ -109,10 +110,13 @@ export class ToolStreamParser {
       this.observation.suppressedReason = parsed.invalidToolNames.length > 0
         ? 'invalid_tool_name'
         : 'malformed_tool_output'
+      if (parsed.malformedReason) {
+        this.observation.malformedDetails = parsed.malformedReason
+      }
       console.warn(
         `[ToolStreamParser] Dropping tool call buffer — invalid names: [${parsed.invalidToolNames.join(', ')}], ` +
         `allowed names: [${[...this.plan.allowedToolNames].join(', ')}], ` +
-        `raw matches: ${parsed.rawMatches.length > 0}`,
+        `raw matches: ${parsed.rawMatches.length > 0}, malformed reason: ${parsed.malformedReason ?? 'none'}`,
       )
       this.isBufferingToolCall = false
       this.buffer = ''
@@ -152,6 +156,9 @@ export class ToolStreamParser {
       this.observation.suppressedReason = parsed.invalidToolNames.length > 0
         ? 'invalid_tool_name'
         : 'malformed_tool_output'
+      if (parsed.malformedReason && !this.observation.malformedDetails) {
+        this.observation.malformedDetails = parsed.malformedReason
+      }
     }
 
     const shouldReleaseText = !this.emittedToolCall && !wasBufferingToolCall
@@ -177,6 +184,7 @@ export class ToolStreamParser {
       ...this.observation,
       deniedToolNames: [...this.observation.deniedToolNames],
       mentionedUnavailableOnlyTools: [...this.observation.mentionedUnavailableOnlyTools],
+      ...(this.observation.malformedDetails ? { malformedDetails: this.observation.malformedDetails } : {}),
     }
   }
 

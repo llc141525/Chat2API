@@ -224,6 +224,11 @@ export interface ProxyContext {
   startTime: number
   isStream: boolean
   clientIP?: string
+  toolCatalogSessionKey?: string
+  providerConversationSessionKey?: string
+  originalMessages?: ChatMessage[]
+  summaryContaminated?: boolean
+  summaryRetryAttempted?: boolean
 }
 
 /**

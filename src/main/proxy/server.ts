@@ -168,10 +168,15 @@ export class ProxyServer {
         endpoints: [
           'POST /v1/chat/completions',
           'GET /v1/models',
+          'GET /v1/v1/models',
           'GET /v1/models/:model',
+          'GET /v1/v1/models/:model',
+          'GET /anthropic/v1/models',
+          'GET /anthropic/v1/models/:model',
           'POST /v1/completions',
           'POST /anthropic/v1/messages',
           'POST /v1/messages',
+          'POST /v1/v1/messages',
         ],
       }
     })

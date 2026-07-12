@@ -12,12 +12,14 @@ Give the plan owner a single source of truth for what has been accepted, what ha
 
 | Track | Scope | Status | Blocker |
 |-------|-------|--------|---------|
-| P0 Swallowed replies | `outputInspection`, stream terminal accounting, post-tool-call locking | **ACCEPTED** | — |
-| P1 Tool & MCP reliability (main plan) | Catalog fallback, schema-aware assembly, MCP names, stream/non-stream parity | **ACCEPTED** | — |
+| P0 Swallowed replies | `outputInspection`, stream terminal accounting, post-tool-call locking | **REOPENED** (2026-07-11) | DeepSeek swallow-after-tool-use + compaction-induced swallow — see follow-up plan |
+| P1 Tool & MCP reliability (main plan) | Catalog fallback, schema-aware assembly, MCP names, stream/non-stream parity | **REOPENED** (2026-07-11) | Qwen intermittent `malformed_tool_output` + compaction ordering audit — see follow-up plan |
 | P1 Tool availability drift (v1 rework) | Streaming drift parity, retry clarification, extra denial phrases | **REJECTED** (historical) | Superseded by v2 |
 | P1 Tool availability drift (v2 rework) | Prompt-embedded catalog promotion | **ACCEPTED** | — |
 | P2 Angle-bracket leakage | ToolStreamParser, StreamGate, Qwen snapshot diffing | **ACCEPTED** | — |
-| P3 Claude Code Anthropic compatibility | `/v1/messages` route, tool block conversion, stream event order | **NOT STARTED** | Ready to start — P0/P1/P2 all accepted |
+| P0 + P1 follow-up (2026-07-11) | DeepSeek regression, Qwen intermittent malformed, compaction audit | **NOT STARTED** | New track — see `2026-07-11-p0-p1-followup-plan.md` |
+| P0 + P1 summary contamination (2026-07-11) | Summary input sanitization, injection architecture A/B, contamination detection + bounded retry, drift subkinds, long-conversation contamination probe | **NOT STARTED** | New track — see `2026-07-11-p0-p1-summary-contamination-plan.md` (evidence: `opencode诊断报告.md`) |
+| P3 Claude Code Anthropic compatibility | `/v1/messages` route, tool block conversion, stream event order | **HOLD** (2026-07-11) | Do not start until both 2026-07-11 follow-ups close; parent spec gates P3 on P0-P2 |
 
 ## What "ACCEPTED" Means Here
 
@@ -207,9 +209,31 @@ If a proposed fix requires violating any of these, escalate — do not merge.
 
 This dossier flips to "project accepted" only when all rows of the snapshot table read ACCEPTED. Remaining work:
 
-1. P3 Claude Code compatibility implementation and acceptance.
+1. P0 + P1 follow-up (2026-07-11) — DeepSeek regression, Qwen intermittent malformed, context management compaction audit. Reopens P0 (partial) and P1 main (partial).
+2. P0 + P1 summary contamination (2026-07-11) — summary generator leaks static configuration into narrative summaries; runtime injection then competes with hallucinated `system`-layer content. Reopens P0 (compaction-induced swallow) and P1 main (drift subkind semantics) further. See `2026-07-11-p0-p1-summary-contamination-plan.md`.
+3. P3 Claude Code compatibility implementation and acceptance — held until both follow-ups close.
 
-P0, P1 main, P1 v2 rework, and P2 are all accepted and are no longer blockers.
+P1 v2 rework and P2 remain accepted.
+
+## Reopening: 2026-07-11 — Manual Test Findings
+
+The 2026-07-10 acceptance run for P0 and P1 main was superseded on 2026-07-11 by manual reuse that surfaced three defects the automated gates did not catch:
+
+1. **DeepSeek swallow-after-tool-use** — same shape as the historical Qwen bug that P0 was designed to close for all managed providers. Qwen no longer reproduces; DeepSeek still does. Suspect surface identified: `src/main/proxy/adapters/deepseek-stream.ts` non-stream branch never invokes `ToolStreamParser`; `src/main/proxy/adapters/deepseek.ts` multi-turn history reconstruction has a "no tool anchor found" fallback that drops the tool contract.
+2. **Qwen intermittent `malformed_tool_output`** — the exact literal at `outputInspection.ts:172` reproduces sporadically. `ToolStreamParser.ts:108-154` marks parses malformed on partial failures; the intermittent flavor means the classifier is right about the outcome but there is no diagnostic detail (offset, fragment excerpt, schema mismatch kind) to reproduce with.
+3. **Context management summary compaction has not been re-verified end-to-end** since P1 Step 0 landed. Preliminary audit of `src/main/proxy/services/contextManagementService.ts` shows five concrete risks — most notably message reordering under compaction (all three strategies float protected messages to the front, potentially corrupting turn order) and no diagnostic distinction between summary success and summary generator failure.
+
+GLM 5.2 tool-call-count limit was reported at the same time and is explicitly out of scope per the plan owner.
+
+The follow-up plan (`2026-07-11-p0-p1-followup-plan.md`) breaks these into three tracks (A: DeepSeek, B: Qwen malformed, C: compaction audit) with concrete fix directions, test additions, and widened real probe gates (DeepSeek `1..3` consecutive passes; Qwen `1..5` consecutive passes; new long-conversation probe for compaction). Each track has its own acceptance criteria and must not weaken existing accepted invariants or tests.
+
+### Reopening addendum — Summary contamination (2026-07-11)
+
+Manual OpenCode + Qwen session captured in `opencode诊断报告.md` demonstrated a distinct, load-bearing compaction failure: the summarizer at `src/main/proxy/forwarder.ts:283-347` is fed the full unfiltered conversation (including prior assistant messages that enumerated tools and prior `system` messages carrying the prompt-embedded tool catalog). It produces a summary that faithfully restates the fabricated tool list as fact. At the next turn the summary is inserted as `role: 'system'` (`contextManagementService.ts:534-544`) alongside the authoritative runtime catalog — two competing `system` messages — and the model trusts the summary. The drift detector then fires `Provider refused the authoritative tool catalog for managed tool turn`, misdirecting the diagnosis toward the provider.
+
+The plan owner's architectural direction (recorded verbatim: *"摘要不应把 tools 系统 prompt 和 mcp 定义包括进去. 而应该在摘要后额外注入"*) becomes new invariant **INV-005 Config-vs-History Split** in the summary contamination plan. The plan defines five tracks: (A) input sanitization stripping tool-catalog signatures before the summarizer sees history; (B) an A/B between two injection shapes decided by real-machine data on Qwen and DeepSeek; (C) a contamination detector plus one bounded auto-retry to sliding-window on hit; (D) a drift-subkind rename separating `provider_side | summary_contamination | catalog_missing`; (E) a dedicated long-conversation contamination probe requiring three consecutive `CAPABILITY_PROBE_PASS` per provider.
+
+P3 remains on hold until both this contamination plan and the sibling follow-up close, per the parent spec's gating rule.
 
 ## Handoff To Implementing AI
 

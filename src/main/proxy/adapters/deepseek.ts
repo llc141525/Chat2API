@@ -391,7 +391,9 @@ export class DeepSeekAdapter {
         }
         return block.text
       })
-      .join('')
+      // Keep DeepSeek role markers adjacent to their own content, but separate
+      // consecutive turns so the managed tool contract does not run into the next user block.
+      .join('\n\n')
       .replace(/!\[.+\]\(.+\)/g, '')
   }
 

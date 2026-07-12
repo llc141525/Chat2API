@@ -5,6 +5,7 @@ import { createFileCatalogPersistence } from './catalogPersistence.ts'
 
 import type {
   NormalizedToolDefinition,
+  SessionCatalogPolicy,
   ToolCatalogDiagnostics,
   ToolCatalogDriftKind,
   ToolCatalogSnapshot,
@@ -17,6 +18,7 @@ export interface ToolCatalogResolveInput {
   promptEmbeddedTools?: NormalizedToolDefinition[]
   hasManagedToolHistory: boolean
   historyToolNames: string[]
+  sessionCatalogPolicy?: SessionCatalogPolicy
 }
 
 export interface ToolCatalogResolution {
@@ -49,6 +51,7 @@ export function createToolCatalogStore(persistence?: CatalogPersistenceStore): T
     const requestTools = normalizeTools(input.requestTools)
     const historyToolNames = canonicalToolNames(input.historyToolNames)
     const existing = input.sessionId ? sessions.get(input.sessionId)?.snapshot : undefined
+    const sessionCatalogPolicy = input.sessionCatalogPolicy ?? 'reuse-subset-ok'
 
     if (requestTools.length === 0) {
       // Session catalog wins for later turns of the same session
@@ -160,7 +163,7 @@ export function createToolCatalogStore(persistence?: CatalogPersistenceStore): T
       }
     }
 
-    if (shouldReuseSessionCatalog(existing, nextSnapshot)) {
+    if (shouldReuseSessionCatalog(existing, nextSnapshot, sessionCatalogPolicy)) {
       const snapshot = freezeSnapshot({
         ...existing,
         source: 'session_catalog',
@@ -350,8 +353,10 @@ function getBlockReason(
 function shouldReuseSessionCatalog(
   previous: ToolCatalogSnapshot | undefined,
   next: ToolCatalogSnapshot,
+  policy: SessionCatalogPolicy,
 ): boolean {
   if (!previous) return false
+  if (policy !== 'reuse-subset-ok') return false
   if (next.allowedToolNames.length >= previous.allowedToolNames.length) return false
 
   for (const tool of next.tools) {

@@ -1,0 +1,11 @@
+﻿{
+    "model":  "qwen/Qwen3.7-Max",
+    "shape":  "system-isolated",
+    "run":  1,
+    "exitCode":  0,
+    "pass":  true,
+    "summaryContaminationMentions":  0,
+    "fabricatedToolMentions":  0,
+    "outputDir":  "tests\\agent-capability\\results\\summary-injection-smoke\\system-isolated__qwen_Qwen3.7-Max__run1",
+    "promptPath":  "tests/agent-capability/long-conversation-contamination.md"
+}

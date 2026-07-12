@@ -245,6 +245,66 @@ test('GLM adapter moves managed XML tool prompt to the final instruction positio
   assert.match(text, /## Available Tools[\s\S]*<\|CHAT2API\|tool_calls>/)
 })
 
+test('GLM adapter adds a continuation anchor after trailing tool_result in multi-turn delta', () => {
+  const promptMessages = buildGLMPromptMessagesForTest([
+    { role: 'system', content: 'You are a coding assistant.' },
+    { role: 'user', content: 'Run the required long probe steps.' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_skill_0',
+          type: 'function',
+          function: { name: 'skill', arguments: '{"name":"long-conversation-probe"}' },
+        },
+      ],
+    },
+    {
+      role: 'tool',
+      tool_call_id: 'call_skill_0',
+      content: 'Step 1: use read. Step 2: use bash. Step 10: output the final marker assembled from LONG + CONVERSATION + PROBE + DONE with underscores.',
+    },
+  ] as any, [], true)
+
+  const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
+
+  assert.match(text, /LONG \+ CONVERSATION \+ PROBE \+ DONE/)
+  assert.match(text, /Continue from the tool result above by choosing the next required real tool call\./)
+  assert.match(text, /Only produce final assistant text after the required tool sequence is actually complete\./)
+})
+
+test('GLM adapter does not add the trailing tool_result continuation anchor when a fresh user turn exists', () => {
+  const promptMessages = buildGLMPromptMessagesForTest([
+    { role: 'system', content: 'You are a coding assistant.' },
+    { role: 'user', content: 'Initial instruction.' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_read_0',
+          type: 'function',
+          function: { name: 'default_api:read_file', arguments: '{"filePath":"tests/agent-capability/input.txt"}' },
+        },
+      ],
+    },
+    {
+      role: 'tool',
+      tool_call_id: 'call_read_0',
+      content: 'file body',
+    },
+    {
+      role: 'user',
+      content: 'Now summarize what changed.',
+    },
+  ] as any, [], true)
+
+  const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
+
+  assert.doesNotMatch(text, /Continue from the tool result above by choosing the next required real tool call\./)
+})
+
 test('Qwen: ToolCallingEngine produces managed_xml plan', () => {
   const engine = new ToolCallingEngine()
   const request: ChatCompletionRequest = {
@@ -587,6 +647,124 @@ test('GLM stream reparses cumulative snapshot when a managed marker was partiall
   assert.match(output, /"name":"default_api:read_file"/)
   assert.match(output, /"finish_reason":"tool_calls"/)
   assert.doesNotMatch(output, /_calls><\|CHAT2API\|invoke/)
+  assert.doesNotMatch(output, /Provider returned malformed tool output/)
+})
+
+test('GLM stream merges incremental same-logic_id tails instead of replacing the managed XML prefix', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-conv-incremental-tail-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-incremental-tail-1',
+        status: 'streaming',
+        content: [{
+          type: 'text',
+          text: '<|CHAT2API|tool_calls><|CHAT2API|invoke name="bash"><|CHAT2API|parameter name="command"><![CDATA[echo first',
+        }],
+      }],
+    }),
+    sseEvent({
+      conversation_id: 'glm-conv-incremental-tail-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-incremental-tail-1',
+        status: 'streaming',
+        content: [{
+          type: 'text',
+          text: ' && echo second]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+        }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-conv-incremental-tail-1', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"bash"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.doesNotMatch(output, /Provider returned malformed tool output/)
+  assert.doesNotMatch(output, /_calls><\|CHAT2API\|invoke/)
+})
+
+test('GLM stream reparses a rewritten managed XML snapshot instead of leaking a mid-marker suffix', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
+  const rewrittenSnapshot = `${standaloneInvokeXml.replace('</|CHAT2API|invoke>', '')}residue-residue`
+  const completedSnapshot = standaloneInvokeXml
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-conv-rewrite-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-rewrite-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: rewrittenSnapshot }],
+      }],
+    }),
+    sseEvent({
+      conversation_id: 'glm-conv-rewrite-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-rewrite-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: completedSnapshot }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-conv-rewrite-1', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"bash"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.doesNotMatch(output, /residue-residue/)
+  assert.doesNotMatch(output, /Provider returned malformed tool output/)
+  assert.doesNotMatch(output, /_calls><\|CHAT2API\|invoke/)
+})
+
+test('GLM stream reparses a rewritten shorter managed XML snapshot instead of leaking stale suffix state', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
+  const staleLongerSnapshot = `${standaloneInvokeXml} trailing-garbage`
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-conv-rewrite-2',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-rewrite-2',
+        status: 'streaming',
+        content: [{ type: 'text', text: staleLongerSnapshot }],
+      }],
+    }),
+    sseEvent({
+      conversation_id: 'glm-conv-rewrite-2',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-rewrite-2',
+        status: 'streaming',
+        content: [{ type: 'text', text: standaloneInvokeXml }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-conv-rewrite-2', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"bash"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.doesNotMatch(output, /trailing-garbage/)
   assert.doesNotMatch(output, /Provider returned malformed tool output/)
 })
 
@@ -958,8 +1136,8 @@ test('FIX: forwardGLM now uses transformRequestForPromptToolUse', async () => {
   assert.doesNotMatch(glmMethod, /managed_bracket/,
     'FIXED: no manual managed_bracket plan anymore')
 
-  // FIXED: applies tool calls to non-stream response
-  assert.match(glmMethod, /applyToolCallsToResponse/,
+  // FIXED: non-stream path still routes through ToolCallingEngine parsing, now via shared retry helper
+  assert.match(glmMethod, /retryManagedNonStreamResult|applyToolCallsToResponse/,
     'FIXED: applies ToolCallingEngine tool parsing for non-stream responses')
 })
 
@@ -975,7 +1153,7 @@ test('QWEN: forwardQwen correctly uses transformRequestForPromptToolUse', async 
   assert.match(qwenMethod, /transformRequestForPromptToolUse/,
     'Qwen correctly uses transformRequestForPromptToolUse')
 
-  assert.match(qwenMethod, /applyToolCallsToResponse/,
+  assert.match(qwenMethod, /retryManagedNonStreamResult|applyToolCallsToResponse/,
     'Qwen applies tool calls to non-stream response')
 })
 

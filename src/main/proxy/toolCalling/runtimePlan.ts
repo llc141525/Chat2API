@@ -3,6 +3,7 @@ import type { NormalizedClientToolRequest } from './clientAdapters/types.ts'
 import { resolveToolCatalog } from './catalog.ts'
 import { getProviderToolProfile } from './providerProfiles.ts'
 import type {
+  SessionCatalogPolicy,
   ToolCallingPlan,
   ToolCatalogSource,
   ToolContractSourceStep,
@@ -26,12 +27,17 @@ export function buildToolCallingRuntimePlan(input: {
   const forcedName = input.clientRequest.toolChoice.forcedName
 
   const isPromptEmbedded = input.clientRequest.toolSource === 'prompt_embedded'
+  const sessionCatalogPolicy: SessionCatalogPolicy =
+    input.toolSessionKey?.startsWith('claude:')
+      ? 'restore-only-when-empty'
+      : 'reuse-subset-ok'
   const catalogResolution = resolveToolCatalog({
     sessionId: input.toolSessionKey ?? null,
     requestTools: isPromptEmbedded ? [] : requestTools,
     promptEmbeddedTools: isPromptEmbedded ? requestTools : undefined,
     hasManagedToolHistory: hasExistingManagedXmlContext(input.messages),
     historyToolNames: extractManagedHistoryToolNames(input.messages),
+    sessionCatalogPolicy,
   })
   const catalogTools = catalogResolution.snapshot?.tools ?? []
   const catalogToolNames = new Set(catalogTools.map((tool) => tool.name))
@@ -93,9 +99,9 @@ export function buildToolCallingRuntimePlan(input: {
     forcedToolName: forcedName,
     catalogSnapshot: catalogResolution.snapshot,
     catalogDiagnostics: catalogResolution.diagnostics,
-    availabilityRetryAllowed,
-    contract,
-    diagnostics: {
+      availabilityRetryAllowed,
+      contract,
+      diagnostics: {
       requestId: input.requestId,
       turnId: contract.turnId,
       clientAdapterId: input.clientRequest.clientAdapterId,
@@ -113,12 +119,15 @@ export function buildToolCallingRuntimePlan(input: {
       allowedToolNames: [...allowedToolNames],
       catalogSource: catalogResolution.diagnostics.source,
       catalogFingerprint: catalogResolution.snapshot?.fingerprint,
-      catalogDriftKinds: catalogResolution.diagnostics.driftKinds,
-      catalogBlocked: catalogResolution.diagnostics.blocked,
-      toolSourceChain,
-      emptyOutputPolicy: contract.emptyOutputPolicy,
-    },
-  }
+        catalogDriftKinds: catalogResolution.diagnostics.driftKinds,
+        catalogBlocked: catalogResolution.diagnostics.blocked,
+        toolSourceChain,
+        emptyOutputPolicy: contract.emptyOutputPolicy,
+        providerManagedStatus: profile.managedToolSupportStatus,
+        providerManagedTransport: profile.managedTransport,
+        providerRiskControlCaveats: [...profile.providerRiskControlCaveats],
+      },
+    }
 }
 
 function getDisabledReason(

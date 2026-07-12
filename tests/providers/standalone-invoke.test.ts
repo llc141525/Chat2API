@@ -2,7 +2,7 @@
  * Stub tests for standalone <|CHAT2API|invoke> fix.
  * Verifies parser accepts invokes without outer <|CHAT2API|tool_calls> wrapper.
  */
-import { describe, test } from 'vitest'
+import { describe, test } from 'node:test'
 import assert from 'node:assert'
 import { Readable } from 'node:stream'
 import { gzipSync } from 'node:zlib'
@@ -32,6 +32,22 @@ function managedPlan(providerId: string): ToolCallingPlan {
     catalogSnapshot: undefined,
     catalogDiagnostics: { source: 'current_request', driftKinds: [], blocked: false },
     availabilityRetryAllowed: false,
+    contract: {
+      turnId: 'test-turn',
+      sessionId: null,
+      providerId,
+      model: 'test',
+      protocol: 'managed_xml',
+      snapshotFingerprint: null,
+      tools: [bashTool],
+      allowedToolNames: new Set(['bash']),
+      toolChoiceMode: 'auto',
+      shouldInjectPrompt: true,
+      shouldParseResponse: true,
+      historyMode: 'managed_protocol',
+      emptyOutputPolicy: 'diagnose_and_fail',
+      toolSourceChain: [],
+    },
     diagnostics: {
       requestId: 'test',
       clientAdapterId: 'standard-openai-tools',

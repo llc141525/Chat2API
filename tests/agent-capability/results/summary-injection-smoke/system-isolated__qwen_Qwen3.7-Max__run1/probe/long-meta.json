@@ -1,0 +1,6 @@
+{
+    "model":  "qwen/Qwen3.7-Max",
+    "promptPath":  "tests/agent-capability/long-conversation-contamination.md",
+    "summaryInjectionShape":  "system-isolated",
+    "probe":  "long-conversation"
+}

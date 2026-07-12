@@ -243,3 +243,21 @@ Stop and write a follow-up issue if:
 - A provider returns no usable raw output at all, and the adapter cannot distinguish auth failure from model failure.
 - Streaming headers make it impossible to return a proper client error without route-level redesign.
 - A fix would require weakening tool-call validation or prompt-injection ownership.
+
+## Reopening: 2026-07-11 — DeepSeek Swallow-After-Tool-Use Regression
+
+The 2026-07-10 acceptance is superseded for the DeepSeek path only. Manual reproduction on 2026-07-11 showed DeepSeek turns swallow the assistant reply when a tool is used — the same failure shape P0 was designed to close for all managed providers. Qwen no longer reproduces this failure; DeepSeek still does.
+
+Follow-up plan: `2026-07-11-p0-p1-followup-plan.md` — Track A.
+
+Scope added to P0 in the follow-up:
+
+- Non-stream DeepSeek path must route through the same tool-stream parser (or equivalent buffered parser) that the streaming path uses, so tool-call emission and post-tool-call content suppression are consistent between modes.
+- Diagnostic events must distinguish `provider_empty` from `malformed_tool_output` on the DeepSeek non-stream branch. Empty content with `finish_reason: 'stop'` cannot coexist with a managed-tool contract.
+- Real DeepSeek probe gate widened to require three consecutive `CAPABILITY_PROBE_PASS` runs and observation of at least one non-stream managed tool turn plus one post-tool-result assistant reply with non-empty content.
+
+Scope added to P0 for context management (shared with P1 follow-up Track C):
+
+- P0's "swallowed reply" surface expands to include replies swallowed indirectly by context management compaction that drops the tool contract. If compaction prunes the prompt-injected tool definitions and the session catalog rescue is unavailable, the next turn behaves like an availability-drift / empty-output regression. See follow-up Track C.
+
+Original P0 status: ACCEPTED for GLM and Qwen paths; **REOPENED** for DeepSeek and for compaction-induced swallow. Do not close this reopening until the follow-up plan's acceptance criteria are met.
