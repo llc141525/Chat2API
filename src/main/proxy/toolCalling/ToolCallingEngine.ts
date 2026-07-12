@@ -98,6 +98,26 @@ export class ToolCallingEngine {
     })
     const shouldInjectPrompt = plan.shouldInjectPrompt
     const profile = getProviderToolProfile(provider.id)
+    console.log('[ToolCallingEngine] runtime plan trace:', JSON.stringify({
+      requestId,
+      providerId: provider.id,
+      model: request.model,
+      actualModel,
+      toolSessionKeyPresent: typeof toolSessionKey === 'string' && toolSessionKey.length > 0,
+      clientAdapterId: plan.clientAdapterId,
+      toolSource: plan.diagnostics.toolSource,
+      catalogSource: plan.catalogDiagnostics.source,
+      catalogFingerprint: plan.catalogSnapshot?.fingerprint,
+      mode: plan.mode,
+      protocol: plan.protocol,
+      toolCount: plan.tools.length,
+      shouldInjectPrompt: plan.shouldInjectPrompt,
+      shouldParseResponse: plan.shouldParseResponse,
+      toolChoiceMode: plan.toolChoiceMode,
+      forcedToolName: plan.forcedToolName,
+      driftKinds: plan.catalogDiagnostics.driftKinds,
+      disabledReason: plan.mode === 'disabled' ? plan.diagnostics.reason : undefined,
+    }))
 
     if (plan.catalogSnapshot) {
       console.log('[ToolCallingEngine] catalog resolution:', JSON.stringify({
@@ -256,12 +276,26 @@ function renderPrompt(
 }
 
 function injectPrompt(messages: ChatMessage[], prompt: string): ChatMessage[] {
-  const [first, ...rest] = messages
-  if (first?.role === 'system' && typeof first.content === 'string') {
-    return [{ ...first, content: `${first.content}\n\n${prompt}` }, ...rest]
+  const lastSystemIndex = findLastStringSystemMessageIndex(messages)
+  if (lastSystemIndex !== -1) {
+    return messages.map((message, index) => (
+      index === lastSystemIndex
+        ? { ...message, content: `${message.content}\n\n${prompt}` }
+        : message
+    ))
   }
 
   return [{ role: 'system', content: prompt }, ...messages]
+}
+
+function findLastStringSystemMessageIndex(messages: ChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role === 'system' && typeof message.content === 'string') {
+      return index
+    }
+  }
+  return -1
 }
 
 function runtimePlanFromCallingPlan(plan: ToolCallingPlan) {

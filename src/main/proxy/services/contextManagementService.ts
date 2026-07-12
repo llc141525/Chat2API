@@ -717,6 +717,24 @@ export class ContextManagementService {
       `[ContextManagementService] Processing ${originalCount} messages ` +
         `with order: ${this.config.executionOrder.join(', ')}`
     )
+    console.log('[ContextManagementService] Config trace:', JSON.stringify({
+      slidingWindow: {
+        enabled: this.config.strategies.slidingWindow.enabled,
+        maxMessages: this.config.strategies.slidingWindow.maxMessages,
+      },
+      tokenLimit: {
+        enabled: this.config.strategies.tokenLimit.enabled,
+        maxTokens: this.config.strategies.tokenLimit.maxTokens,
+      },
+      summary: {
+        enabled: this.config.strategies.summary.enabled,
+        keepRecentMessages: this.config.strategies.summary.keepRecentMessages,
+      },
+      messageRoles: messages.map(message => message.role),
+      systemMessageCount: messages.filter(message => message.role === 'system').length,
+      toolCallMessageCount: messages.filter(message => message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0).length,
+      toolResultMessageCount: messages.filter(message => message.role === 'tool' && typeof message.tool_call_id === 'string').length,
+    }))
 
     let currentMessages = [...messages]
     let summaryGenerated = false
@@ -754,6 +772,20 @@ export class ContextManagementService {
 
       strategyResults.push(result)
       currentMessages = result.messages
+      console.log('[ContextManagementService] Strategy trace:', JSON.stringify({
+        strategyName,
+        subkind: result.subkind,
+        trimmed: result.trimmed,
+        originalCount: result.originalCount,
+        processedCount: result.processedCount,
+        preservedToolCallMessages: result.messages.filter(
+          message => message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0
+        ).length,
+        preservedToolResultMessages: result.messages.filter(
+          message => message.role === 'tool' && typeof message.tool_call_id === 'string'
+        ).length,
+        systemMessageCount: result.messages.filter(message => message.role === 'system').length,
+      }))
 
       if (result.trimmed) {
         console.log(

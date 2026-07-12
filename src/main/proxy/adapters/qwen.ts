@@ -148,13 +148,16 @@ function buildQwenChatRequestBody(input: QwenChatRequestBodyInput): any {
   } = input
   const toolProfile = getProviderToolProfile('qwen')
 
-  let systemPrompt = ''
+  const systemPrompts: string[] = []
   const conversationParts: string[] = []
   const lastUserText = extractLastUserText(request.messages)
 
   for (const msg of request.messages) {
     if (msg.role === 'system') {
-      systemPrompt = extractTextContent(msg.content)
+      const content = extractTextContent(msg.content)
+      if (content.trim().length > 0) {
+        systemPrompts.push(content)
+      }
     } else if (msg.role === 'user') {
       conversationParts.push(extractTextContent(msg.content))
     } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
@@ -173,10 +176,20 @@ function buildQwenChatRequestBody(input: QwenChatRequestBodyInput): any {
     }
   }
 
+  const systemPrompt = systemPrompts.join('\n\n')
   const userContent = conversationParts.join('\n\n')
   const finalContent = systemPrompt
     ? `${systemPrompt}\n\nUser: ${userContent}`
     : userContent
+  traceQwenRequestAssembly({
+    model: actualModel,
+    messageCount: request.messages.length,
+    systemMessageCount: systemPrompts.length,
+    conversationPartCount: conversationParts.length,
+    hasManagedToolContract: systemPrompt.includes('catalog_fingerprint:') || systemPrompt.includes('<|CHAT2API|tool_calls>'),
+    hasSummaryIsolationHeader: systemPrompt.includes('[Prior conversation summary'),
+    finalContentLength: finalContent.length,
+  })
 
   return {
     deep_search: (enableWebSearch || enableThinking) ? '1' : '0',
@@ -205,6 +218,18 @@ function buildQwenChatRequestBody(input: QwenChatRequestBodyInput): any {
     protocol_version: 'v2',
     biz_id: 'ai_qwen',
   }
+}
+
+function traceQwenRequestAssembly(input: {
+  model: string
+  messageCount: number
+  systemMessageCount: number
+  conversationPartCount: number
+  hasManagedToolContract: boolean
+  hasSummaryIsolationHeader: boolean
+  finalContentLength: number
+}): void {
+  console.log('[Qwen] Request assembly trace:', JSON.stringify(input))
 }
 
 export function buildQwenChatRequestBodyForTest(input: QwenChatRequestBodyInput): any {

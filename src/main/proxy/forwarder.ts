@@ -235,7 +235,7 @@ export class RequestForwarder {
     const config = storeManager.getConfig().toolCallingConfig
     const engine = new ToolCallingEngine(config)
 
-    return engine.transformRequest({
+    const transformed = engine.transformRequest({
       request,
       provider: provider ?? {
         id: 'custom',
@@ -251,6 +251,21 @@ export class RequestForwarder {
       actualModel: request.model,
       toolSessionKey: toolSessionKey ?? undefined,
     })
+    console.log('[Forwarder] Tool transform trace:', JSON.stringify({
+      providerId: provider?.id ?? 'custom',
+      model: request.model,
+      toolSessionKeyPresent: typeof toolSessionKey === 'string' && toolSessionKey.length > 0,
+      inputMessageCount: request.messages.length,
+      outputMessageCount: transformed.messages.length,
+      inputToolsPresent: Array.isArray(request.tools),
+      outputToolsPresent: Array.isArray(transformed.tools),
+      planMode: transformed.plan.mode,
+      catalogSource: transformed.plan.catalogDiagnostics.source,
+      catalogFingerprint: transformed.plan.catalogSnapshot?.fingerprint,
+      toolCount: transformed.plan.tools.length,
+      injected: transformed.plan.shouldInjectPrompt,
+    }))
+    return transformed
   }
 
   private applyToolCallsToResponse(

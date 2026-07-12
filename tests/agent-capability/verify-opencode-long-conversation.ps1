@@ -6,7 +6,13 @@ param(
 
     [string]$PromptPath = "tests/agent-capability/long-conversation-contamination.md",
 
-    [int]$TimeoutSeconds = 240
+    [int]$TimeoutSeconds = 240,
+
+    [int]$ContextMaxMessages = 12,
+
+    [int]$SummaryKeepRecentMessages = 6,
+
+    [int]$WarmupTurns = 6
 )
 
 $ErrorActionPreference = "Stop"
@@ -94,7 +100,8 @@ function Invoke-OpencodeRun {
         [string]$Executable,
         [string]$Prompt,
         [string]$ModelName,
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+        [string]$SessionId = ""
     )
 
     $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -112,6 +119,9 @@ function Invoke-OpencodeRun {
         "--dir", ".",
         "--auto"
     )
+    if (-not [string]::IsNullOrWhiteSpace($SessionId)) {
+        $args += @("--session", $SessionId)
+    }
 
     $argumentList = $processInfo.ArgumentList
     if ($null -ne $argumentList) {
@@ -148,6 +158,65 @@ function Invoke-OpencodeRun {
         Stdout = $stdoutTask.GetAwaiter().GetResult()
         Stderr = $stderrTask.GetAwaiter().GetResult()
     }
+}
+
+function Get-SessionIdFromEvents([string]$EventText) {
+    foreach ($line in ($EventText -split "`r?`n")) {
+        if ($line.Trim().Length -eq 0) {
+            continue
+        }
+
+        try {
+            $event = $line | ConvertFrom-Json
+        } catch {
+            continue
+        }
+
+        $sessionId = [string]$event.sessionID
+        if (-not [string]::IsNullOrWhiteSpace($sessionId)) {
+            return $sessionId
+        }
+    }
+
+    return ""
+}
+
+function Add-EventTextToFile([string]$Path, [string]$EventText) {
+    if ([string]::IsNullOrWhiteSpace($EventText)) {
+        return
+    }
+
+    $normalized = $EventText.TrimEnd()
+    if ($normalized.Length -eq 0) {
+        return
+    }
+
+    [System.IO.File]::AppendAllText($Path, $normalized + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Get-NewLogText([string]$LogPath, [int]$BeforeLineCount) {
+    $afterLogLines = @()
+    for ($attempt = 0; $attempt -lt 15; $attempt++) {
+        $afterLogLines = @(Get-Content $LogPath)
+        if ($afterLogLines.Count -gt $BeforeLineCount) {
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    if ($afterLogLines.Count -gt $BeforeLineCount) {
+        return ($afterLogLines | Select-Object -Skip $BeforeLineCount) -join [Environment]::NewLine
+    }
+
+    return ""
+}
+
+function Test-HasSummaryCompactionEvidence([string]$LogText) {
+    return $LogText.IndexOf("[ContextManagementService] Strategy summary trimmed", [StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
+function Test-HasSlidingCompactionEvidence([string]$LogText) {
+    return $LogText.IndexOf("[ContextManagementService] Strategy slidingWindow trimmed", [StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
 function Read-ContextManagementState([string]$StoreDir) {
@@ -213,6 +282,8 @@ store.set('config', config)
 Write-Host "============================================"
 Write-Host " Chat2API Long Conversation Compaction Probe"
 Write-Host " Model: $Model"
+Write-Host " Context: slidingWindow.maxMessages=$ContextMaxMessages summary.keepRecentMessages=$SummaryKeepRecentMessages"
+Write-Host " Warmup turns: $WarmupTurns"
 Write-Host "============================================"
 
 $probeDir = ".agent-probe"
@@ -222,6 +293,7 @@ if (Test-Path $probeDir) {
 New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
 
 $eventsPath = "$probeDir/opencode-long-events.ndjson"
+$finalEventsPath = "$probeDir/opencode-long-final-events.ndjson"
 $stderrPath = "$probeDir/opencode-long-stderr.log"
 $step1Path = "$probeDir/long-step-1.txt"
 $step2Path = "$probeDir/long-step-2.txt"
@@ -243,7 +315,7 @@ $aggressiveContextState = [ordered]@{
     strategies = [ordered]@{
         slidingWindow = [ordered]@{
             enabled = $true
-            maxMessages = 12
+            maxMessages = $ContextMaxMessages
         }
         tokenLimit = [ordered]@{
             enabled = $false
@@ -251,11 +323,11 @@ $aggressiveContextState = [ordered]@{
         }
         summary = [ordered]@{
             enabled = $true
-            keepRecentMessages = 6
+            keepRecentMessages = $SummaryKeepRecentMessages
             summaryPrompt = "Summarize the earlier conversation as procedural state for an in-progress tool workflow. Preserve exact pending probe obligations, required file paths, remaining tool sequence, and any tool-result facts needed to continue. Do not answer the conversation. Do not add chit-chat, time, greetings, or status filler."
         }
     }
-    executionOrder = @("slidingWindow", "summary")
+    executionOrder = @("summary", "slidingWindow")
     }
 }
 
@@ -273,8 +345,46 @@ try {
     }
 
     $opencodeExecutable = Resolve-OpencodeExecutablePath $opencodeCommand.Source
-    $runResult = Invoke-OpencodeRun -Executable $opencodeExecutable -Prompt $prompt -ModelName $Model -TimeoutSeconds $TimeoutSeconds
-    [System.IO.File]::WriteAllText($eventsPath, [string]$runResult.Stdout, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($eventsPath, "", [System.Text.UTF8Encoding]::new($false))
+
+    $sessionId = ""
+    for ($turn = 1; $turn -le $WarmupTurns; $turn++) {
+        $warmupPrompt = "Compaction warmup turn $turn. Reply exactly WARMUP_ACK_$turn and do not use tools."
+        $warmupResult = Invoke-OpencodeRun -Executable $opencodeExecutable -Prompt $warmupPrompt -ModelName $Model -TimeoutSeconds $TimeoutSeconds -SessionId $sessionId
+        [System.IO.File]::WriteAllText("$probeDir/opencode-long-warmup-$turn.ndjson", [string]$warmupResult.Stdout, [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText("$probeDir/opencode-long-warmup-$turn.stderr.log", [string]$warmupResult.Stderr, [System.Text.UTF8Encoding]::new($false))
+        Add-EventTextToFile $eventsPath ([string]$warmupResult.Stdout)
+
+        if ($warmupResult.TimedOut) {
+            Fail "opencode_warmup_timeout: warmup turn $turn did not exit within $TimeoutSeconds seconds"
+        }
+        if ($warmupResult.ExitCode -ne 0) {
+            Fail "opencode warmup turn $turn exited with code $($warmupResult.ExitCode)"
+        }
+
+        if ([string]::IsNullOrWhiteSpace($sessionId)) {
+            $sessionId = Get-SessionIdFromEvents ([string]$warmupResult.Stdout)
+            if ([string]::IsNullOrWhiteSpace($sessionId)) {
+                Fail "Could not determine OpenCode session id from warmup turn $turn events"
+            }
+        }
+    }
+    Pass "Completed $WarmupTurns OpenCode warmup turns in session $sessionId"
+
+    $postWarmupLogText = Get-NewLogText $LogPath $beforeLogLines.Count
+    $warmupSummaryEvidence = Test-HasSummaryCompactionEvidence $postWarmupLogText
+    $warmupSlidingEvidence = Test-HasSlidingCompactionEvidence $postWarmupLogText
+    if (-not $warmupSummaryEvidence -and -not $warmupSlidingEvidence) {
+        Fail "No compaction evidence found after warmup turns; refusing to run final tool probe without post-compaction precondition"
+    }
+    if ($postWarmupLogText.IndexOf("[Forwarder] Context management applied:", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        Fail "Forwarder did not report context-management application after warmup turns"
+    }
+    Pass "dev.log proves compaction before final tool probe (summary=$warmupSummaryEvidence sliding=$warmupSlidingEvidence)"
+
+    $runResult = Invoke-OpencodeRun -Executable $opencodeExecutable -Prompt $prompt -ModelName $Model -TimeoutSeconds $TimeoutSeconds -SessionId $sessionId
+    [System.IO.File]::WriteAllText($finalEventsPath, [string]$runResult.Stdout, [System.Text.UTF8Encoding]::new($false))
+    Add-EventTextToFile $eventsPath ([string]$runResult.Stdout)
     [System.IO.File]::WriteAllText($stderrPath, [string]$runResult.Stderr, [System.Text.UTF8Encoding]::new($false))
 
     if ($runResult.TimedOut) {
@@ -301,7 +411,7 @@ try {
     }
     Pass "OpenCode exited successfully"
 
-    $earlyEventLines = Get-Content $eventsPath | Where-Object { $_.Trim().Length -gt 0 }
+    $earlyEventLines = Get-Content $finalEventsPath | Where-Object { $_.Trim().Length -gt 0 }
     $earlySkillSeen = $false
     $earlyReadSeen = $false
     $earlyBashSeen = $false
@@ -373,7 +483,7 @@ try {
     }
     Pass "long-result.json is structurally valid"
 
-    $eventLines = Get-Content $eventsPath | Where-Object { $_.Trim().Length -gt 0 }
+    $eventLines = Get-Content $finalEventsPath | Where-Object { $_.Trim().Length -gt 0 }
     if ($eventLines.Count -eq 0) {
         Fail "OpenCode event log is empty"
     }
@@ -460,35 +570,24 @@ try {
     }
     Pass "No summary_contamination drift or fabricated tool inventory leaked into the probe output"
 
-    $afterLogLines = @()
-    for ($attempt = 0; $attempt -lt 15; $attempt++) {
-        $afterLogLines = @(Get-Content $LogPath)
-        if ($afterLogLines.Count -gt $beforeLogLines.Count) {
-            break
-        }
-        Start-Sleep -Seconds 1
-    }
-
-    $newLogText = if ($afterLogLines.Count -gt $beforeLogLines.Count) {
-        ($afterLogLines | Select-Object -Skip $beforeLogLines.Count) -join [Environment]::NewLine
-    } else {
-        ""
-    }
+    $newLogText = Get-NewLogText $LogPath $beforeLogLines.Count
 
     if ($newLogText.Length -eq 0) {
         Fail "No new dev.log content was captured during the probe"
     }
 
-    if ($newLogText.IndexOf("[ContextManagementService] Strategy slidingWindow trimmed", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-        Fail "No sliding-window compaction evidence found in appended dev.log output"
-    }
-    if ($newLogText.IndexOf("[ContextManagementService] Strategy summary trimmed", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-        Fail "No summary compaction evidence found in appended dev.log output"
+    $summaryEvidence = Test-HasSummaryCompactionEvidence $newLogText
+    $slidingEvidence = Test-HasSlidingCompactionEvidence $newLogText
+    if (-not $summaryEvidence -and -not $slidingEvidence) {
+        Fail "No summary or sliding-window compaction evidence found in appended dev.log output"
     }
     if ($newLogText.IndexOf("[Forwarder] Context management applied:", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
         Fail "Forwarder did not report context-management application in appended dev.log output"
     }
-    Pass "dev.log proves both sliding-window and summary compaction occurred"
+    if ($newLogText.IndexOf('"hasManagedToolContract":true', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        Fail "Qwen request assembly trace did not show managed tool contract after compaction"
+    }
+    Pass "dev.log proves compaction occurred before real tool execution (summary=$summaryEvidence sliding=$slidingEvidence)"
 
     Write-Host "CAPABILITY_PROBE_PASS"
     Write-Host "LONG_CONVERSATION_PROBE_PASS"

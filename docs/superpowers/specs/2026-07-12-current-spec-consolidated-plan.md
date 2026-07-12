@@ -15,10 +15,11 @@ The spec set is not fully stale, but the original 2026-07-10 acceptance dossier 
 
 The active unfinished work is now narrower:
 
-1. GLM long OpenCode probe: new bucket `skill_result_then_final_marker_without_required_tools`.
-2. Provider expansion: Z.ai, Kimi, MiniMax.
-3. Account pool rotation.
-4. Optional future broadening of P3 beyond Qwen to GLM or other models.
+1. Qwen 3.7 OpenCode tool-loss regression after low-threshold context management.
+2. GLM long OpenCode probe: new bucket `skill_result_then_final_marker_without_required_tools`.
+3. Provider expansion: Z.ai, Kimi, MiniMax.
+4. Account pool rotation.
+5. Optional future broadening of P3 beyond Qwen to GLM or other models.
 
 DeepSeek live verification is intentionally not required right now per the latest user scope.
 
@@ -37,6 +38,7 @@ DeepSeek live verification is intentionally not required right now per the lates
 | `2026-07-11-p0-p1-followup-plan.md` | Accepted | DeepSeek/Qwen/compaction ordering follow-up is closed. Keep gates as regression baseline. |
 | `2026-07-11-p0-p1-summary-contamination-plan.md` | Accepted for Qwen; GLM follow-up still open | Sanitizer, drift subkinds, and Qwen long probe are baseline. Continue only the GLM long-agent bucket. |
 | `2026-07-11-p3-claude-code-compact-tool-loss-plan.md` | Accepted for current Qwen scope | Current P3 compact issue is closed for Qwen. Broader model matrix is optional future work. |
+| `2026-07-12-qwen37-tool-loss-regression/` | Active | Reopens Qwen 3.7 OpenCode tool loss after manual regression. Use this as the current controlling batch for Qwen low-threshold summary/compaction verification. |
 | `2026-07-11-p4-provider-expansion-writing-plan.md` | Active, not started | Next large feature track for Z.ai, Kimi, MiniMax. |
 | `2026-07-11-p5-account-pool-rotation-writing-plan.md` | Active, not started | Long-term operational safety track; can start after or alongside P4 scaffolding. |
 
@@ -84,11 +86,37 @@ For Claude Code Anthropic compact changes:
 node --test tests/routes/anthropic-compatibility.test.ts tests/routes/anthropic-catalog-continuity.test.ts tests/routes/anthropic-compact-tool-history.test.ts tests/tool-calling/anthropic-catalog-drift.test.ts
 ```
 
-Accepted real-probe evidence already recorded:
+Accepted real-probe evidence already recorded before the 2026-07-12 regression report:
 
 - Qwen OpenCode long-conversation summary/compaction: accepted.
 - Qwen Claude Code compact continuity: accepted for current scope.
 - DeepSeek base follow-up: accepted, but latest user scope says do not continue DeepSeek verification for now.
+
+Regression note:
+
+- Manual testing on 2026-07-12 found `qwen/Qwen3.7-Max` can again lose practical tool availability after several OpenCode turns. The current controlling plan is `2026-07-12-qwen37-tool-loss-regression/index.md`.
+- New acceptance requires real post-compaction non-skill tool execution at low thresholds: context max messages `4`, summary keep recent messages `3`.
+
+## Active Work Item 0: Qwen 3.7 Low-Threshold Tool Loss Regression
+
+Source: `2026-07-12-qwen37-tool-loss-regression/index.md`.
+
+Current state:
+
+- Round 0 implemented diagnostic traces and Qwen system-message preservation before the main/subagent workflow was corrected.
+- Deterministic Qwen request tests and the full tool-calling gate reportedly pass.
+- A live low-threshold Qwen run showed real tool use, but did not prove post-summary-compaction behavior because logs reported `summary_not_needed`.
+
+Next plan:
+
+1. Keep the current round under the main/subagent workflow.
+2. Reuse the existing worker for the live probe hardening step.
+3. Require the probe to fail without actual compaction/summary evidence.
+4. Accept only raw OpenCode event evidence of real post-compaction non-skill tool use.
+
+Acceptance:
+
+- See `2026-07-12-qwen37-tool-loss-regression/step-04-final-acceptance-and-compaction.md`.
 
 ## Active Work Item 1: GLM Long-Agent Reliability
 
