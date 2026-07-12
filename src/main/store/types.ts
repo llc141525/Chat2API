@@ -219,6 +219,28 @@ export interface AppConfig {
   managementApi: ManagementApiConfig
   /** Context management configuration */
   contextManagement: ContextManagementConfig
+  /** MCP server configurations */
+  mcpServers: Record<string, McpServerConfig>
+}
+
+export type McpServerStatus = 'available' | 'unavailable' | 'circuitOpen' | 'reconnecting'
+
+export interface McpServerCircuitState {
+  open: boolean
+  openedAt?: number
+  failureCount: number
+  lastFailureAt?: number
+}
+
+export interface McpServerConfig {
+  name: string
+  command: string
+  args?: string[]
+  env?: Record<string, string>
+  timeout?: number
+  enabled: boolean
+  status?: McpServerStatus
+  circuitState?: McpServerCircuitState
 }
 
 /**
@@ -453,6 +475,13 @@ export interface RequestLogEntry {
   /** Response body JSON string */
   responseBody?: string
 
+  /** Prompt token count reported by provider */
+  promptTokens?: number
+  /** Completion token count reported by provider */
+  completionTokens?: number
+  /** Total token count reported by provider */
+  totalTokens?: number
+
   /** Request latency in milliseconds */
   latency: number
   /** Whether streaming request */
@@ -492,6 +521,12 @@ export interface DailyStatistics {
   failedRequests: number
   /** Total latency (for average calculation) */
   totalLatency: number
+  /** Prompt tokens used */
+  promptTokens: number
+  /** Completion tokens used */
+  completionTokens: number
+  /** Total tokens used */
+  totalTokens: number
   /** Model usage count */
   modelUsage: Record<string, number>
   /** Provider usage count */
@@ -511,6 +546,12 @@ export interface PersistentStatistics {
   failedRequests: number
   /** Total latency for average calculation */
   totalLatency: number
+  /** Prompt tokens used (all time) */
+  promptTokens: number
+  /** Completion tokens used (all time) */
+  completionTokens: number
+  /** Total tokens used (all time) */
+  totalTokens: number
   /** Last updated timestamp */
   lastUpdated: number
   /** Model usage count */
@@ -668,6 +709,9 @@ export const DEFAULT_STATISTICS: PersistentStatistics = {
   successRequests: 0,
   failedRequests: 0,
   totalLatency: 0,
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
   lastUpdated: Date.now(),
   modelUsage: {},
   providerUsage: {},
@@ -793,7 +837,7 @@ export function sanitizeDeepSeekModelOverrides(
  * Default Application Configuration
  */
 export const DEFAULT_CONFIG: AppConfig = {
-  proxyPort: 8080,
+  proxyPort: 48763,
   proxyHost: '127.0.0.1',
   loadBalanceStrategy: 'round-robin',
   modelMappings: createDefaultModelMappings(),
@@ -815,6 +859,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   toolPromptConfig: undefined,
   managementApi: DEFAULT_MANAGEMENT_API_CONFIG,
   contextManagement: DEFAULT_CONTEXT_MANAGEMENT_CONFIG,
+  mcpServers: {},
 }
 
 /**

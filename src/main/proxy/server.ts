@@ -22,7 +22,7 @@ export class ProxyServer {
   private app: Koa
   private router: Router
   private server: HttpServer | null = null
-  private port: number = 8080
+  private port: number = 0
   private host: string = '127.0.0.1'
 
   constructor() {
@@ -168,10 +168,15 @@ export class ProxyServer {
         endpoints: [
           'POST /v1/chat/completions',
           'GET /v1/models',
+          'GET /v1/v1/models',
           'GET /v1/models/:model',
+          'GET /v1/v1/models/:model',
+          'GET /anthropic/v1/models',
+          'GET /anthropic/v1/models/:model',
           'POST /v1/completions',
           'POST /anthropic/v1/messages',
           'POST /v1/messages',
+          'POST /v1/v1/messages',
         ],
       }
     })
@@ -288,6 +293,10 @@ export class ProxyServer {
     return new Promise((resolve) => {
       try {
         this.server = this.app.listen(this.port, this.host, () => {
+          const addr = this.server?.address()
+          if (addr && typeof addr === 'object') {
+            this.port = addr.port
+          }
           proxyStatusManager.start()
           proxyStatusManager.setPort(this.port)
           proxyStatusManager.setHost(this.host)

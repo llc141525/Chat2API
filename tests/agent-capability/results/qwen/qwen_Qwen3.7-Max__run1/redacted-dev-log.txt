@@ -1,0 +1,400 @@
+﻿  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 209
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"read\"><|CHAT2API|parameter name=\"filePath\"><![CDATA[E:\\Chat2API\\tests\\agent-capability\\input.txt]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 209 this.content.length: 209
+[Qwen] Skipping - no new content
+[Qwen] Parsed event: complete data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: complete content length: 209
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"read\"><|CHAT2API|parameter name=\"filePath\"><![CDATA[E:\\Chat2API\\tests\\agent-capability\\input.txt]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>","meta_data":{},"mime_type":"multi_load/iframe","status":"complete"}
+[Qwen] newContent.length: 209 this.content.length: 209
+[Qwen] Skipping - no new content
+[Qwen] Sending stop for multi_load/iframe, content so far: 209
+[Qwen] Received complete event
+[Qwen] Stream closed
+[Qwen] Session deleted successfully: d820e99ed9714dee973ebed9e6da2e00
+[LoadBalancer] Provider GLM does not support model Qwen3.7-Max
+[LoadBalancer] Provider DeepSeek does not support model Qwen3.7-Max
+[LoadBalancer] Provider Qwen (qwen) has 1 available accounts
+[LoadBalancer] Account Qwen 璐︽埛 (1782719008225-s5fjwsofs) Token: ...
+[LoadBalancer] mapModel called with model="Qwen3.7-Max", provider="Qwen"
+[LoadBalancer] Model mapped from "Qwen3.7-Max" to "Qwen3.7-Max" via effective models
+[LoadBalancer] Provider Z.ai does not support model Qwen3.7-Max
+[LoadBalancer] Provider Kimi does not support model Qwen3.7-Max
+[LoadBalancer] Provider MiniMax does not support model Qwen3.7-Max
+[ContextManagementService] Processing 6 messages with order: slidingWindow, summary
+[ContextManagementService] Final result: 6 -> 6 messages
+[ToolCallingEngine] catalog resolution: {"providerId":"qwen","model":"Qwen3.7-Max","managedStatus":"accepted","managedTransport":"openai_chat_completions","riskControlCaveats":[],"catalogSource":"current_request","catalogFingerprint":"69ae0c7160f1b09eb1bc1179bedbd556632afa9c077af77788a9ee899c572249","toolCount":10,"driftKinds":[]}
+[Qwen] Session info: {
+  sessionId: '32b26e353616409ba19736c322a2a0a0',
+  reqId: '6a808fd5ec044adea03369db454635c6'
+}
+[Qwen] Using model: Qwen3.7-Max
+[Qwen] Sending request to /api/v2/chat...
+[Qwen] Response status: 200
+[Qwen] Response headers: {
+  "date": "Sun, 12 Jul 2026 01:19:21 GMT",
+  "content-type": "text/event-stream;charset=UTF-8",
+  "transfer-encoding": "chunked",
+  "connection": "keep-alive",
+  "vary": "Accept-Encoding, Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
+  "access-control-allow-origin": "https://www.qianwen.com",
+  "access-control-allow-credentials": "true",
+  "x-traceid": "2147808a17838191557797358e0bce",
+  "access-control-max-age": "3600",
+  "x_server_receive_start": "1783819155880",
+  "x_server_response_start": "1783819157610",
+  "ups-target-key": "qwen-chat-access-aone.vipserver",
+  "x-protocol": "HTTP/1.1",
+  "eagleeye-traceid": "2147808a17838191557797358e0bce",
+  "strict-transport-security": "max-age=0",
+  "s-brt": "5236",
+  "s-rt": "5251",
+  "content-encoding": "gzip"
+}
+[Qwen] Starting stream handler...
+[Qwen] Content-Encoding: gzip
+[Qwen] Decompressing gzip stream...
+[Store] Update account: {
+  id: '1782719008225-s5fjwsofs',
+  updatesCredentials: undefined,
+  oldCredentials: {
+    ticket: 'djEw/xg2MqSfJrJpHx50sXLXO2ni8G/PuZTy4NundHJVEF1prIK8xOIRb2aZyorKkp+AKG+/eYcB2EJ39bPNcc4AnPlSsQ9IZrRxo4U2TFdNzXKWJvQsnJ8d+xFqkFD/J1n2pZHj6Px5bbxr'
+  },
+  oldCredentialsDecrypted: {
+    ticket: 'zX0Ccdoyj6J$k208amuUFFG7CrOLiWmCtm_XwFspgfduDhB67YEbOczpf8Gz1g_BynogsOH1apRq0'
+  }
+}
+[Store] Verify after save: {
+  id: '1782719008225-s5fjwsofs',
+  savedCredentials: {
+    ticket: 'djEw/xg2MqSfJrJpHx50sXLXO2ni8G/PuZTy4NundHJVEF1prIK8xOIRb2aZyorKkp+AKG+/eYcB2EJ39bPNcc4AnPlSsQ9IZrRxo4U2TFdNzXKWJvQsnJ8d+xFqkFD/J1n2pZHj6Px5bbxr'
+  }
+}
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 2
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: processing content length: 0
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"processing"}
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 46
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 46 this.content.length: 0
+[Qwen] Writing chunk, length: 46
+[Qwen] Chunk written to stream
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 72
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"bash\"><|CHAT2API|parameter","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 72 this.content.length: 46
+[Qwen] Writing chunk, length: 26
+[Qwen] Chunk written to stream
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 191
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"bash\"><|CHAT2API|parameter name=\"command\"><![CDATA[if (-not (Test-Path -LiteralPath \".agent-probe\")) { New-Item -ItemType Directory -Path \".agent","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 191 this.content.length: 72
+[Qwen] Writing chunk, length: 119
+[Qwen] Chunk written to stream
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 201
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"bash\"><|CHAT2API|parameter name=\"command\"><![CDATA[if (-not (Test-Path -LiteralPath \".agent-probe\")) { New-Item -ItemType Directory -Path \".agent-probe\" };","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 201 this.content.length: 191
+[Qwen] Writing chunk, length: 10
+[Qwen] Chunk written to stream
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 254
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"bash\"><|CHAT2API|parameter name=\"command\"><![CDATA[if (-not (Test-Path -LiteralPath \".agent-probe\")) { New-Item -ItemType Directory -Path \".agent-probe\" }; node tests/agent-capability/compute-result.mjs tests","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 254 this.content.length: 201
+[Qwen] Writing chunk, length: 53
+[Qwen] Chunk written to stream
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 271
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"bash\"><|CHAT2API|parameter name=\"command\"><![CDATA[if (-not (Test-Path -LiteralPath \".agent-probe\")) { New-Item -ItemType Directory -Path \".agent-probe\" }; node tests/agent-capability/compute-result.mjs tests/agent-capability","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 271 this.content.length: 254
+[Qwen] Writing chunk, length: 17
+[Qwen] Chunk written to stream
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 375
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"bash\"><|CHAT2API|parameter name=\"command\"><![CDATA[if (-not (Test-Path -LiteralPath \".agent-probe\")) { New-Item -ItemType Directory -Path \".agent-probe\" }; node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 375 this.content.length: 271
+[Qwen] Writing chunk, length: 104
+[Qwen] Chunk written to stream
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 375
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"bash\"><|CHAT2API|parameter name=\"command\"><![CDATA[if (-not (Test-Path -LiteralPath \".agent-probe\")) { New-Item -ItemType Directory -Path \".agent-probe\" }; node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 375 this.content.length: 375
+[Qwen] Skipping - no new content
+[Qwen] Parsed event: complete data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: complete content length: 375
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"bash\"><|CHAT2API|parameter name=\"command\"><![CDATA[if (-not (Test-Path -LiteralPath \".agent-probe\")) { New-Item -ItemType Directory -Path \".agent-probe\" }; node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>","meta_data":{},"mime_type":"multi_load/iframe","status":"complete"}
+[Qwen] newContent.length: 375 this.content.length: 375
+[Qwen] Skipping - no new content
+[Qwen] Sending stop for multi_load/iframe, content so far: 375
+[Qwen] Received complete event
+[Qwen] Stream closed
+[Qwen] Session deleted successfully: 32b26e353616409ba19736c322a2a0a0
+[LoadBalancer] Provider GLM does not support model Qwen3.7-Max
+[LoadBalancer] Provider DeepSeek does not support model Qwen3.7-Max
+[LoadBalancer] Provider Qwen (qwen) has 1 available accounts
+[LoadBalancer] Account Qwen 璐︽埛 (1782719008225-s5fjwsofs) Token: ...
+[LoadBalancer] mapModel called with model="Qwen3.7-Max", provider="Qwen"
+[LoadBalancer] Model mapped from "Qwen3.7-Max" to "Qwen3.7-Max" via effective models
+[LoadBalancer] Provider Z.ai does not support model Qwen3.7-Max
+[LoadBalancer] Provider Kimi does not support model Qwen3.7-Max
+[LoadBalancer] Provider MiniMax does not support model Qwen3.7-Max
+[ContextManagementService] Processing 8 messages with order: slidingWindow, summary
+[ContextManagementService] Final result: 8 -> 8 messages
+[ToolCallingEngine] catalog resolution: {"providerId":"qwen","model":"Qwen3.7-Max","managedStatus":"accepted","managedTransport":"openai_chat_completions","riskControlCaveats":[],"catalogSource":"current_request","catalogFingerprint":"69ae0c7160f1b09eb1bc1179bedbd556632afa9c077af77788a9ee899c572249","toolCount":10,"driftKinds":[]}
+[Qwen] Session info: {
+  sessionId: '3f982a9fde5d40e39adb14a52bd9e1e2',
+  reqId: 'd25fab994122452582c37cf6df8f6bdc'
+}
+[Qwen] Using model: Qwen3.7-Max
+[Qwen] Sending request to /api/v2/chat...
+[Qwen] Response status: 200
+[Qwen] Response headers: {
+  "date": "Sun, 12 Jul 2026 01:19:32 GMT",
+  "content-type": "text/event-stream;charset=UTF-8",
+  "transfer-encoding": "chunked",
+  "connection": "keep-alive",
+  "vary": "Accept-Encoding, Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
+  "access-control-allow-origin": "https://www.qianwen.com",
+  "access-control-allow-credentials": "true",
+  "x-traceid": "2147808a17838191674917571e0bce",
+  "access-control-max-age": "3600",
+  "x_server_receive_start": "1783819167592",
+  "x_server_response_start": "1783819169156",
+  "ups-target-key": "qwen-chat-access-aone.vipserver",
+  "x-protocol": "HTTP/1.1",
+  "eagleeye-traceid": "2147808a17838191674917571e0bce",
+  "strict-transport-security": "max-age=0",
+  "s-brt": "5059",
+  "s-rt": "5073",
+  "content-encoding": "gzip"
+}
+[Qwen] Starting stream handler...
+[Qwen] Content-Encoding: gzip
+[Qwen] Decompressing gzip stream...
+[Store] Update account: {
+  id: '1782719008225-s5fjwsofs',
+  updatesCredentials: undefined,
+  oldCredentials: {
+    ticket: 'djEw/xg2MqSfJrJpHx50sXLXO2ni8G/PuZTy4NundHJVEF1prIK8xOIRb2aZyorKkp+AKG+/eYcB2EJ39bPNcc4AnPlSsQ9IZrRxo4U2TFdNzXKWJvQsnJ8d+xFqkFD/J1n2pZHj6Px5bbxr'
+  },
+  oldCredentialsDecrypted: {
+    ticket: 'zX0Ccdoyj6J$k208amuUFFG7CrOLiWmCtm_XwFspgfduDhB67YEbOczpf8Gz1g_BynogsOH1apRq0'
+  }
+}
+[Store] Verify after save: {
+  id: '1782719008225-s5fjwsofs',
+  savedCredentials: {
+    ticket: 'djEw/xg2MqSfJrJpHx50sXLXO2ni8G/PuZTy4NundHJVEF1prIK8xOIRb2aZyorKkp+AKG+/eYcB2EJ39bPNcc4AnPlSsQ9IZrRxo4U2TFdNzXKWJvQsnJ8d+xFqkFD/J1n2pZHj6Px5bbxr'
+  }
+}
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 3
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"CAP","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 3 this.content.length: 0
+[Qwen] Writing chunk, length: 3
+[Qwen] Chunk written to stream
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 21
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"CAPABILITY_PROBE_DONE","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 21 this.content.length: 3
+[Qwen] Writing chunk, length: 18
+[Qwen] Chunk written to stream
+[Qwen] Parsed event: message data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: processing content length: 21
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"CAPABILITY_PROBE_DONE","meta_data":{},"mime_type":"multi_load/iframe","status":"processing"}
+[Qwen] newContent.length: 21 this.content.length: 21
+[Qwen] Skipping - no new content
+[Qwen] Parsed event: complete data keys: [
+  'communication',
+  'data',
+  'error_code',
+  'error_msg',
+  'success',
+  'traceId'
+]
+[Qwen] Messages count: 3
+[Qwen] Message: signal/post status: complete content length: 0
+[Qwen] Message: bar/progress status: complete content length: 0
+[Qwen] Message: multi_load/iframe status: complete content length: 21
+[Qwen] Message detail: {"meta_data":{"operation_types":[["regenerate","expansion","simplify","chatty"],["enable_web_search"],["modelSelection"]],"intent_content":"MainChatAgent","generate_mode":"stream","agent_mode":"0"},"mime_type":"signal/post","status":"complete"}
+[Qwen] Message detail: {"meta_data":{"elements":[{"type":"text","content":""}],"type":"bar_update"},"mime_type":"bar/progress","status":"complete"}
+[Qwen] Message detail: {"content":"CAPABILITY_PROBE_DONE","meta_data":{},"mime_type":"multi_load/iframe","status":"complete"}
+[Qwen] newContent.length: 21 this.content.length: 21
+[Qwen] Skipping - no new content
+[Qwen] Sending stop for multi_load/iframe, content so far: 21
+[Qwen] Received complete event
+[Qwen] Stream closed
+[Qwen] Session deleted successfully: 3f982a9fde5d40e39adb14a52bd9e1e2

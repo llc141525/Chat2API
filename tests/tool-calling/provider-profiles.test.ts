@@ -7,7 +7,7 @@ const calls = [
 ]
 
 test('first-version providers use managed prompt and managed xml by default', () => {
-  for (const providerId of ['deepseek', 'kimi', 'glm', 'qwen']) {
+  for (const providerId of ['deepseek', 'kimi', 'glm', 'minimax', 'qwen', 'zai']) {
     const profile = getProviderToolProfile(providerId)
 
     assert.equal(profile.managedSupport, true)
@@ -19,7 +19,7 @@ test('first-version providers use managed prompt and managed xml by default', ()
 })
 
 test('priority providers format tool history with the Chat2API XML protocol', () => {
-  for (const providerId of ['deepseek', 'kimi', 'glm', 'qwen']) {
+  for (const providerId of ['deepseek', 'kimi', 'glm', 'minimax', 'qwen', 'zai']) {
     const profile = getProviderToolProfile(providerId)
 
     assert.equal(
@@ -39,6 +39,8 @@ test('unknown providers inherit catalog contract defaults', () => {
   assert.equal(profile.preferredManagedProtocol, 'managed_xml')
   assert.equal(profile.contractHeaderVersion, 1)
   assert.equal(profile.availabilityDriftRetry, 'enabled')
+  assert.equal(profile.managedToolSupportStatus, 'experimental')
+  assert.equal(profile.managedTransport, 'unknown')
 })
 
 test('managed provider profiles expose contract header and availability retry defaults', () => {
@@ -48,4 +50,32 @@ test('managed provider profiles expose contract header and availability retry de
     assert.equal(profile.contractHeaderVersion, 1)
     assert.equal(profile.availabilityDriftRetry, 'enabled')
   }
+})
+
+test('managed provider profiles expose parser ownership and empty output policy facts', () => {
+  for (const providerId of ['glm', 'qwen', 'qwen-ai', 'kimi', 'minimax', 'zai']) {
+    const profile = getProviderToolProfile(providerId)
+
+    assert.equal(profile.managedPromptOwner, 'ToolCallingEngine')
+    assert.equal(profile.parseStreaming, true)
+    assert.equal(profile.parseNonStreaming, true)
+    assert.equal(profile.supportsIntentionalEmptyOutput, false)
+    assert.equal(profile.preservesToolHistory, true)
+  }
+})
+
+test('provider capability matrix marks accepted vs experimental managed providers explicitly', () => {
+  assert.equal(getProviderToolProfile('deepseek').managedToolSupportStatus, 'accepted')
+  assert.equal(getProviderToolProfile('glm').managedToolSupportStatus, 'accepted')
+  assert.equal(getProviderToolProfile('qwen').managedToolSupportStatus, 'accepted')
+  assert.equal(getProviderToolProfile('kimi').managedToolSupportStatus, 'experimental')
+  assert.equal(getProviderToolProfile('minimax').managedToolSupportStatus, 'experimental')
+  assert.equal(getProviderToolProfile('zai').managedToolSupportStatus, 'experimental')
+})
+
+test('provider capability matrix exposes transport and provider caveats for expansion targets', () => {
+  assert.equal(getProviderToolProfile('kimi').managedTransport, 'grpc_web_stream')
+  assert.equal(getProviderToolProfile('minimax').managedTransport, 'polling_stream')
+  assert.equal(getProviderToolProfile('zai').managedTransport, 'provider_chat_api')
+  assert.deepEqual(getProviderToolProfile('zai').providerRiskControlCaveats, ['captcha_or_risk_control'])
 })

@@ -70,8 +70,8 @@ export class ConfigManager {
    * @param port Port number
    */
   static setProxyPort(port: number): void {
-    if (port < 1 || port > 65535) {
-      throw new Error('Port number must be between 1-65535')
+    if (port < 0 || port > 65535) {
+      throw new Error('Port number must be between 0-65535')
     }
     
     this.update({ proxyPort: port })
@@ -313,8 +313,8 @@ export class ConfigManager {
     const errors: string[] = []
     
     if (config.proxyPort !== undefined) {
-      if (config.proxyPort < 1 || config.proxyPort > 65535) {
-        errors.push('Proxy port must be between 1-65535')
+      if (config.proxyPort < 0 || config.proxyPort > 65535) {
+        errors.push('Proxy port must be between 0-65535')
       }
     }
     

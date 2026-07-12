@@ -128,6 +128,53 @@ test('removed historical tools block instead of silently shrinking availability'
   assert.equal(result.diagnostics.reason, 'historical_tool_removed')
 })
 
+test('same-session subset request reuses the full session catalog instead of shrinking it', () => {
+  const store = createToolCatalogStore()
+  const first = store.resolveSnapshot({
+    sessionId: 'subset-session',
+    requestTools: [bashTool, writeTool],
+    hasManagedToolHistory: false,
+    historyToolNames: [],
+  })
+
+  const second = store.resolveSnapshot({
+    sessionId: 'subset-session',
+    requestTools: [bashTool],
+    hasManagedToolHistory: true,
+    historyToolNames: [],
+  })
+
+  assert.equal(second.blocked, false)
+  assert.equal(second.diagnostics.source, 'session_catalog')
+  assert.deepEqual(second.diagnostics.driftKinds, ['current_request_subset_of_session_catalog'])
+  assert.equal(second.snapshot?.fingerprint, first.snapshot?.fingerprint)
+  assert.deepEqual(second.snapshot?.allowedToolNames, ['bash', 'write'])
+})
+
+test('restore-only-when-empty policy respects the current subset request instead of reviving the full session catalog', () => {
+  const store = createToolCatalogStore()
+  store.resolveSnapshot({
+    sessionId: 'claude-subset-session',
+    requestTools: [bashTool, writeTool],
+    hasManagedToolHistory: false,
+    historyToolNames: [],
+    sessionCatalogPolicy: 'restore-only-when-empty',
+  })
+
+  const second = store.resolveSnapshot({
+    sessionId: 'claude-subset-session',
+    requestTools: [bashTool],
+    hasManagedToolHistory: true,
+    historyToolNames: [],
+    sessionCatalogPolicy: 'restore-only-when-empty',
+  })
+
+  assert.equal(second.blocked, false)
+  assert.equal(second.diagnostics.source, 'current_request')
+  assert.deepEqual(second.diagnostics.driftKinds, ['removed_tool'])
+  assert.deepEqual(second.snapshot?.allowedToolNames, ['bash'])
+})
+
 test('schema changes for historical tools block', () => {
   const store = createToolCatalogStore()
   store.resolveSnapshot({

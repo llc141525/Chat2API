@@ -50,7 +50,7 @@
 | Provider         | Auth Type     | OAuth | Models                                                                                                                                                                                                                                          |
 | ---------------- | ------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | DeepSeek         | User Token    | Yes   | deepseek-v4-flash, deepseek-v4-pro                                                                                                                                                                                                              |
-| GLM              | Refresh Token | Yes   | GLM-5.1                                                                                                                                                                                                                                         |
+| GLM              | Refresh Token | Yes   | GLM-5.2, GLM-5.1                                                                                                                                                                                                                                |
 | Kimi             | JWT Token     | Yes   | Kimi-K2.6                                                                                                                                                                                                                                       |
 | MiniMax          | JWT Token     | Yes   | MiniMax-M2.7                                                                                                                                                                                                                                    |
 | Mimo             | Cookie        | Yes   | MiMo-V2.5-Pro, MiMo-V2.5, MiMo-V2-Flash                                                                                                                                                                                                         |
@@ -128,7 +128,7 @@ For example, to get a DeepSeek token:
 ### Step 3: Configure Proxy
 
 1. Navigate to **Proxy Settings** from the sidebar
-2. Set the port (default: 8080)
+2. Set the port (default: 48763)
 3. Choose a load balancing strategy:
    - **Round Robin**: Distributes requests evenly across accounts
    - **Fill First**: Uses one account until limit is reached
@@ -144,7 +144,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="your-api-key",
-    base_url="http://localhost:8080/v1"
+    base_url="http://localhost:48763/v1"
 )
 
 response = client.chat.completions.create(
@@ -182,7 +182,7 @@ For security, you can enable API Key authentication:
 
 ## ⚙️ Settings
 
-- **Port**: Change the proxy listening port (default: 8080)
+- **Port**: Change the proxy listening port (default: 48763)
 - **Routing Strategy**: Round Robin or Fill First
 - **Auto-start**: Launch proxy automatically on app startup
 - **Theme**: Light, Dark, or System preference

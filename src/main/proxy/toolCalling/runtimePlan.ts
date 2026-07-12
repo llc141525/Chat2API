@@ -2,7 +2,13 @@ import type { ToolCallingConfig } from '../../../shared/toolCalling.ts'
 import type { NormalizedClientToolRequest } from './clientAdapters/types.ts'
 import { resolveToolCatalog } from './catalog.ts'
 import { getProviderToolProfile } from './providerProfiles.ts'
-import type { ToolCallingPlan } from './types.ts'
+import type {
+  SessionCatalogPolicy,
+  ToolCallingPlan,
+  ToolCatalogSource,
+  ToolContractSourceStep,
+  ToolTurnContract,
+} from './types.ts'
 import type { ChatMessage } from '../types.ts'
 import { hasGeneralToolPromptSignature } from '../constants/signatures.ts'
 
@@ -20,11 +26,18 @@ export function buildToolCallingRuntimePlan(input: {
   const requestTools = input.clientRequest.tools
   const forcedName = input.clientRequest.toolChoice.forcedName
 
+  const isPromptEmbedded = input.clientRequest.toolSource === 'prompt_embedded'
+  const sessionCatalogPolicy: SessionCatalogPolicy =
+    input.toolSessionKey?.startsWith('claude:')
+      ? 'restore-only-when-empty'
+      : 'reuse-subset-ok'
   const catalogResolution = resolveToolCatalog({
     sessionId: input.toolSessionKey ?? null,
-    requestTools,
+    requestTools: isPromptEmbedded ? [] : requestTools,
+    promptEmbeddedTools: isPromptEmbedded ? requestTools : undefined,
     hasManagedToolHistory: hasExistingManagedXmlContext(input.messages),
     historyToolNames: extractManagedHistoryToolNames(input.messages),
+    sessionCatalogPolicy,
   })
   const catalogTools = catalogResolution.snapshot?.tools ?? []
   const catalogToolNames = new Set(catalogTools.map((tool) => tool.name))
@@ -52,6 +65,26 @@ export function buildToolCallingRuntimePlan(input: {
   const shouldInjectPrompt = mode === 'managed' && allowedTools.length > 0
   const shouldParseResponse = mode === 'managed'
   const availabilityRetryAllowed = mode === 'managed' && profile.availabilityDriftRetry === 'enabled'
+  const toolSourceChain = buildToolSourceChain(catalogResolution.diagnostics.source)
+  const contract = freezeContract({
+    turnId: input.requestId ?? `${input.providerId}:${input.actualModel ?? input.model ?? 'unknown'}`,
+    sessionId: input.toolSessionKey ?? null,
+    providerId: input.providerId,
+    model: input.model ?? input.actualModel ?? '',
+    protocol,
+    snapshotFingerprint: catalogResolution.snapshot?.fingerprint ?? null,
+    tools: allowedTools,
+    allowedToolNames,
+    toolChoiceMode: input.clientRequest.toolChoice.mode,
+    forcedToolName: forcedName,
+    shouldInjectPrompt,
+    shouldParseResponse,
+    historyMode: mode === 'managed' ? 'managed_protocol' : 'openai_native',
+    emptyOutputPolicy: profile.supportsIntentionalEmptyOutput
+      ? 'pass_through_without_tool_semantics'
+      : 'diagnose_and_fail',
+    toolSourceChain,
+  })
 
   return {
     mode,
@@ -66,9 +99,11 @@ export function buildToolCallingRuntimePlan(input: {
     forcedToolName: forcedName,
     catalogSnapshot: catalogResolution.snapshot,
     catalogDiagnostics: catalogResolution.diagnostics,
-    availabilityRetryAllowed,
-    diagnostics: {
+      availabilityRetryAllowed,
+      contract,
+      diagnostics: {
       requestId: input.requestId,
+      turnId: contract.turnId,
       clientAdapterId: input.clientRequest.clientAdapterId,
       providerId: input.providerId,
       model: input.model,
@@ -84,10 +119,15 @@ export function buildToolCallingRuntimePlan(input: {
       allowedToolNames: [...allowedToolNames],
       catalogSource: catalogResolution.diagnostics.source,
       catalogFingerprint: catalogResolution.snapshot?.fingerprint,
-      catalogDriftKinds: catalogResolution.diagnostics.driftKinds,
-      catalogBlocked: catalogResolution.diagnostics.blocked,
-    },
-  }
+        catalogDriftKinds: catalogResolution.diagnostics.driftKinds,
+        catalogBlocked: catalogResolution.diagnostics.blocked,
+        toolSourceChain,
+        emptyOutputPolicy: contract.emptyOutputPolicy,
+        providerManagedStatus: profile.managedToolSupportStatus,
+        providerManagedTransport: profile.managedTransport,
+        providerRiskControlCaveats: [...profile.providerRiskControlCaveats],
+      },
+    }
 }
 
 function getDisabledReason(
@@ -149,4 +189,73 @@ function extractManagedHistoryToolNames(messages?: ChatMessage[]): string[] {
   }
 
   return [...names].sort()
+}
+
+function buildToolSourceChain(source: ToolCatalogSource): ToolContractSourceStep[] {
+  if (source === 'current_request') return ['current_request']
+  if (source === 'session_catalog') return ['current_request', 'session_catalog']
+  if (source === 'prompt_embedded') return ['current_request', 'prompt_embedded']
+  if (source === 'restored_from_history') return ['current_request', 'session_catalog', 'message_history']
+  return ['current_request', 'session_catalog', 'message_history', 'safe_empty']
+}
+
+function freezeContract(contract: ToolTurnContract): ToolTurnContract {
+  return Object.freeze({
+    ...contract,
+    tools: Object.freeze(contract.tools.map((tool) => Object.freeze({
+      ...tool,
+      parameters: deepFreeze(cloneValue(tool.parameters)),
+    }))),
+    allowedToolNames: createReadonlySet(contract.allowedToolNames),
+    toolSourceChain: Object.freeze([...contract.toolSourceChain]),
+  })
+}
+
+function createReadonlySet<T>(values: Iterable<T>): ReadonlySet<T> {
+  const set = new Set(values)
+  return new Proxy(set, {
+    get(target, prop, receiver) {
+      if (prop === 'add' || prop === 'delete' || prop === 'clear') {
+        return () => {
+          throw new TypeError('Cannot mutate readonly set')
+        }
+      }
+
+      const value = Reflect.get(target, prop, target)
+      if (typeof value === 'function') {
+        return value.bind(target)
+      }
+      return value
+    },
+  }) as ReadonlySet<T>
+}
+
+function cloneValue<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneValue(item)) as T
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, cloneValue(nested)]),
+    ) as T
+  }
+  return value
+}
+
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== 'object') return value
+
+  Object.freeze(value)
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      deepFreeze(item)
+    }
+    return value
+  }
+
+  for (const nested of Object.values(value as Record<string, unknown>)) {
+    deepFreeze(nested)
+  }
+  return value
 }

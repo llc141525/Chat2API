@@ -1,7 +1,7 @@
 import { useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { Activity, CheckCircle, Clock, Users, RefreshCw } from 'lucide-react'
+import { Activity, Clock, Hash, Users, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   StatsCard,
@@ -97,6 +97,10 @@ export function Dashboard() {
   }, [navigate])
 
   const isElectron = !!window.electronAPI
+  const formatTokenCount = (value: number) => new Intl.NumberFormat(undefined, {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(value)
 
   return (
     <div className="space-y-6">
@@ -149,11 +153,11 @@ export function Dashboard() {
           }}
         />
         <StatsCard
-          title={t('dashboard.successRate')}
-          value={`${stats.successRate}%`}
-          icon={CheckCircle}
+          title={t('dashboard.totalTokens')}
+          value={formatTokenCount(stats.totalTokens)}
+          icon={Hash}
           trend={{
-            value: stats.successRateTrend,
+            value: stats.tokensTrend,
             label: t('dashboard.vsYesterday'),
           }}
         />

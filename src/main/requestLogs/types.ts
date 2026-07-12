@@ -14,6 +14,12 @@ export interface RequestLogStats {
   todayTotal: number
   todaySuccess: number
   todayError: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  todayPromptTokens: number
+  todayCompletionTokens: number
+  todayTotalTokens: number
 }
 
 export interface RequestLogTrendPoint {
@@ -21,6 +27,9 @@ export interface RequestLogTrendPoint {
   total: number
   success: number
   error: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
   avgLatency: number
 }
 

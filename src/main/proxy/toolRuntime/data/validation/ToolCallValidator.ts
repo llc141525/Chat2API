@@ -6,6 +6,7 @@ import type {
   ToolValidationOutcome,
   ValidatedCallStructure,
 } from '../types.ts'
+import { parseParameterPayloadForSchema, schemaRequiresComplexPayload } from './schemaPayload.ts'
 
 export function validateToolCallStructure(input: ToolCallValidatorInput): ToolValidationOutcome {
   const selectedProtocol = input.plan.protocol
@@ -76,6 +77,16 @@ export function validateToolCallStructure(input: ToolCallValidatorInput): ToolVa
       })
     }
 
+    const invalidPayload = invalidSchemaPayload(call, tool)
+    if (invalidPayload) {
+      return invalid({
+        kind: 'schema_validation_failed',
+        selectedProtocol,
+        detail: invalidPayload,
+        toolName,
+      })
+    }
+
     validated.push({
       callIndex: call.callIndex,
       toolName,
@@ -117,10 +128,27 @@ function emptyComplexParameters(
     .filter((param) => {
       const schema = props[param.rawName]
       if (!schema) return false
-      const isComplex = schema.type === 'array' || schema.type === 'object'
-      return isComplex && param.rawPayload.trim().length === 0
+      return schemaRequiresComplexPayload(schema) && param.rawPayload.trim().length === 0
     })
     .map((param) => param.rawName)
+}
+
+function invalidSchemaPayload(
+  call: ExtractedCallStructure,
+  tool: NormalizedToolDefinition,
+): string | null {
+  const props = tool.parameters?.properties as Record<string, unknown> | undefined
+  if (!props) return null
+
+  for (const param of call.rawParameters) {
+    const schema = props[param.rawName]
+    if (!schemaRequiresComplexPayload(schema)) continue
+
+    const result = parseParameterPayloadForSchema(param.rawPayload, schema, param.rawName)
+    if (!result.ok) return result.detail
+  }
+
+  return null
 }
 
 function invalid(failure: ToolStructureFailure): ToolValidationOutcome {

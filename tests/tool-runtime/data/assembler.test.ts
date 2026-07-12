@@ -18,6 +18,21 @@ const tools: NormalizedToolDefinition[] = [{
   source: 'openai',
 }]
 
+const configureTool: NormalizedToolDefinition = {
+  name: 'configure',
+  description: 'Apply structured settings',
+  parameters: {
+    type: 'object',
+    properties: {
+      options: { type: 'object' },
+      tags: { type: 'array', items: { type: 'string' } },
+      label: { type: 'string' },
+    },
+    required: ['options', 'tags'],
+  },
+  source: 'openai',
+}
+
 test('assembler converts validated structure into OpenAI tool_calls', () => {
   const validated: ValidatedCallStructure[] = [{
     callIndex: 0,
@@ -98,4 +113,43 @@ test('assembler does not add missing required parameters', () => {
 
   const calls = assembleOpenAIToolCalls({ validated, tools })
   assert.equal(calls[0].function.arguments, '{}')
+})
+
+test('assembler emits object and array parameters as JSON values', () => {
+  const validated: ValidatedCallStructure[] = [{
+    callIndex: 0,
+    toolName: 'configure',
+    parameters: [
+      { name: 'options', rawPayload: '{"mode":"safe"}', payloadEncoding: 'json_text' },
+      { name: 'tags', rawPayload: '["safe","fast"]', payloadEncoding: 'json_text' },
+    ],
+  }]
+
+  const calls = assembleOpenAIToolCalls({ validated, tools: [configureTool] })
+
+  assert.deepEqual(JSON.parse(calls[0].function.arguments), {
+    options: { mode: 'safe' },
+    tags: ['safe', 'fast'],
+  })
+})
+
+test('assembler keeps json-looking string parameters as strings', () => {
+  const payload = '{"mode":"safe"}'
+  const validated: ValidatedCallStructure[] = [{
+    callIndex: 0,
+    toolName: 'configure',
+    parameters: [
+      { name: 'options', rawPayload: '{"mode":"safe"}', payloadEncoding: 'json_text' },
+      { name: 'tags', rawPayload: '["safe"]', payloadEncoding: 'json_text' },
+      { name: 'label', rawPayload: payload, payloadEncoding: 'cdata' },
+    ],
+  }]
+
+  const calls = assembleOpenAIToolCalls({ validated, tools: [configureTool] })
+
+  assert.deepEqual(JSON.parse(calls[0].function.arguments), {
+    options: { mode: 'safe' },
+    tags: ['safe'],
+    label: payload,
+  })
 })

@@ -150,6 +150,10 @@ export const CLIENT_SIGNATURES: Record<ClientType, ClientSignatureConfig> = {
 export const GENERAL_TOOL_SIGNATURES = [
   '## Available Tools',
   '## Tool Call Protocol',
+  'Tool Contract Header',
+  'contract_header_version:',
+  'catalog_fingerprint:',
+  'allowed_tools:',
   '[function_calls]',
   '<|CHAT2API|tool_calls>',
   '<|CHAT2API|invoke',

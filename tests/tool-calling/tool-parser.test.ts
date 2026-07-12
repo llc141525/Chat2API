@@ -95,6 +95,16 @@ test('unknown tool name is rejected', () => {
   assert.deepEqual(result.invalidToolNames, ['missing_tool'])
 })
 
+test('managed bracket rejects non-object JSON arguments', () => {
+  const result = managedBracketProtocol.parse(
+    '[function_calls][call:default_api:read_file]["/tmp/a"][/call][/function_calls]',
+    { tools, protocol: 'managed_bracket' },
+  )
+
+  assert.equal(result.toolCalls.length, 0)
+  assert.equal(result.malformedReason, 'arguments_not_object')
+})
+
 test('managed XML parser rejects undeclared tool names and records invalid names', () => {
   const result = managedXmlProtocol.parse(
     '<|CHAT2API|tool_calls><|CHAT2API|invoke name="missing_tool">{}</|CHAT2API|invoke></|CHAT2API|tool_calls>',

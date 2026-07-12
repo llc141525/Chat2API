@@ -20,7 +20,7 @@ export function TrayView() {
 
   const [proxyRunning, setProxyRunning] = useState(false)
   const [proxyLoading, setProxyLoading] = useState(false)
-  const [port, setPort] = useState(8080)
+  const [port, setPort] = useState(0)
   const [host, setHost] = useState('127.0.0.1')
   const [copied, setCopied] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -33,7 +33,7 @@ export function TrayView() {
       
       const config = await window.electronAPI?.config?.get?.()
       if (config) {
-        setPort(config.proxyPort || 8080)
+        setPort(config.proxyPort ?? 0)
         setHost(config.proxyHost || '127.0.0.1')
       }
     }
@@ -46,7 +46,7 @@ export function TrayView() {
     })
 
     const unsubscribeConfig = window.electronAPI?.config?.onConfigChanged?.((config) => {
-      setPort(config.proxyPort || 8080)
+      setPort(config.proxyPort ?? 0)
       setHost(config.proxyHost || '127.0.0.1')
     })
 
@@ -85,7 +85,7 @@ export function TrayView() {
       setProviders(providersData)
       setAccounts(accountsData)
       if (config) {
-        setPort(config.proxyPort || 8080)
+        setPort(config.proxyPort ?? 0)
         setHost(config.proxyHost || '127.0.0.1')
       }
     } catch (error) {

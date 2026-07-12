@@ -5,6 +5,7 @@ import { createFileCatalogPersistence } from './catalogPersistence.ts'
 
 import type {
   NormalizedToolDefinition,
+  SessionCatalogPolicy,
   ToolCatalogDiagnostics,
   ToolCatalogDriftKind,
   ToolCatalogSnapshot,
@@ -14,8 +15,10 @@ import type { CatalogPersistenceStore } from './catalogPersistence.ts'
 export interface ToolCatalogResolveInput {
   sessionId: string | null
   requestTools: NormalizedToolDefinition[]
+  promptEmbeddedTools?: NormalizedToolDefinition[]
   hasManagedToolHistory: boolean
   historyToolNames: string[]
+  sessionCatalogPolicy?: SessionCatalogPolicy
 }
 
 export interface ToolCatalogResolution {
@@ -48,8 +51,10 @@ export function createToolCatalogStore(persistence?: CatalogPersistenceStore): T
     const requestTools = normalizeTools(input.requestTools)
     const historyToolNames = canonicalToolNames(input.historyToolNames)
     const existing = input.sessionId ? sessions.get(input.sessionId)?.snapshot : undefined
+    const sessionCatalogPolicy = input.sessionCatalogPolicy ?? 'reuse-subset-ok'
 
     if (requestTools.length === 0) {
+      // Session catalog wins for later turns of the same session
       if (existing) {
         const snapshot = freezeSnapshot({
           ...existing,
@@ -62,6 +67,32 @@ export function createToolCatalogStore(persistence?: CatalogPersistenceStore): T
             source: 'session_catalog',
             fingerprint: snapshot.fingerprint,
             driftKinds: ['missing_current_tools_with_session_catalog'],
+            blocked: false,
+          },
+        }
+      }
+
+      // Prompt-embedded catalog: client inlined tools in system prompt text
+      const embeddedTools = input.promptEmbeddedTools ? normalizeTools(input.promptEmbeddedTools) : []
+      if (embeddedTools.length > 0) {
+        const snapshot = buildSnapshot({
+          sessionId: input.sessionId,
+          tools: embeddedTools,
+          source: 'prompt_embedded',
+          createdTurnIndex: ++turnCounter,
+          updatedTurnIndex: ++turnCounter,
+        })
+        if (input.sessionId) {
+          sessions.set(input.sessionId, { snapshot })
+          persistence?.save(input.sessionId, snapshot)
+        }
+        return {
+          snapshot,
+          blocked: false,
+          diagnostics: {
+            source: 'prompt_embedded',
+            fingerprint: snapshot.fingerprint,
+            driftKinds: ['prompt_embedded_only_catalog'],
             blocked: false,
           },
         }
@@ -128,6 +159,23 @@ export function createToolCatalogStore(persistence?: CatalogPersistenceStore): T
           driftKinds,
           blocked: true,
           reason: blockReason,
+        },
+      }
+    }
+
+    if (shouldReuseSessionCatalog(existing, nextSnapshot, sessionCatalogPolicy)) {
+      const snapshot = freezeSnapshot({
+        ...existing,
+        source: 'session_catalog',
+      })
+      return {
+        snapshot,
+        blocked: false,
+        diagnostics: {
+          source: 'session_catalog',
+          fingerprint: snapshot.fingerprint,
+          driftKinds: ['current_request_subset_of_session_catalog'],
+          blocked: false,
         },
       }
     }
@@ -204,7 +252,7 @@ function canonicalToolNames(names: string[]): string[] {
 function buildSnapshot(input: {
   sessionId: string | null
   tools: NormalizedToolDefinition[]
-  source: 'current_request' | 'session_catalog' | 'restored_from_history'
+  source: 'current_request' | 'session_catalog' | 'prompt_embedded' | 'restored_from_history'
   createdTurnIndex: number
   updatedTurnIndex: number
 }): ToolCatalogSnapshot {
@@ -300,6 +348,23 @@ function getBlockReason(
   }
 
   return undefined
+}
+
+function shouldReuseSessionCatalog(
+  previous: ToolCatalogSnapshot | undefined,
+  next: ToolCatalogSnapshot,
+  policy: SessionCatalogPolicy,
+): boolean {
+  if (!previous) return false
+  if (policy !== 'reuse-subset-ok') return false
+  if (next.allowedToolNames.length >= previous.allowedToolNames.length) return false
+
+  for (const tool of next.tools) {
+    if (!previous.allowedToolNames.includes(tool.name)) return false
+    if (previous.schemaHashes[tool.name] !== next.schemaHashes[tool.name]) return false
+  }
+
+  return true
 }
 
 function freezeSnapshot(snapshot: ToolCatalogSnapshot): ToolCatalogSnapshot {

@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
+import { inspectNonStreamAssistantOutput } from '../../src/main/proxy/toolCalling/outputInspection.ts'
 import type { ChatCompletionRequest } from '../../src/main/proxy/types.ts'
 import type { Provider } from '../../src/main/store/types.ts'
 
@@ -190,6 +191,42 @@ test('tool session key reuses catalog snapshot across omitted-tool turns', () =>
   assert.equal(first.plan.catalogSnapshot?.fingerprint, second.plan.catalogSnapshot?.fingerprint)
   assert.equal(second.plan.catalogDiagnostics.source, 'session_catalog')
   assert.match(second.messages[0].content as string, /catalog_fingerprint:/)
+})
+
+test('tool session key keeps the full catalog when a later request sends only a subset of tools', () => {
+  const engine = new ToolCallingEngine()
+  const sessionKey = 'engine-stage2-subset-reuse'
+  const first = engine.transformRequest({
+    request: request(),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: sessionKey,
+  })
+
+  const second = engine.transformRequest({
+    request: {
+      model: 'deepseek-chat',
+      messages: [
+        {
+          role: 'assistant',
+          content: null as any,
+          tool_calls: [{ id: 'call_skill', type: 'function', function: { name: 'default_api:read_file', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 'call_skill', content: 'body' },
+        { role: 'user', content: 'continue' },
+      ],
+      tools: [tools[0]],
+    },
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: sessionKey,
+  })
+
+  assert.equal(second.plan.catalogDiagnostics.source, 'session_catalog')
+  assert.deepEqual(second.plan.catalogDiagnostics.driftKinds, ['current_request_subset_of_session_catalog'])
+  assert.equal(second.plan.catalogSnapshot?.fingerprint, first.plan.catalogSnapshot?.fingerprint)
+  assert.deepEqual(second.plan.tools.map((tool) => tool.name), ['default_api:list_dir', 'default_api:read_file'])
+  assert.match(second.messages[0].content as string, /default_api:list_dir/)
 })
 
 test('requestId falls back as the tool session key for omitted-tool follow-up turns', () => {
@@ -459,7 +496,38 @@ test('availability drift retry does not trigger twice for one plan', () => {
 
   assert.equal(first?.type, 'availability_retry')
   assert.equal(second, undefined)
-  assert.equal(transformed.plan.diagnostics.availabilityRetryResult, 'skipped')
+  assert.equal(transformed.plan.diagnostics.availabilityRetryResult, 'failed')
+  assert.deepEqual(transformed.plan.diagnostics.deniedToolNames, ['default_api:read_file'])
+})
+
+test('repeated non-stream availability denial fails explicit inspection after one retry attempt', () => {
+  const engine = new ToolCallingEngine()
+  const transformed = engine.transformRequest({
+    request: request(),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: `engine-catalog-${Date.now()}-drift-explicit-fail`,
+  })
+  const result: any = {
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: 'I only have open_url available.',
+      },
+      finish_reason: 'stop',
+    }],
+  }
+
+  const first = engine.applyNonStreamResponse(result, transformed.plan)
+  const second = engine.applyNonStreamResponse(result, transformed.plan)
+  const inspection = inspectNonStreamAssistantOutput({ result, plan: transformed.plan })
+
+  assert.equal(first?.type, 'availability_retry')
+  assert.equal(second, undefined)
+  assert.equal(inspection.ok, false)
+  assert.equal(inspection.outcome, 'tool_availability_drift')
+  assert.match(inspection.error, /authoritative tool catalog/i)
+  assert.deepEqual(transformed.plan.diagnostics.mentionedUnavailableOnlyTools, ['open_url'])
 })
 
 test('availability drift retry does not trigger when valid tool_calls were parsed', () => {

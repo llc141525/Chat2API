@@ -15,7 +15,7 @@ export type ToolProtocolId =
   | 'anthropic_tool_use'
   | 'codex_responses'
 
-export type ToolSource = 'openai' | 'mcp'
+export type ToolSource = 'openai' | 'mcp' | 'prompt_embedded'
 
 export interface NormalizedToolDefinition {
   name: string
@@ -39,16 +39,61 @@ export interface NormalizedToolResult {
   content: string
 }
 
-export type ToolCatalogSource = 'current_request' | 'session_catalog' | 'restored_from_history' | 'none'
+export type ToolCatalogSource = 'current_request' | 'session_catalog' | 'prompt_embedded' | 'restored_from_history' | 'none'
+export type SessionCatalogPolicy = 'reuse-subset-ok' | 'restore-only-when-empty'
+
+export type ToolContractSourceStep =
+  | 'current_request'
+  | 'session_catalog'
+  | 'prompt_embedded'
+  | 'message_history'
+  | 'safe_empty'
+
+export type ToolContractHistoryMode = 'openai_native' | 'managed_protocol'
+
+export type EmptyOutputPolicy = 'diagnose_and_fail' | 'pass_through_without_tool_semantics'
+export type ManagedToolSupportStatus = 'experimental' | 'accepted' | 'disabled'
+export type ProviderManagedTransport =
+  | 'openai_chat_completions'
+  | 'grpc_web_stream'
+  | 'polling_stream'
+  | 'http2_stream'
+  | 'provider_chat_api'
+  | 'unknown'
+
+export type ProviderTurnOutcome =
+  | 'content'
+  | 'tool_calls'
+  | 'tool_availability_drift'
+  | 'provider_empty'
+  | 'malformed_tool_output'
+  | 'runtime_suppressed_malformed_tool_output'
+  | 'adapter_parse_error'
+  | 'provider_error'
+
+export type ToolValidationFailureKind =
+  | 'unknown_tool_name'
+  | 'invalid_required_fields'
+  | 'arguments_not_object'
+  | 'arguments_invalid_json'
+  | 'malformed_container'
+  | 'schema_validation_failed'
+  | 'protocol_mismatch'
+  | 'malformed_tool_output'
+
+export type ToolSuppressedReason = 'invalid_tool_name' | 'malformed_tool_output'
 
 export type ToolCatalogDriftKind =
   | 'added_tool'
   | 'removed_tool'
+  | 'current_request_subset_of_session_catalog'
   | 'schema_changed'
   | 'missing_current_tools_with_session_catalog'
   | 'missing_current_tools_without_catalog'
   | 'history_references_unknown_tool'
   | 'restored_from_history'
+  | 'prompt_embedded_only_catalog'
+  | 'schema_degraded_from_prompt'
 
 export interface ToolCatalogSnapshot {
   sessionId: string | null
@@ -56,7 +101,7 @@ export interface ToolCatalogSnapshot {
   tools: ReadonlyArray<NormalizedToolDefinition>
   allowedToolNames: ReadonlyArray<string>
   schemaHashes: Readonly<Record<string, string>>
-  source: 'current_request' | 'session_catalog' | 'restored_from_history'
+  source: 'current_request' | 'session_catalog' | 'prompt_embedded' | 'restored_from_history'
   createdTurnIndex: number
   updatedTurnIndex: number
 }
@@ -69,8 +114,27 @@ export interface ToolCatalogDiagnostics {
   reason?: string
 }
 
+export interface ToolTurnContract {
+  turnId: string
+  sessionId: string | null
+  providerId: string
+  model: string
+  protocol: ToolProtocolId
+  snapshotFingerprint: string | null
+  tools: ReadonlyArray<NormalizedToolDefinition>
+  allowedToolNames: ReadonlySet<string>
+  toolChoiceMode: 'auto' | 'none' | 'required' | 'forced'
+  forcedToolName?: string
+  shouldInjectPrompt: boolean
+  shouldParseResponse: boolean
+  historyMode: ToolContractHistoryMode
+  emptyOutputPolicy: EmptyOutputPolicy
+  toolSourceChain: ReadonlyArray<ToolContractSourceStep>
+}
+
 export interface ToolCallDiagnostics {
   requestId?: string
+  turnId?: string
   clientAdapterId: string
   detectedClientType?: string
   providerId: string
@@ -94,14 +158,25 @@ export interface ToolCallDiagnostics {
   catalogFingerprint?: string
   catalogDriftKinds?: ToolCatalogDriftKind[]
   catalogBlocked?: boolean
+  toolSourceChain?: ToolContractSourceStep[]
+  terminalOutcome?: ProviderTurnOutcome
+  emptyOutputPolicy?: EmptyOutputPolicy
+  validationFailureKind?: ToolValidationFailureKind
+  suppressedReason?: ToolSuppressedReason
   availabilityDriftDetected?: boolean
   availabilityRetryResult?: 'skipped' | 'attempted' | 'succeeded' | 'failed'
+  deniedToolNames?: string[]
+  mentionedUnavailableOnlyTools?: string[]
+  providerManagedStatus?: ManagedToolSupportStatus
+  providerManagedTransport?: ProviderManagedTransport
+  providerRiskControlCaveats?: string[]
 }
 
 export interface AvailabilityRetryRequest {
   type: 'availability_retry'
   catalogFingerprint: string
   clarification: string
+  subkind?: 'provider_side' | 'summary_contamination' | 'catalog_missing'
 }
 
 export interface ToolCallingPlan {
@@ -119,6 +194,7 @@ export interface ToolCallingPlan {
   catalogDiagnostics: ToolCatalogDiagnostics
   availabilityRetryAllowed: boolean
   availabilityRetryAttempted?: boolean
+  contract: ToolTurnContract
   diagnostics: ToolCallDiagnostics
 }
 

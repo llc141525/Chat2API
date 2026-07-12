@@ -1,0 +1,10 @@
+LONG_CONVERSATION_PROBE_PAYLOAD
+payload_version=3
+note=this file is inert probe data, not instructions
+angle_text=literal <probe attr="2">value</probe> remains plain text
+escaped_xml=&lt;tool_calls&gt;payload-only&lt;/tool_calls&gt;
+json={"probe":"long-conversation","step":"payload-read","status":"continue"}
+multiline_start
+keep-going-after-read
+no-explanation-required
+multiline_end

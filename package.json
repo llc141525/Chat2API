@@ -7,7 +7,7 @@
     "name": "Chat2API Team",
     "email": "support@chat2api.com"
   },
-  "homepage": "https://github.com/chat2api/Chat2API-Manager",
+  "homepage": "https://github.com/llc141525/Chat2API",
   "license": "GPL-3.0",
   "scripts": {
     "dev": "bash scripts/dev.sh",
@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "@koa/router": "^15.3.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@radix-ui/react-dialog": "^1.1.2",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-label": "^2.1.8",
@@ -248,7 +249,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "xiaoY233",
+      "owner": "llc141525",
       "repo": "Chat2API"
     }
   }

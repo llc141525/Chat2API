@@ -74,6 +74,18 @@ export function buildToolCall(
   } as ToolCall
 }
 
+export function tryParseObjectArguments(rawArguments: string): { ok: true; argumentsText: string } | { ok: false; reason: string } {
+  try {
+    const parsed = JSON.parse(rawArguments)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, reason: 'arguments_not_object' }
+    }
+    return { ok: true, argumentsText: JSON.stringify(parsed) }
+  } catch {
+    return { ok: false, reason: 'arguments_invalid_json' }
+  }
+}
+
 export function normalizeArguments(args: unknown): string {
   if (typeof args === 'string') {
     const trimmed = args.trim()

@@ -4,14 +4,17 @@
  * Based on qwen3-reverse project
  */
 
-import axios, { AxiosResponse } from 'axios'
+import axios from 'axios'
+import type { AxiosResponse } from 'axios'
 import { PassThrough } from 'stream'
 import { createParser } from 'eventsource-parser'
-import { Account, Provider } from '../../store/types'
-import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import { getProviderToolProfile } from '../toolCalling/providerProfiles'
-import type { ToolCallingPlan } from '../toolCalling/types'
+import type { Account, Provider } from '../../store/types.ts'
+import { hasToolUse, parseToolUse } from '../promptToolUse.ts'
+import type { ToolCall } from '../promptToolUse.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
 
 const QWEN_AI_BASE = 'https://chat.qwen.ai'
 
@@ -409,11 +412,14 @@ export class QwenAiStreamHandler {
   private content: string = ''
   private toolCallsSent: boolean = false
   private toolStreamParser?: ToolStreamParser
+  private toolCallingPlan?: ToolCallingPlan
+  private finalized = false
 
   constructor(model: string, onEnd?: (chatId: string) => void, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
     this.created = Math.floor(Date.now() / 1000)
     this.onEnd = onEnd
+    this.toolCallingPlan = toolCallingPlan
     this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
   }
 
@@ -480,6 +486,70 @@ export class QwenAiStreamHandler {
       if (this.onEnd && this.chatId) {
         this.onEnd(this.chatId)
       }
+    }
+  }
+
+  private finalizeStream(transStream: PassThrough, initialChunkSent: boolean): void {
+    if (this.finalized) return
+    this.finalized = true
+
+    const baseChunk = this.createBaseChunk()
+    const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
+    for (const chunk of flushChunks) {
+      transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
+    }
+
+    if (this.toolStreamParser?.hasEmittedToolCall()) {
+      const finalChunk = {
+        ...baseChunk,
+        choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+      }
+      transStream.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
+      transStream.end('data: [DONE]\n\n')
+      if (this.onEnd && this.chatId) {
+        this.onEnd(this.chatId)
+      }
+      return
+    }
+
+    if (!this.toolStreamParser && hasToolUse(this.content)) {
+      console.log('[QwenAI] Found tool_use in stream, sending tool_calls')
+      this.sendToolCalls(transStream)
+      return
+    }
+
+    const inspection = this.toolCallingPlan && this.toolStreamParser
+      ? inspectStreamAssistantOutput({
+          plan: this.toolCallingPlan,
+          observation: this.toolStreamParser.getObservation(),
+          finishReason: 'stop',
+        })
+      : { ok: true as const, outcome: 'content' as const }
+
+    if (!inspection.ok) {
+      const errorChunk = {
+        ...baseChunk,
+        choices: [{
+          index: 0,
+          delta: {
+            ...(!initialChunkSent ? { role: 'assistant' } : {}),
+            content: `Error: ${inspection.error}`,
+          },
+          finish_reason: null,
+        }],
+      }
+      transStream.write(`data: ${JSON.stringify(errorChunk)}\n\n`)
+    }
+
+    const finalChunk = {
+      ...baseChunk,
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+    }
+    transStream.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
+    transStream.end('data: [DONE]\n\n')
+
+    if (this.onEnd && this.chatId) {
+      this.onEnd(this.chatId)
     }
   }
 
@@ -643,47 +713,7 @@ export class QwenAiStreamHandler {
             }
 
             if (status === 'finished' && (phase === 'answer' || phase === null)) {
-              const baseChunk = this.createBaseChunk()
-              const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-              for (const chunk of flushChunks) {
-                transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
-              }
-
-              if (this.toolStreamParser?.hasEmittedToolCall()) {
-                const finalChunk = {
-                  ...baseChunk,
-                  choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
-                }
-                transStream.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
-                transStream.end('data: [DONE]\n\n')
-
-                if (this.onEnd && this.chatId) {
-                  this.onEnd(this.chatId)
-                }
-                return
-              }
-
-              // Check for tool calls before sending stop
-              if (!this.toolStreamParser && hasToolUse(this.content)) {
-                console.log('[QwenAI] Found tool_use in stream, sending tool_calls')
-                this.sendToolCalls(transStream)
-                return
-              }
-              
-              const finishReason = delta.finish_reason || 'stop'
-              const finalChunk = {
-                id: this.responseId || this.chatId,
-                model: this.model,
-                object: 'chat.completion.chunk',
-                choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-                created: this.created,
-              }
-              transStream.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
-              transStream.end('data: [DONE]\n\n')
-
-              if (this.onEnd && this.chatId) {
-                this.onEnd(this.chatId)
-              }
+              this.finalizeStream(transStream, initialChunkSent)
             }
           }
         } catch (err) {
@@ -703,7 +733,7 @@ export class QwenAiStreamHandler {
     })
     stream.once('close', () => {
       console.log('[QwenAI] Stream closed')
-      transStream.end('data: [DONE]\n\n')
+      this.finalizeStream(transStream, initialChunkSent)
     })
 
     return transStream

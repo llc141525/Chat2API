@@ -115,6 +115,47 @@ test('restored snapshot promotes to session store for subsequent turns', () => {
   assert.equal(second.snapshot?.fingerprint, first.snapshot?.fingerprint)
 })
 
+test('session catalog keeps full tool set even when later history only mentions one tool', () => {
+  const store = createToolCatalogStore()
+  const first = store.resolveSnapshot({
+    sessionId: 'full-catalog-session',
+    requestTools: [bashTool, writeTool],
+    hasManagedToolHistory: false,
+    historyToolNames: [],
+  })
+
+  const second = store.resolveSnapshot({
+    sessionId: 'full-catalog-session',
+    requestTools: [],
+    hasManagedToolHistory: true,
+    historyToolNames: ['bash'],
+  })
+
+  assert.equal(first.blocked, false)
+  assert.equal(second.blocked, false)
+  assert.equal(second.diagnostics.source, 'session_catalog')
+  assert.deepEqual(second.snapshot?.allowedToolNames, ['bash', 'write'])
+  assert.equal(second.snapshot?.tools.find((tool) => tool.name === 'write')?.description, writeTool.description)
+})
+
+test('history-only recovery cannot restore unobserved tools from an earlier full tool list', () => {
+  const result = createToolCatalogStore().resolveSnapshot({
+    sessionId: 'history-only-subset',
+    requestTools: [],
+    hasManagedToolHistory: true,
+    historyToolNames: ['bash'],
+  })
+
+  assert.equal(result.blocked, false)
+  assert.equal(result.diagnostics.source, 'restored_from_history')
+  assert.deepEqual(result.snapshot?.allowedToolNames, ['bash'])
+  assert.equal(
+    result.snapshot?.allowedToolNames.includes('write'),
+    false,
+    'Without a session catalog or current request tools, the fallback only sees tools already present in history',
+  )
+})
+
 test('session miss without managed history and without tools returns no_tools (not blocked)', () => {
   const result = createToolCatalogStore().resolveSnapshot({
     sessionId: 'no-history',

@@ -347,6 +347,9 @@ interface RequestLogEntry {
   responsePreview?: string
   /** Response body JSON string */
   responseBody?: string
+  promptTokens?: number
+  completionTokens?: number
+  totalTokens?: number
   latency: number
   isStream: boolean
   errorMessage?: string
@@ -366,6 +369,12 @@ interface RequestLogStats {
   todayTotal: number
   todaySuccess: number
   todayError: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  todayPromptTokens: number
+  todayCompletionTokens: number
+  todayTotalTokens: number
 }
 
 interface RequestLogTrend {
@@ -373,6 +382,9 @@ interface RequestLogTrend {
   total: number
   success: number
   error: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
   avgLatency: number
 }
 
@@ -390,6 +402,9 @@ interface PersistentStatistics {
   successRequests: number
   failedRequests: number
   totalLatency: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
   lastUpdated: number
   modelUsage: Record<string, number>
   providerUsage: Record<string, number>
@@ -403,6 +418,9 @@ interface DailyStatistics {
   successRequests: number
   failedRequests: number
   totalLatency: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
   modelUsage: Record<string, number>
   providerUsage: Record<string, number>
 }

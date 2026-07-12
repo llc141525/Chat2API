@@ -43,6 +43,23 @@ test('plain text has no tool intent', () => {
   })
 })
 
+test('standalone Chat2API invoke extracts as managed XML structure', () => {
+  const raw = 'before <|CHAT2API|invoke name="bash"><|CHAT2API|parameter name="argument">pwd</|CHAT2API|parameter></|CHAT2API|invoke> after'
+  const result = managedXmlStructureAdapter.extractStructure(raw)
+
+  assert.equal(result.kind, 'container')
+  if (result.kind !== 'container') throw new Error('expected container')
+  assert.equal(result.cleanContent, 'before  after')
+  assert.equal(result.rawMatches.length, 1)
+  assert.equal(result.extractedCalls[0].rawToolName, 'bash')
+  assert.deepEqual(result.extractedCalls[0].rawParameters[0], {
+    rawName: 'argument',
+    rawPayload: 'pwd',
+    payloadEncoding: 'text',
+    rawSpan: result.extractedCalls[0].rawParameters[0].rawSpan,
+  })
+})
+
 test('fenced tool example is treated as no intent', () => {
   const result = managedXmlStructureAdapter.extractStructure([
     'Example:',

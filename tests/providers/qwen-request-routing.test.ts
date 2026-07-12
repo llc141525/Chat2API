@@ -4,8 +4,9 @@ import assert from 'node:assert/strict'
 import {
   buildQwenChatRequestBodyForTest,
 } from '../../src/main/proxy/adapters/qwen.ts'
+import { createContextManagementService } from '../../src/main/proxy/services/contextManagementService.ts'
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
-import type { ChatCompletionRequest } from '../../src/main/proxy/types.ts'
+import type { ChatCompletionRequest, ChatMessage } from '../../src/main/proxy/types.ts'
 import type { Provider } from '../../src/main/store/types.ts'
 
 const qwenProvider: Provider = {
@@ -73,4 +74,129 @@ test('Qwen request body keeps router query as the latest real user message', () 
   assert.equal(countOccurrences(body.messages[0].content, '<|CHAT2API|tool_calls>'), 1)
   assert.match(body.messages[0].content, /default_api:read_file/)
   assert.match(body.messages[0].content, /修复 glm 无法使用工具的问题/)
+})
+
+test('Qwen request body preserves tool contract after low-threshold summary compaction', async () => {
+  const messages: ChatMessage[] = [
+    { role: 'system', content: 'You are a coding assistant.' },
+    { role: 'user', content: 'turn 1: remember the project is Chat2API' },
+    { role: 'assistant', content: 'Noted.' },
+    { role: 'user', content: 'turn 2: continue' },
+    { role: 'assistant', content: 'Continuing.' },
+    { role: 'user', content: 'turn 3: run a real read tool now' },
+  ]
+  const contextService = createContextManagementService({
+    enabled: true,
+    strategies: {
+      slidingWindow: { enabled: false, maxMessages: 4 },
+      tokenLimit: { enabled: false, maxTokens: 4000 },
+      summary: { enabled: true, keepRecentMessages: 3 },
+    },
+    executionOrder: ['summary'],
+  }, async () => 'Earlier turns established the Chat2API task. Do not describe tools.')
+
+  const compacted = await contextService.process(messages)
+  assert.equal(compacted.summaryGenerated, true)
+  assert.ok(compacted.messages.some(
+    (message) => message.role === 'system'
+      && typeof message.content === 'string'
+      && message.content.includes('[Prior conversation summary'),
+  ))
+
+  const engine = new ToolCallingEngine()
+  const request: ChatCompletionRequest = {
+    model: 'Qwen3.7-Max',
+    messages: compacted.messages,
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: 'read',
+          description: 'Read a file',
+          parameters: {
+            type: 'object',
+            properties: { filePath: { type: 'string' } },
+            required: ['filePath'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'bash',
+          description: 'Run a shell command',
+          parameters: {
+            type: 'object',
+            properties: { command: { type: 'string' } },
+            required: ['command'],
+          },
+        },
+      },
+    ] as any,
+    stream: true,
+  }
+
+  const transformed = engine.transformRequest({
+    request,
+    provider: qwenProvider,
+    actualModel: 'Qwen3.7-Max',
+    toolSessionKey: 'qwen-low-threshold-summary-test',
+  })
+  const body = buildQwenChatRequestBodyForTest({
+    request: {
+      model: 'Qwen3.7-Max',
+      messages: transformed.messages as any,
+      stream: true,
+    },
+    actualModel: 'Qwen3.7-Max',
+    sessionId: 'session',
+    reqId: 'req',
+    timestamp: 1,
+    enableThinking: false,
+    enableWebSearch: false,
+  })
+
+  const content = body.messages[0].content
+  assert.match(content, /\[Prior conversation summary/)
+  assert.match(content, /## Available Tools/)
+  assert.match(content, /catalog_fingerprint:/)
+  assert.match(content, /allowed_tools: bash, read/)
+  assert.match(content, /<\|CHAT2API\|tool_calls>/)
+  assert.match(content, /Tool `read`: Read a file/)
+  assert.match(content, /Tool `bash`: Run a shell command/)
+  assert.ok(
+    content.indexOf('[Prior conversation summary') < content.indexOf('## Available Tools'),
+    'authoritative tool contract should be after the non-authoritative summary',
+  )
+  assert.equal(body.messages[0].meta_data.ori_query, 'turn 3: run a real read tool now')
+})
+
+test('Qwen request body concatenates multiple system messages instead of keeping only the last one', () => {
+  const body = buildQwenChatRequestBodyForTest({
+    request: {
+      model: 'Qwen3.7-Max',
+      stream: true,
+      messages: [
+        { role: 'system', content: 'base system instruction' },
+        { role: 'system', content: '[Prior conversation summary]\nsummary text' },
+        { role: 'system', content: '## Available Tools\ncatalog_fingerprint: fp\n<|CHAT2API|tool_calls>' },
+        { role: 'user', content: 'please read a file' },
+      ] as any,
+    },
+    actualModel: 'Qwen3.7-Max',
+    sessionId: 'session',
+    reqId: 'req',
+    timestamp: 1,
+    enableThinking: false,
+    enableWebSearch: false,
+  })
+
+  const content = body.messages[0].content
+  assert.match(content, /base system instruction/)
+  assert.match(content, /\[Prior conversation summary]/)
+  assert.match(content, /## Available Tools/)
+  assert.ok(
+    content.indexOf('[Prior conversation summary]') < content.indexOf('## Available Tools'),
+    'tool contract should remain after summary when multiple system messages are present',
+  )
 })

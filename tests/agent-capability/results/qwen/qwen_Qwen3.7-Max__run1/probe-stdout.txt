@@ -1,0 +1,16 @@
+﻿============================================
+ Chat2API Final Agent Capability Probe
+ Model: qwen/Qwen3.7-Max
+============================================
+[PASS] agent-capability-probe is visible in opencode debug skill
+[PASS] capability-probe agent exposes the skill tool
+Running OpenCode...
+[PASS] OpenCode exited successfully
+[PASS] .agent-probe/result.json exists
+[PASS] result.json exactly matches deterministic expected values
+[PASS] OpenCode event log is valid NDJSON
+[PASS] Skill invocation found in OpenCode events
+[PASS] At least 2 non-skill tool calls found
+[PASS] Multi-turn non-skill tool use proven by event order
+[PASS] Final completion marker found
+CAPABILITY_PROBE_PASS

@@ -8,6 +8,7 @@ import { gzipSync } from 'node:zlib'
 
 import { buildGLMPromptMessagesForTest, GLMStreamHandler } from '../../src/main/proxy/adapters/glm.ts'
 import { QwenStreamHandler } from '../../src/main/proxy/adapters/qwen.ts'
+import { QwenAiStreamHandler } from '../../src/main/proxy/adapters/qwen-ai.ts'
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
 import { ToolStreamParser } from '../../src/main/proxy/toolCalling/ToolStreamParser.ts'
 import { managedXmlProtocol } from '../../src/main/proxy/toolCalling/protocols/managedXml.ts'
@@ -48,7 +49,102 @@ function managedPlan(providerId: 'glm' | 'qwen'): ToolCallingPlan {
     shouldParseResponse: true,
     toolChoiceMode: 'auto',
     allowedToolNames: new Set(['default_api:read_file']),
-    diagnostics: {} as any,
+    availabilityRetryAllowed: false,
+    contract: {
+      turnId: `${providerId}-turn`,
+      sessionId: `${providerId}-session`,
+      providerId,
+      model: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      protocol: 'managed_xml',
+      snapshotFingerprint: null,
+      tools: Object.freeze([]),
+      allowedToolNames: Object.freeze(new Set<string>(['default_api:read_file'])),
+      toolChoiceMode: 'auto',
+      shouldInjectPrompt: true,
+      shouldParseResponse: true,
+      historyMode: 'managed_protocol',
+      emptyOutputPolicy: 'diagnose_and_fail',
+      toolSourceChain: Object.freeze(['current_request', 'session_catalog', 'message_history', 'safe_empty']),
+    },
+    diagnostics: {
+      requestId: `${providerId}-request`,
+      turnId: `${providerId}-turn`,
+      clientAdapterId: 'standard-openai-tools',
+      providerId,
+      model: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      actualModel: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      toolSource: 'openai',
+      mode: 'managed',
+      protocol: 'managed_xml',
+      toolCount: 1,
+      injected: true,
+      reason: 'test',
+      emptyOutputPolicy: 'diagnose_and_fail',
+    },
+  }
+}
+
+function managedPlanWithCatalog(providerId: 'glm' | 'qwen'): ToolCallingPlan {
+  const plan = managedPlan(providerId)
+  return {
+    ...plan,
+    availabilityRetryAllowed: true,
+    catalogSnapshot: {
+      sessionId: `${providerId}-session`,
+      fingerprint: `${providerId}-catalog-fingerprint`,
+      tools: Object.freeze([]),
+      allowedToolNames: ['default_api:read_file'],
+      schemaHashes: {},
+      source: 'current_request',
+      createdTurnIndex: 1,
+      updatedTurnIndex: 1,
+    },
+  }
+}
+
+function bashManagedPlan(providerId: 'glm' | 'qwen'): ToolCallingPlan {
+  return {
+    mode: 'managed',
+    protocol: 'managed_xml',
+    clientAdapterId: 'standard-openai-tools',
+    providerId,
+    tools: [{ name: 'bash', description: 'Run a command', parameters: { type: 'object', properties: { command: { type: 'string' } } }, source: 'openai' }],
+    shouldInjectPrompt: true,
+    shouldParseResponse: true,
+    toolChoiceMode: 'auto',
+    allowedToolNames: new Set(['bash']),
+    availabilityRetryAllowed: false,
+    contract: {
+      turnId: `${providerId}-turn`,
+      sessionId: `${providerId}-session`,
+      providerId,
+      model: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      protocol: 'managed_xml',
+      snapshotFingerprint: null,
+      tools: Object.freeze([]),
+      allowedToolNames: Object.freeze(new Set<string>(['bash'])),
+      toolChoiceMode: 'auto',
+      shouldInjectPrompt: true,
+      shouldParseResponse: true,
+      historyMode: 'managed_protocol',
+      emptyOutputPolicy: 'diagnose_and_fail',
+      toolSourceChain: Object.freeze(['current_request', 'session_catalog', 'message_history', 'safe_empty']),
+    },
+    diagnostics: {
+      requestId: `${providerId}-request`,
+      turnId: `${providerId}-turn`,
+      clientAdapterId: 'standard-openai-tools',
+      providerId,
+      model: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      actualModel: providerId === 'glm' ? 'GLM-5.2' : 'Qwen3-Max',
+      toolSource: 'openai',
+      mode: 'managed',
+      protocol: 'managed_xml',
+      toolCount: 1,
+      injected: true,
+      reason: 'test',
+      emptyOutputPolicy: 'diagnose_and_fail',
+    },
   }
 }
 
@@ -149,6 +245,66 @@ test('GLM adapter moves managed XML tool prompt to the final instruction positio
   assert.match(text, /## Available Tools[\s\S]*<\|CHAT2API\|tool_calls>/)
 })
 
+test('GLM adapter adds a continuation anchor after trailing tool_result in multi-turn delta', () => {
+  const promptMessages = buildGLMPromptMessagesForTest([
+    { role: 'system', content: 'You are a coding assistant.' },
+    { role: 'user', content: 'Run the required long probe steps.' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_skill_0',
+          type: 'function',
+          function: { name: 'skill', arguments: '{"name":"long-conversation-probe"}' },
+        },
+      ],
+    },
+    {
+      role: 'tool',
+      tool_call_id: 'call_skill_0',
+      content: 'Step 1: use read. Step 2: use bash. Step 10: output the final marker assembled from LONG + CONVERSATION + PROBE + DONE with underscores.',
+    },
+  ] as any, [], true)
+
+  const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
+
+  assert.match(text, /LONG \+ CONVERSATION \+ PROBE \+ DONE/)
+  assert.match(text, /Continue from the tool result above by choosing the next required real tool call\./)
+  assert.match(text, /Only produce final assistant text after the required tool sequence is actually complete\./)
+})
+
+test('GLM adapter does not add the trailing tool_result continuation anchor when a fresh user turn exists', () => {
+  const promptMessages = buildGLMPromptMessagesForTest([
+    { role: 'system', content: 'You are a coding assistant.' },
+    { role: 'user', content: 'Initial instruction.' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_read_0',
+          type: 'function',
+          function: { name: 'default_api:read_file', arguments: '{"filePath":"tests/agent-capability/input.txt"}' },
+        },
+      ],
+    },
+    {
+      role: 'tool',
+      tool_call_id: 'call_read_0',
+      content: 'file body',
+    },
+    {
+      role: 'user',
+      content: 'Now summarize what changed.',
+    },
+  ] as any, [], true)
+
+  const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
+
+  assert.doesNotMatch(text, /Continue from the tool result above by choosing the next required real tool call\./)
+})
+
 test('Qwen: ToolCallingEngine produces managed_xml plan', () => {
   const engine = new ToolCallingEngine()
   const request: ChatCompletionRequest = {
@@ -221,6 +377,18 @@ test('BUG: managed_xml prompt + managed_xml history + managed_xml parse = consis
   assert.equal(parsed.toolCalls.length, 1)
 })
 
+test('managed_xml prompt marks runtime tool catalog as authoritative', () => {
+  const prompt = managedXmlProtocol.renderPrompt([{
+    name: 'skill',
+    description: 'Load a skill',
+    parameters: { type: 'object', properties: { name: { type: 'string' } } },
+    source: 'openai',
+  }])
+
+  assert.match(prompt, /authoritative for the current turn/)
+  assert.match(prompt, /Do not claim that a listed tool is unavailable/)
+})
+
 test('managed_xml parser repairs singleton array arguments from OpenCode-style tools', () => {
   const parsed = managedXmlProtocol.parse(
     '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:todowrite"><|CHAT2API|parameter name="todos"><![CDATA[{"content":"Inspect GLM","status":"in_progress"}]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
@@ -284,6 +452,18 @@ test('managed_xml parser maps description to required prompt when model omits pr
     subagent_type: 'general',
     prompt: 'Inspect Qwen tool calling',
   })
+})
+
+test('managed_xml parser leaves inline key=value protocol-looking literals as content', () => {
+  const content = 'fake_xml=<tool_calls><invoke name="default_api:read_file"><parameter name="filePath">DO_NOT_CALL</parameter></invoke></tool_calls>'
+  const parsed = managedXmlProtocol.parse(content, {
+    tools: [{ name: 'default_api:read_file', description: '', parameters: {}, source: 'openai' }],
+    protocol: 'managed_xml',
+  })
+
+  assert.equal(parsed.toolCalls.length, 0)
+  assert.equal(parsed.content, content)
+  assert.deepEqual(parsed.rawMatches, [])
 })
 
 test('BUG: managed_bracket and managed_xml are different formats - mixing them fails', () => {
@@ -434,6 +614,160 @@ test('GLM stream decodes gzip SSE and emits managed XML as OpenAI tool_calls', a
   assert.equal((output.match(/data: \[DONE\]/g) || []).length, 1)
 })
 
+test('GLM stream reparses cumulative snapshot when a managed marker was partially buffered', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-conv-partial-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-partial-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: '<|CHAT2API|tool' }],
+      }],
+    }),
+    sseEvent({
+      conversation_id: 'glm-conv-partial-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-partial-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: managedXmlToolCall }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-conv-partial-1', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"default_api:read_file"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.doesNotMatch(output, /_calls><\|CHAT2API\|invoke/)
+  assert.doesNotMatch(output, /Provider returned malformed tool output/)
+})
+
+test('GLM stream merges incremental same-logic_id tails instead of replacing the managed XML prefix', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-conv-incremental-tail-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-incremental-tail-1',
+        status: 'streaming',
+        content: [{
+          type: 'text',
+          text: '<|CHAT2API|tool_calls><|CHAT2API|invoke name="bash"><|CHAT2API|parameter name="command"><![CDATA[echo first',
+        }],
+      }],
+    }),
+    sseEvent({
+      conversation_id: 'glm-conv-incremental-tail-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-incremental-tail-1',
+        status: 'streaming',
+        content: [{
+          type: 'text',
+          text: ' && echo second]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+        }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-conv-incremental-tail-1', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"bash"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.doesNotMatch(output, /Provider returned malformed tool output/)
+  assert.doesNotMatch(output, /_calls><\|CHAT2API\|invoke/)
+})
+
+test('GLM stream reparses a rewritten managed XML snapshot instead of leaking a mid-marker suffix', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
+  const rewrittenSnapshot = `${standaloneInvokeXml.replace('</|CHAT2API|invoke>', '')}residue-residue`
+  const completedSnapshot = standaloneInvokeXml
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-conv-rewrite-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-rewrite-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: rewrittenSnapshot }],
+      }],
+    }),
+    sseEvent({
+      conversation_id: 'glm-conv-rewrite-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-rewrite-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: completedSnapshot }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-conv-rewrite-1', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"bash"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.doesNotMatch(output, /residue-residue/)
+  assert.doesNotMatch(output, /Provider returned malformed tool output/)
+  assert.doesNotMatch(output, /_calls><\|CHAT2API\|invoke/)
+})
+
+test('GLM stream reparses a rewritten shorter managed XML snapshot instead of leaking stale suffix state', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
+  const staleLongerSnapshot = `${standaloneInvokeXml} trailing-garbage`
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-conv-rewrite-2',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-rewrite-2',
+        status: 'streaming',
+        content: [{ type: 'text', text: staleLongerSnapshot }],
+      }],
+    }),
+    sseEvent({
+      conversation_id: 'glm-conv-rewrite-2',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-rewrite-2',
+        status: 'streaming',
+        content: [{ type: 'text', text: standaloneInvokeXml }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-conv-rewrite-2', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"bash"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.doesNotMatch(output, /trailing-garbage/)
+  assert.doesNotMatch(output, /Provider returned malformed tool output/)
+})
+
 test('GLM non-stream leaves managed XML for ToolCallingEngine to convert', async () => {
   const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
   const body = [
@@ -500,6 +834,76 @@ test('Qwen stream emits managed XML as OpenAI tool_calls', async () => {
   assert.doesNotMatch(output, /<\|CHAT2API\|tool_calls>/)
 })
 
+test('Qwen stream recovers when a cumulative snapshot rewrites an in-flight managed XML tool call', async () => {
+  const handler = new QwenStreamHandler('Qwen3-Max', undefined, managedPlan('qwen'))
+  const rewrittenSnapshot = `${managedXmlToolCall.replace('</|CHAT2API|tool_calls>', '')}residue-residue`
+  const output = await collect(handler.handleStream(Readable.from([
+    sseEvent({
+      communication: { sessionid: 'qwen-session-1', reqid: 'qwen-req-1' },
+      data: {
+        messages: [{
+          mime_type: 'multi_load/iframe',
+          content: rewrittenSnapshot,
+          status: 'streaming',
+          meta_data: {},
+        }],
+      },
+    }),
+    sseEvent({
+      communication: { sessionid: 'qwen-session-1', reqid: 'qwen-req-1' },
+      data: {
+        messages: [{
+          mime_type: 'multi_load/iframe',
+          content: managedXmlToolCall,
+          status: 'complete',
+          meta_data: {},
+        }],
+      },
+    }),
+  ])))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"default_api:read_file"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.doesNotMatch(output, /residue-residue/)
+  assert.doesNotMatch(output, /\|tool_calls>/)
+})
+
+test('Qwen stream reparses a rewritten shorter managed XML snapshot instead of leaking stale suffix state', async () => {
+  const handler = new QwenStreamHandler('Qwen3-Max', undefined, managedPlan('qwen'))
+  const staleLongerSnapshot = `${managedXmlToolCall} trailing-garbage`
+  const output = await collect(handler.handleStream(Readable.from([
+    sseEvent({
+      communication: { sessionid: 'qwen-session-1', reqid: 'qwen-req-1' },
+      data: {
+        messages: [{
+          mime_type: 'multi_load/iframe',
+          content: staleLongerSnapshot,
+          status: 'streaming',
+          meta_data: {},
+        }],
+      },
+    }),
+    sseEvent({
+      communication: { sessionid: 'qwen-session-1', reqid: 'qwen-req-1' },
+      data: {
+        messages: [{
+          mime_type: 'multi_load/iframe',
+          content: managedXmlToolCall,
+          status: 'complete',
+          meta_data: {},
+        }],
+      },
+    }),
+  ])))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"default_api:read_file"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+  assert.doesNotMatch(output, /trailing-garbage/)
+  assert.doesNotMatch(output, /\|tool_calls>/)
+})
+
 test('Qwen non-stream leaves managed XML for ToolCallingEngine to convert', async () => {
   const handler = new QwenStreamHandler('Qwen3-Max', undefined, managedPlan('qwen'))
   const result = await handler.handleNonStream(Readable.from([
@@ -532,6 +936,140 @@ test('Qwen non-stream leaves managed XML for ToolCallingEngine to convert', asyn
   assert.equal(result.choices[0].message.content, null)
   assert.equal(result.choices[0].message.tool_calls[0].function.name, 'default_api:read_file')
   assert.equal(result.choices[0].finish_reason, 'tool_calls')
+})
+
+test('Qwen stream emits a client-safe error instead of silent empty success', async () => {
+  const handler = new QwenStreamHandler('Qwen3-Max', undefined, managedPlan('qwen'))
+  const output = await collect(handler.handleStream(Readable.from([
+    sseEvent({
+      communication: { sessionid: 'qwen-session-empty', reqid: 'qwen-req-empty' },
+      data: {
+        messages: [{
+          mime_type: 'multi_load/iframe',
+          content: '   ',
+          status: 'complete',
+          meta_data: {},
+        }],
+      },
+    }),
+  ])))
+
+  assert.match(output, /Error: Provider returned empty assistant output/)
+  assert.match(output, /"finish_reason":"stop"/)
+  assert.doesNotMatch(output, /"finish_reason":"tool_calls"/)
+})
+
+test('Qwen stream turns open_url-only availability denial into an explicit managed-tool error', async () => {
+  const handler = new QwenStreamHandler('Qwen3-Max', undefined, managedPlanWithCatalog('qwen'))
+  const output = await collect(handler.handleStream(Readable.from([
+    sseEvent({
+      communication: { sessionid: 'qwen-session-drift', reqid: 'qwen-req-drift' },
+      data: {
+        messages: [{
+          mime_type: 'multi_load/iframe',
+          content: 'I only have open_url available.',
+          status: 'complete',
+          meta_data: {},
+        }],
+      },
+    }),
+  ])))
+
+  assert.match(output, /I only have open_url available\./)
+  assert.match(output, /Error: Provider refused the authoritative tool catalog/)
+  assert.match(output, /"finish_reason":"stop"/)
+})
+
+test('Qwen AI stream emits managed XML as OpenAI tool_calls', async () => {
+  const handler = new QwenAiStreamHandler('qwen3.7-max', undefined, managedPlan('qwen'))
+  handler.setChatId('qwen-ai-chat-1')
+  const output = await collect(await handler.handleStream(Readable.from([
+    sseEvent({
+      'response.created': { response_id: 'qwen-ai-response-1' },
+      choices: [{
+        delta: {
+          phase: 'answer',
+          status: 'finished',
+          content: managedXmlToolCall,
+        },
+      }],
+    }),
+  ])))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"default_api:read_file"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
+})
+
+test('Qwen AI stream emits a client-safe error instead of silent empty success', async () => {
+  const handler = new QwenAiStreamHandler('qwen3.7-max', undefined, managedPlan('qwen'))
+  handler.setChatId('qwen-ai-chat-empty')
+  const output = await collect(await handler.handleStream(Readable.from([
+    sseEvent({
+      'response.created': { response_id: 'qwen-ai-response-empty' },
+      choices: [{
+        delta: {
+          phase: 'answer',
+          status: 'finished',
+          content: '   ',
+        },
+      }],
+    }),
+  ])))
+
+  assert.match(output, /Error: Provider returned empty assistant output/)
+  assert.match(output, /"finish_reason":"stop"/)
+  assert.doesNotMatch(output, /"finish_reason":"tool_calls"/)
+})
+
+test('GLM stream emits a client-safe error instead of silent empty success', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-empty-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-empty-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: '   ' }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-empty-1', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /Error: Provider returned empty assistant output/)
+  assert.match(output, /"finish_reason":"stop"/)
+  assert.doesNotMatch(output, /"finish_reason":"tool_calls"/)
+})
+
+test('GLM stream turns open_url-only availability denial into an explicit managed-tool error', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlanWithCatalog('glm'))
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-drift-1',
+      status: 'streaming',
+      parts: [{
+        logic_id: 'part-drift-1',
+        status: 'streaming',
+        content: [{ type: 'text', text: 'I only have open_url available.' }],
+      }],
+    }),
+    sseEvent({ conversation_id: 'glm-drift-1', status: 'finish' }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /I only have open_url available\./)
+  assert.match(output, /Error: Provider refused the authoritative tool catalog/)
+  assert.match(output, /"finish_reason":"stop"/)
 })
 
 // ============================================================
@@ -598,8 +1136,8 @@ test('FIX: forwardGLM now uses transformRequestForPromptToolUse', async () => {
   assert.doesNotMatch(glmMethod, /managed_bracket/,
     'FIXED: no manual managed_bracket plan anymore')
 
-  // FIXED: applies tool calls to non-stream response
-  assert.match(glmMethod, /applyToolCallsToResponse/,
+  // FIXED: non-stream path still routes through ToolCallingEngine parsing, now via shared retry helper
+  assert.match(glmMethod, /retryManagedNonStreamResult|applyToolCallsToResponse/,
     'FIXED: applies ToolCallingEngine tool parsing for non-stream responses')
 })
 
@@ -615,7 +1153,7 @@ test('QWEN: forwardQwen correctly uses transformRequestForPromptToolUse', async 
   assert.match(qwenMethod, /transformRequestForPromptToolUse/,
     'Qwen correctly uses transformRequestForPromptToolUse')
 
-  assert.match(qwenMethod, /applyToolCallsToResponse/,
+  assert.match(qwenMethod, /retryManagedNonStreamResult|applyToolCallsToResponse/,
     'Qwen applies tool calls to non-stream response')
 })
 
@@ -784,7 +1322,7 @@ test('detectStart partial-matches <|CHAT2API|inv prefix', () => {
 })
 
 test('GLM stream emits standalone <|CHAT2API|invoke> as OpenAI tool_calls', async () => {
-  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
   const body = [
     sseEvent({
       conversation_id: 'glm-standalone-1',
@@ -812,7 +1350,7 @@ test('GLM stream emits standalone <|CHAT2API|invoke> as OpenAI tool_calls', asyn
 })
 
 test('GLM stream emits standalone invoke with preamble text correctly', async () => {
-  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
   const body = [
     sseEvent({
       conversation_id: 'glm-standalone-2',
@@ -840,7 +1378,7 @@ test('GLM stream emits standalone invoke with preamble text correctly', async ()
 })
 
 test('standalone invoke with invalid tool name is silently dropped', async () => {
-  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, bashManagedPlan('glm'))
   const invalidXml = '<|CHAT2API|invoke name="nonexistent"><|CHAT2API|parameter name="x"><![CDATA[1]]></|CHAT2API|parameter></|CHAT2API|invoke>'
   const body = [
     sseEvent({
@@ -864,4 +1402,117 @@ test('standalone invoke with invalid tool name is silently dropped', async () =>
   assert.doesNotMatch(output, /"tool_calls"/)
   assert.doesNotMatch(output, /<\|CHAT2API\|invoke/)
   assert.match(output, /"finish_reason":"stop"/)
+})
+
+// ============================================================
+// P1 v2: prompt-embedded catalog — GLM denial must not be silent
+// ============================================================
+
+function promptEmbeddedManagedPlan(): ToolCallingPlan {
+  const embeddedTools = [
+    { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] }, source: 'prompt_embedded' as const },
+    { name: 'bash', description: 'Execute a shell command', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }, source: 'prompt_embedded' as const },
+  ]
+  return {
+    mode: 'managed',
+    protocol: 'managed_xml',
+    clientAdapterId: 'standard-openai-tools',
+    providerId: 'glm',
+    tools: embeddedTools,
+    shouldInjectPrompt: true,
+    shouldParseResponse: true,
+    toolChoiceMode: 'auto',
+    allowedToolNames: new Set(['read', 'bash']),
+    availabilityRetryAllowed: true,
+    catalogSnapshot: {
+      sessionId: 'glm-pe-session',
+      fingerprint: 'glm-pe-fingerprint',
+      tools: Object.freeze(embeddedTools),
+      allowedToolNames: ['read', 'bash'],
+      schemaHashes: {},
+      source: 'prompt_embedded',
+      createdTurnIndex: 1,
+      updatedTurnIndex: 1,
+    },
+    catalogDiagnostics: {
+      source: 'prompt_embedded',
+      fingerprint: 'glm-pe-fingerprint',
+      driftKinds: ['prompt_embedded_only_catalog'],
+      blocked: false,
+    },
+    contract: {
+      turnId: 'glm-pe-turn',
+      sessionId: 'glm-pe-session',
+      providerId: 'glm',
+      model: 'GLM-5.2',
+      protocol: 'managed_xml',
+      snapshotFingerprint: 'glm-pe-fingerprint',
+      tools: Object.freeze(embeddedTools),
+      allowedToolNames: Object.freeze(new Set<string>(['read', 'bash'])),
+      toolChoiceMode: 'auto',
+      shouldInjectPrompt: true,
+      shouldParseResponse: true,
+      historyMode: 'managed_protocol',
+      emptyOutputPolicy: 'diagnose_and_fail',
+      toolSourceChain: Object.freeze(['current_request', 'prompt_embedded']),
+    },
+    diagnostics: {
+      requestId: 'glm-pe-request',
+      turnId: 'glm-pe-turn',
+      clientAdapterId: 'standard-openai-tools',
+      providerId: 'glm',
+      model: 'GLM-5.2',
+      actualModel: 'GLM-5.2',
+      toolSource: 'prompt_embedded',
+      mode: 'managed',
+      protocol: 'managed_xml',
+      toolCount: 2,
+      injected: true,
+      reason: 'test_prompt_embedded',
+      emptyOutputPolicy: 'diagnose_and_fail',
+      allowedToolNames: ['read', 'bash'],
+      catalogSource: 'prompt_embedded',
+      catalogFingerprint: 'glm-pe-fingerprint',
+    },
+  }
+}
+
+test('GLM: prompt-embedded catalog + denial text triggers drift detection in ToolCallingEngine (non-stream path)', () => {
+  const plan = promptEmbeddedManagedPlan()
+  const engine = new ToolCallingEngine()
+
+  // Simulate GLM non-stream response claiming only open_url is available
+  const fakeResult = {
+    id: 'glm-conv-id',
+    model: 'GLM-5.2',
+    object: 'chat.completion',
+    choices: [{
+      index: 0,
+      message: {
+        role: 'assistant',
+        content: '环境中唯一可用的工具是 open_url，不能使用 read 或 bash。',
+      },
+      finish_reason: 'stop',
+    }],
+    usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+    created: Math.floor(Date.now() / 1000),
+  }
+
+  const retryRequest = engine.applyNonStreamResponse(fakeResult, plan)
+
+  // The engine MUST detect the drift and return a retry request instead of silently passing through the denial
+  assert.ok(
+    retryRequest !== undefined,
+    'applyNonStreamResponse must return a retry request when prompt-embedded catalog exists and denial is detected',
+  )
+  assert.equal(retryRequest!.type, 'availability_retry')
+  assert.equal(retryRequest!.catalogFingerprint, 'glm-pe-fingerprint')
+  assert.ok(retryRequest!.clarification.includes('read'), `Clarification should include 'read': ${retryRequest!.clarification}`)
+  assert.ok(retryRequest!.clarification.includes('bash'), `Clarification should include 'bash': ${retryRequest!.clarification}`)
+  assert.ok(
+    retryRequest!.clarification.includes('authoritative'),
+    `Clarification must assert the catalog is authoritative: ${retryRequest!.clarification}`,
+  )
+  assert.equal(plan.diagnostics.availabilityDriftDetected, true)
+  assert.equal(plan.diagnostics.availabilityRetryResult, 'attempted')
 })
