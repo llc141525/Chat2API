@@ -1,4 +1,4 @@
-import type { ChatCompletionRequest, ChatMessage } from '../types.ts'
+import type { ChatCompletionRequest } from '../types.ts'
 import type { Provider } from '../../store/types.ts'
 import {
   DEFAULT_TOOL_CALLING_CONFIG,
@@ -9,6 +9,8 @@ import { getToolProtocol } from './protocols/index.ts'
 import { getToolClientAdapter } from './clientAdapters/index.ts'
 import { buildToolCallingRuntimePlan } from './runtimePlan.ts'
 import type { NormalizedToolDefinition, ToolCallingPlan, ToolCallingTransformResult, ToolProtocolId } from './types.ts'
+import type { ToolManifest } from './ToolManifest.ts'
+import { createToolManifest } from './ToolManifest.ts'
 
 export class ToolCallingEngine {
   private readonly config: ToolCallingConfig
@@ -51,11 +53,24 @@ export class ToolCallingEngine {
       }
     }
 
+    const toolManifest = this.createToolManifest(plan)
     return {
-      messages: injectPrompt(request.messages, renderPrompt(plan.protocol, plan.tools, this.config)),
+      messages: request.messages,
       tools: undefined,
       plan,
+      toolManifest,
     }
+  }
+
+  createToolManifest(plan: ToolCallingPlan): ToolManifest {
+    return createToolManifest({
+      protocol: plan.protocol,
+      catalogFingerprint: plan.catalogSnapshot?.fingerprint ?? '',
+      allowedToolNames: [...plan.allowedToolNames],
+      tools: plan.tools.map(t => ({ ...t })),
+      renderedPrompt: renderPrompt(plan.protocol, plan.tools, this.config),
+      contractHeaderVersion: 1,
+    })
   }
 
   applyNonStreamResponse(result: any, plan: ToolCallingPlan): void {
@@ -95,15 +110,6 @@ function renderPrompt(
     .replace(/\{\{tools\}\}/g, prompt)
     .replace(/\{\{tool_names\}\}/g, tools.map((tool) => tool.name).join(', '))
     .replace(/\{\{format\}\}/g, protocol)
-}
-
-function injectPrompt(messages: ChatMessage[], prompt: string): ChatMessage[] {
-  const [first, ...rest] = messages
-  if (first?.role === 'system' && typeof first.content === 'string') {
-    return [{ ...first, content: `${first.content}\n\n${prompt}` }, ...rest]
-  }
-
-  return [{ role: 'system', content: prompt }, ...messages]
 }
 
 function parseSelectedProtocol(content: string, plan: ToolCallingPlan) {

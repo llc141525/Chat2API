@@ -67,12 +67,16 @@ export interface ToolCallingPlan {
   allowedToolNames: Set<string>
   forcedToolName?: string
   diagnostics: ToolCallDiagnostics
+  /** Snapshot of the tool catalog used to build this plan (Phase 2+). */
+  catalogSnapshot?: { fingerprint: string }
 }
 
 export interface ToolCallingTransformResult {
   messages: ChatMessage[]
   tools?: ChatCompletionTool[]
   plan: ToolCallingPlan
+  /** Tool manifest for provider adapters (Phase 2+). Present when shouldInjectPrompt is true. */
+  toolManifest?: import('./ToolManifest.ts').ToolManifest
 }
 
 export interface ToolParseContext {

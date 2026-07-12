@@ -3,7 +3,7 @@
  * Defines types for model-specific prompt variants
  */
 
-import { ToolCallFormat } from '../adapters/prompt'
+import type { ToolCallFormat } from '../constants/signatures'
 
 /**
  * Prompt variant configuration

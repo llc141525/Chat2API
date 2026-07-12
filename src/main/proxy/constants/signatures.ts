@@ -145,7 +145,10 @@ export const CLIENT_SIGNATURES: Record<ClientType, ClientSignatureConfig> = {
 
 /**
  * General tool prompt signatures
- * Used to detect if any tool prompt has been injected
+ * OUTPUT-SIDE detection only. Used for parsing model responses and
+ * identifying whether a client-side injection is present in the input.
+ * NOT used for injection-side protection (tool contracts are now
+ * carried via ToolManifest, not embedded in messages).
  */
 export const GENERAL_TOOL_SIGNATURES = [
   '## Available Tools',

@@ -63,6 +63,7 @@ interface QwenMessage {
 
 interface ChatCompletionRequest {
   model: string
+  originalModel?: string
   messages: QwenMessage[]
   tools?: any[]
   stream?: boolean
@@ -429,6 +430,158 @@ export class QwenAdapter {
 
     console.log('[Qwen] Response status:', response.status)
     console.log('[Qwen] Response headers:', JSON.stringify(response.headers, null, 2))
+
+    return { response, sessionId, reqId }
+  }
+
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{
+    response: import('axios').AxiosResponse
+    sessionId: string
+    reqId: string
+  }> {
+    const ticket = this.getTicket()
+    if (!ticket) {
+      throw new Error('Qwen ticket not configured, please add ticket in account settings')
+    }
+
+    const reqId = uuid(false)
+    const sessionId = uuid(false)
+
+    let actualModel = this.mapModel(request.model)
+
+    const modelForDetection = request.originalModel || request.model
+    const modelLower = modelForDetection.toLowerCase()
+
+    let enableThinking = request.enableThinking ?? false
+    let enableWebSearch = request.enableWebSearch ?? false
+
+    if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
+      enableThinking = true
+      console.log('[Qwen] Thinking mode enabled (from model name)')
+    }
+    if (!enableWebSearch && modelLower.includes('search')) {
+      enableWebSearch = true
+      console.log('[Qwen] Web search enabled (from model name)')
+    }
+
+    if (enableThinking) {
+      if (actualModel === 'Qwen3-Max') {
+        actualModel = 'Qwen3-Max-Thinking-Preview'
+        console.log('[Qwen] Using thinking model:', actualModel)
+      }
+    }
+
+    console.log('[Qwen] Session info:', { sessionId, reqId })
+    console.log('[Qwen] Using model:', actualModel)
+
+    const toolProfile = getProviderToolProfile('qwen')
+
+    // === NEW: Build prompt from assembly, not from embedded strings in messages ===
+    let systemPrompt = ''
+
+    // Extract system text from messages (these are base instructions, NOT tool contracts)
+    for (const msg of assembly.messages) {
+      if (msg.role === 'system') {
+        systemPrompt = extractTextContent(msg.content as any)
+        break  // Take only the first non-tool system message
+      }
+    }
+
+    // Build conversation parts from non-system messages
+    const conversationParts: string[] = []
+    for (const msg of assembly.messages) {
+      if (msg.role === 'user') {
+        conversationParts.push(extractTextContent(msg.content as any))
+      } else if (msg.role === 'assistant' && msg.tool_calls && (msg.tool_calls as any[]).length > 0) {
+        const calls = (msg.tool_calls as any[]).map(tc => ({
+          id: tc.id,
+          name: tc.function.name,
+          arguments: tc.function.arguments,
+        }))
+        conversationParts.push(toolProfile.formatAssistantToolCalls(calls))
+      } else if (msg.role === 'assistant') {
+        conversationParts.push(`Assistant: ${extractTextContent(msg.content as any)}`)
+      } else if (msg.role === 'tool' && msg.tool_call_id) {
+        conversationParts.push(toolProfile.formatToolResult({
+          toolCallId: msg.tool_call_id as string,
+          content: extractTextContent(msg.content as any),
+        }))
+      }
+    }
+
+    let userContent = conversationParts.join('\n\n')
+
+    // === KEY CHANGE: tool contract comes from assembly.toolManifest, not from messages ===
+    if (assembly.toolManifest) {
+      // Summary text (non-authoritative) goes before tool contract
+      if (assembly.summaryText) {
+        systemPrompt = systemPrompt
+          ? `${systemPrompt}\n\n${assembly.summaryText}`
+          : assembly.summaryText
+      }
+      // Tool contract (authoritative, injected AFTER summary to take precedence)
+      const toolContractText = assembly.toolManifest.renderedPrompt
+      systemPrompt = systemPrompt
+        ? `${systemPrompt}\n\n${toolContractText}`
+        : toolContractText
+    }
+
+    // If system prompt exists, prepend it to user content
+    const finalContent = systemPrompt
+      ? `${systemPrompt}\n\nUser: ${userContent}`
+      : userContent
+
+    const timestamp = Date.now()
+    const nonce = generateNonce()
+
+    const requestBody = {
+      deep_search: (enableWebSearch || enableThinking) ? '1' : '0',
+      req_id: reqId,
+      model: actualModel,
+      scene: 'chat',
+      session_id: sessionId,
+      sub_scene: 'chat',
+      temporary: false,
+      messages: [
+        {
+          content: finalContent,
+          mime_type: 'text/plain',
+          meta_data: {
+            ori_query: finalContent
+          }
+        }
+      ],
+      from: 'default',
+      parent_req_id: '0',
+      enable_search: enableWebSearch,
+      biz_data: '{"entryPoint":"tongyigw"}',
+      scene_param: 'first_turn',
+      chat_client: 'h5',
+      client_tm: timestamp.toString(),
+      protocol_version: 'v2',
+      biz_id: 'ai_qwen',
+    }
+
+    const queryString = `biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen&ut=${uuid(false)}&nonce=${nonce}&timestamp=${timestamp}`
+    const url = `${QWEN_API_BASE}/api/v2/chat?${queryString}`
+
+    console.log('[Qwen] Sending request via assembly path to /api/v2/chat...')
+
+    const response = await (this as any).axiosInstance.post(url, requestBody, {
+      headers: {
+        ...DEFAULT_HEADERS,
+        'Content-Type': 'application/json',
+        Cookie: `tongyi_sso_ticket=${ticket}`,
+      },
+      responseType: 'stream',
+      timeout: 120000,
+      decompress: false,
+    })
+
+    console.log('[Qwen] Response status:', response.status)
 
     return { response, sessionId, reqId }
   }

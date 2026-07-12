@@ -363,6 +363,153 @@ export class QwenAiAdapter {
     }
   }
 
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{
+    response: AxiosResponse
+    chatId: string
+    parentId: string | null
+  }> {
+    const token = this.getToken()
+    if (!token) {
+      throw new Error('Qwen AI token not configured, please add token in account settings')
+    }
+
+    const modelId = this.mapModel(request.model)
+
+    const modelForThinking = request.originalModel || request.model
+    const modelLower = modelForThinking.toLowerCase()
+    let forceThinking: boolean | undefined
+    if (modelForThinking.endsWith('-thinking')) {
+      forceThinking = true
+    } else if (modelForThinking.endsWith('-fast')) {
+      forceThinking = false
+    } else if (modelLower.includes('think') || modelLower.includes('r1')) {
+      forceThinking = true
+      console.log('[QwenAI] Thinking mode enabled (from model name keyword)')
+    } else {
+      forceThinking = (this as any)._forceThinking
+    }
+
+    // Always create a new chat (single-turn mode only)
+    const chatId = await this.createChat(modelId, 'OpenAI_API_Chat')
+    console.log('[QwenAI] Created new chat:', chatId)
+
+    // === NEW: Build from assembly, not from embedded strings in messages ===
+    let systemContent = ''
+    let userContent = ''
+
+    // Extract system text from assembly.messages (these are base instructions, NOT tool contracts)
+    for (const msg of assembly.messages) {
+      if (msg.role === 'system') {
+        systemContent += (systemContent ? '\n\n' : '') + (typeof msg.content === 'string' ? msg.content : '')
+      } else if (msg.role === 'user') {
+        userContent = typeof msg.content === 'string' ? msg.content : ''
+      }
+    }
+
+    // Enhanced system text with summary and tool contract
+    let enhancedSystem = systemContent
+
+    // Summary text (non-authoritative) goes before tool contract
+    if (assembly.summaryText) {
+      enhancedSystem = enhancedSystem
+        ? `${enhancedSystem}\n\n${assembly.summaryText}`
+        : assembly.summaryText
+    }
+
+    // Tool contract (authoritative, injected AFTER summary to take precedence)
+    if (assembly.toolManifest) {
+      const toolContractText = assembly.toolManifest.renderedPrompt
+      enhancedSystem = enhancedSystem
+        ? `${enhancedSystem}\n\n${toolContractText}`
+        : toolContractText
+    }
+
+    // If enhanced system prompt exists, prepend it to user content
+    if (enhancedSystem && userContent) {
+      userContent = `${enhancedSystem}\n\nUser: ${userContent}`
+    } else if (enhancedSystem) {
+      userContent = enhancedSystem
+    }
+
+    const fid = uuid()
+    const childId = uuid()
+    const ts = Math.floor(Date.now() / 1000)
+
+    const shouldEnableThinking = forceThinking !== undefined
+      ? forceThinking
+      : request.enable_thinking === true
+
+    const featureConfig: Record<string, any> = {
+      thinking_enabled: shouldEnableThinking,
+      output_schema: 'phase',
+      research_mode: 'normal',
+      auto_thinking: shouldEnableThinking,
+      thinking_format: 'summary',
+      auto_search: false,
+    }
+
+    if (request.thinking_budget) {
+      featureConfig.thinking_budget = request.thinking_budget
+    }
+
+    const payload = {
+      stream: true,
+      version: '2.1',
+      incremental_output: true,
+      chat_id: chatId,
+      chat_mode: 'normal',
+      model: modelId,
+      parent_id: null,
+      messages: [
+        {
+          fid,
+          parentId: null,
+          childrenIds: [childId],
+          role: 'user',
+          content: userContent,
+          user_action: 'chat',
+          files: [],
+          timestamp: ts,
+          models: [modelId],
+          chat_type: 't2t',
+          feature_config: featureConfig,
+          extra: { meta: { subChatType: 't2t' } },
+          sub_chat_type: 't2t',
+          parent_id: null,
+        },
+      ],
+      timestamp: ts + 1,
+    }
+
+    const url = `${QWEN_AI_BASE}/api/v2/chat/completions?chat_id=${chatId}`
+
+    console.log('[QwenAI] Sending request to /api/v2/chat/completions...')
+    console.log('[QwenAI] Request URL:', url)
+    console.log('[QwenAI] Request payload:', JSON.stringify(payload, null, 2))
+    console.log('[QwenAI] Request headers:', JSON.stringify(this.getHeaders(chatId), null, 2))
+
+    const response = await this.axiosInstance.post(url, payload, {
+      headers: {
+        ...this.getHeaders(chatId),
+        'x-accel-buffering': 'no',
+      },
+      responseType: 'stream',
+      timeout: 120000,
+    })
+
+    console.log('[QwenAI] Response status:', response.status)
+    console.log('[QwenAI] Response headers:', JSON.stringify(response.headers, null, 2))
+
+    return {
+      response,
+      chatId,
+      parentId: null,
+    }
+  }
+
   static isQwenAiProvider(provider: Provider): boolean {
     return provider.id === 'qwen-ai' || provider.apiEndpoint.includes('chat.qwen.ai')
   }

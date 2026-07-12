@@ -402,6 +402,181 @@ export class PerplexityAdapter {
     })
   }
 
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{ stream: Readable; sessionId: string }> {
+    // === NEW: Build query from assembly, not from embedded strings in messages ===
+    let systemPrompt = ''
+    for (const msg of assembly.messages) {
+      if (msg.role === 'system') {
+        const content = msg.content
+        if (typeof content === 'string') {
+          systemPrompt = content
+        } else if (Array.isArray(content)) {
+          const texts = content
+            .filter((item: any) => item.type === 'text')
+            .map((item: any) => item.text)
+          systemPrompt = texts.join('\n')
+        }
+        break
+      }
+    }
+
+    // Build conversation history from all non-system messages
+    const conversationParts: string[] = []
+    for (const msg of assembly.messages) {
+      if (msg.role === 'system') continue
+
+      let content = ''
+      if (typeof msg.content === 'string') {
+        content = msg.content
+      } else if (Array.isArray(msg.content)) {
+        const texts = msg.content
+          .filter((item: any) => item.type === 'text')
+          .map((item: any) => item.text)
+        content = texts.join('\n')
+      }
+
+      if (content) {
+        const roleLabel = msg.role === 'user' ? 'User' : 'Assistant'
+        conversationParts.push(`[${roleLabel}]: ${content}`)
+      }
+    }
+
+    const conversationHistory = conversationParts.join('\n\n')
+
+    // Build enhanced prompt with summary and tool contract
+    let enhancedPrompt = systemPrompt
+
+    // Summary text (non-authoritative) goes before tool contract
+    if (assembly.summaryText) {
+      enhancedPrompt = enhancedPrompt
+        ? `${enhancedPrompt}\n\n${assembly.summaryText}`
+        : assembly.summaryText
+    }
+
+    // Tool contract (authoritative, injected AFTER summary to take precedence)
+    if (assembly.toolManifest) {
+      const toolContractText = assembly.toolManifest.renderedPrompt
+      enhancedPrompt = enhancedPrompt
+        ? `${enhancedPrompt}\n\n${toolContractText}`
+        : toolContractText
+    }
+
+    // Combine enhanced prompt with conversation history
+    let query: string
+    if (enhancedPrompt && conversationHistory) {
+      query = `${enhancedPrompt}\n\n---\n\n${conversationHistory}`
+    } else {
+      query = conversationHistory || enhancedPrompt
+    }
+
+    if (!query) {
+      throw new Error('No user message found in request')
+    }
+
+    const model = mapModel(request.model)
+    const requestId = uuid()
+
+    const referer = `${PERPLEXITY_URL}/`
+
+    const headers: Record<string, string> = {
+      ...FAKE_HEADERS,
+      'Content-Type': 'application/json',
+      'Cookie': `__Secure-next-auth.session-token=${this.cookie}`,
+      'x-perplexity-request-reason': 'perplexity-query-state-provider',
+      'x-request-id': requestId,
+      'Referer': referer,
+    }
+
+    const data = this.buildRequestData(query, model)
+
+    // Use Electron's net API which uses Chromium's network stack
+    const request_ = net.request({
+      method: 'POST',
+      url: QUERY_ENDPOINT,
+    })
+
+    for (const [key, value] of Object.entries(headers)) {
+      request_.setHeader(key, value)
+    }
+
+    const stream = new Readable({
+      read() {}
+    })
+
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = []
+      let errorBodyRead = false
+
+      request_.on('response', (response) => {
+        const statusCode = response.statusCode
+
+        if (statusCode === 403) {
+          stream.emit('error', new Error('Cloudflare challenge detected. Please try again later.'))
+          reject(new Error('Cloudflare challenge detected'))
+          return
+        }
+
+        if (statusCode === 429) {
+          stream.emit('error', new Error('Rate limit exceeded. Please wait a moment and try again.'))
+          reject(new Error('Rate limit exceeded'))
+          return
+        }
+
+        if (statusCode && statusCode >= 400) {
+          errorBodyRead = true
+          let errorBody = ''
+          response.on('data', (chunk: Buffer) => {
+            errorBody += chunk.toString()
+          })
+          response.on('end', () => {
+            const errorMsg = `HTTP ${statusCode}: ${errorBody.substring(0, 200)}`
+            console.error('[Perplexity] Server error:', errorMsg)
+            stream.emit('error', new Error(errorMsg))
+            reject(new Error(errorMsg))
+          })
+          response.on('error', (error) => {
+            console.error('[Perplexity] Error response stream error:', error)
+            const errorMsg = `HTTP ${statusCode}: Failed to read error response`
+            stream.emit('error', new Error(errorMsg))
+            reject(new Error(errorMsg))
+          })
+          return
+        }
+
+        response.on('data', (chunk) => {
+          stream.push(chunk)
+          chunks.push(Buffer.from(chunk))
+        })
+
+        response.on('end', () => {
+          stream.push(null)
+        })
+
+        response.on('error', (error) => {
+          console.error('[Perplexity] Response error:', error)
+          const errorMessage = this.formatNetworkError(error)
+          stream.emit('error', new Error(errorMessage))
+        })
+
+        resolve({ stream, sessionId: requestId })
+      })
+
+      request_.on('error', (error) => {
+        console.error('[Perplexity] Request error:', error)
+        const errorMessage = this.formatNetworkError(error)
+        const wrappedError = new Error(errorMessage)
+        stream.emit('error', wrappedError)
+        reject(wrappedError)
+      })
+
+      request_.write(JSON.stringify(data))
+      request_.end()
+    })
+  }
+
   updateSessionData(data: Partial<SessionData>): void {
     const cacheKey = this.account.id
     const existing = sessionCache.get(cacheKey)

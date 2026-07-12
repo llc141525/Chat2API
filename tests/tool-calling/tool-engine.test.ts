@@ -56,7 +56,9 @@ test('OpenAI tools plus DeepSeek choose managed prompt', () => {
   assert.equal(result.plan.shouldInjectPrompt, true)
   assert.equal(result.tools, undefined)
   assert.equal(result.plan.tools.length, 2)
-  assert.match(result.messages[0].content as string, /<\|CHAT2API\|tool_calls>/)
+  // Tool contract lives in toolManifest.renderedPrompt, not in messages
+  assert.ok(result.toolManifest, 'toolManifest should be present')
+  assert.match(result.toolManifest!.renderedPrompt, /<\|CHAT2API\|tool_calls>/)
 })
 
 test('explicit Cherry Studio MCP adapter uses managed prompt and preserves tool names', () => {
@@ -172,4 +174,80 @@ test('non-stream parsing only accepts the selected provider protocol', () => {
 
   assert.equal(result.choices[0].message.tool_calls, undefined)
   assert.equal(result.choices[0].message.content, '[function_calls][call:default_api:read_file]{"filePath":"/tmp/a"}[/call][/function_calls]')
+})
+
+test('transformRequest returns toolManifest alongside messages for managed prompt', () => {
+  const provider = {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    type: 'builtin' as const,
+    authType: 'token' as const,
+    apiEndpoint: '',
+    headers: {},
+    enabled: true,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  const engine = new ToolCallingEngine()
+  const result = engine.transformRequest({
+    request: request({ tools: [{ type: 'function', function: { name: 'default_api:read_file', description: 'Read a file', parameters: { type: 'object', properties: {} } } }] }),
+    provider,
+    actualModel: 'deepseek-chat',
+  })
+
+  assert.ok(result.toolManifest, 'toolManifest should be present when shouldInjectPrompt is true')
+  assert.equal(result.toolManifest!.protocol, 'managed_xml')
+  assert.ok(result.toolManifest!.allowedToolNames.length > 0)
+  assert.ok(result.toolManifest!.renderedPrompt.length > 0)
+  assert.match(result.toolManifest!.renderedPrompt, /## Available Tools/)
+  // Messages are no longer modified — tool contract lives entirely in toolManifest.renderedPrompt
+  assert.equal(result.messages.length, 1)
+  assert.equal(result.messages[0].content, 'read /tmp/a')
+})
+
+test('transformRequest omits toolManifest when injection is skipped', () => {
+  const provider = {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    type: 'builtin' as const,
+    authType: 'token' as const,
+    apiEndpoint: '',
+    headers: {},
+    enabled: true,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  const engine = new ToolCallingEngine()
+  const result = engine.transformRequest({
+    request: { model: 'deepseek-chat', messages: [{ role: 'user', content: 'hi' }] },
+    provider,
+    actualModel: 'deepseek-chat',
+  })
+
+  assert.equal(result.plan.shouldInjectPrompt, false)
+  assert.equal(result.toolManifest, undefined)
+})
+
+test('toolManifest uses catalogFingerprint from plan snapshot', () => {
+  const provider = {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    type: 'builtin' as const,
+    authType: 'token' as const,
+    apiEndpoint: '',
+    headers: {},
+    enabled: true,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  const engine = new ToolCallingEngine()
+  const result = engine.transformRequest({
+    request: request(),
+    provider,
+    actualModel: 'deepseek-chat',
+  })
+
+  assert.equal(result.plan.shouldInjectPrompt, true)
+  // catalogFingerprint matches the plan's snapshot fingerprint
+  assert.equal(result.toolManifest!.catalogFingerprint, result.plan.catalogSnapshot?.fingerprint ?? '')
 })

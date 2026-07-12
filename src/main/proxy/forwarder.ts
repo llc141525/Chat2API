@@ -22,6 +22,7 @@ import { MiniMaxAdapter, MiniMaxStreamHandler } from './adapters/minimax'
 import { PerplexityAdapter } from './adapters/perplexity'
 import { PerplexityStreamHandler } from './adapters/perplexity-stream'
 import { ToolCallingEngine } from './toolCalling/ToolCallingEngine'
+import { buildRequestAssembly, type RequestAssembly } from './RequestAssembly.ts'
 import type { ToolCallingTransformResult } from './toolCalling/types'
 import { sessionManager } from './sessionManager'
 import {
@@ -114,6 +115,17 @@ export class RequestForwarder {
   ]
 
   /**
+   * Prepare request assembly by transforming the request and building the assembly.
+   */
+  private prepareRequest(request: ChatCompletionRequest, provider?: Provider): RequestAssembly {
+    const transformed = this.transformRequestForPromptToolUse(request, provider)
+    return buildRequestAssembly({
+      messages: request.messages,
+      toolManifest: transformed.toolManifest ?? null,
+    })
+  }
+
+  /**
    * Transform request for prompt-based tool calling
    * For models that don't support native function calling
    * Delegates tool normalization, prompt injection, and parser planning to ToolCallingEngine.
@@ -145,6 +157,24 @@ export class RequestForwarder {
   private applyToolCallsToResponse(result: any, transformed: ToolCallingTransformResult): void {
     const engine = new ToolCallingEngine(storeManager.getConfig().toolCallingConfig)
     engine.applyNonStreamResponse(result, transformed.plan)
+  }
+
+  /**
+   * Post-processing: if tool calling was planned but no tool calls were extracted,
+   * log a diagnostic warning but don't fail the request.
+   */
+  private logEmptyToolCallDiagnostic(
+    result: any,
+    methodName: string,
+    transformed: ToolCallingTransformResult
+  ): void {
+    if (transformed.plan.shouldParseResponse && result?.choices?.[0]) {
+      const choice = result.choices[0]
+      const msg = choice.message ?? {}
+      if (!msg.tool_calls && !msg.content) {
+        console.warn(`[Forwarder] ${methodName}: model returned empty content for tool-calling turn`)
+      }
+    }
   }
 
   /**
@@ -406,23 +436,37 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
+      const assembly = this.prepareRequest(request, provider)
 
       const adapter = new DeepSeekAdapter(provider, account)
-      
-      const { response, sessionId } = await adapter.chatCompletion({
-        model: request.model,
-        messages: transformedRequest.messages as any,
-        stream: transformedRequest.stream,
-        temperature: transformedRequest.temperature,
-        web_search: transformedRequest.web_search,
-        reasoning_effort: transformedRequest.reasoning_effort,
-      })
+      let responseResult: { response: any; sessionId: string }
+
+      if (assembly.toolManifest) {
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          web_search: request.web_search,
+          reasoning_effort: request.reasoning_effort,
+        } as any)
+      } else {
+        const transformedRequest = {
+          ...request,
+          messages: transformed.messages,
+          tools: transformed.tools,
+        }
+        responseResult = await adapter.chatCompletion({
+          model: request.model,
+          messages: transformedRequest.messages as any,
+          stream: transformedRequest.stream,
+          temperature: transformedRequest.temperature,
+          web_search: transformedRequest.web_search,
+          reasoning_effort: transformedRequest.reasoning_effort,
+        })
+      }
+
+      const { response, sessionId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -485,7 +529,8 @@ export class RequestForwarder {
       const result = await handler.handleNonStream(response.data)
       
       this.applyToolCallsToResponse(result, transformed)
-      
+      this.logEmptyToolCallDiagnostic(result, 'DeepSeek', transformed)
+
       if (deleteSessionCallback) {
         await deleteSessionCallback()
       }
@@ -519,24 +564,41 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
+      const assembly = this.prepareRequest(request, provider)
 
       const adapter = new GLMAdapter(provider, account)
-      const { response, conversationId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformedRequest.messages,
-        stream: transformedRequest.stream,
-        temperature: transformedRequest.temperature,
-        web_search: transformedRequest.web_search,
-        reasoning_effort: transformedRequest.reasoning_effort,
-        deep_research: transformedRequest.deep_research,
-      })
+      let responseResult: { response: any; conversationId: string }
+
+      if (assembly.toolManifest) {
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          web_search: request.web_search,
+          reasoning_effort: request.reasoning_effort,
+          deep_research: request.deep_research,
+        } as any)
+      } else {
+        const transformedRequest = {
+          ...request,
+          messages: transformed.messages,
+          tools: transformed.tools,
+        }
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformedRequest.messages,
+          stream: transformedRequest.stream,
+          temperature: transformedRequest.temperature,
+          web_search: transformedRequest.web_search,
+          reasoning_effort: transformedRequest.reasoning_effort,
+          deep_research: transformedRequest.deep_research,
+        })
+      }
+
+      const { response, conversationId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -594,7 +656,8 @@ export class RequestForwarder {
       const result = await handler.handleNonStream(response.data)
       
       this.applyToolCallsToResponse(result, transformed)
-      
+      this.logEmptyToolCallDiagnostic(result, 'GLM', transformed)
+
       if (shouldDeleteSession()) {
         const convId = handler.getConversationId()
         if (convId) {
@@ -628,18 +691,36 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
+      const assembly = this.prepareRequest(request, provider)
+
       const adapter = new KimiAdapter(provider, account)
-      const { response, conversationId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages,
-        stream: request.stream,
-        temperature: request.temperature,
-        enableThinking: !!request.reasoning_effort,
-        enableWebSearch: !!request.web_search,
-      })
+      let responseResult: { response: any; conversationId: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enableThinking: !!request.reasoning_effort,
+          enableWebSearch: !!request.web_search,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformed.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enableThinking: !!request.reasoning_effort,
+          enableWebSearch: !!request.web_search,
+        })
+      }
+
+      const { response, conversationId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -686,6 +767,7 @@ export class RequestForwarder {
       const result = await handler.handleNonStream(response.data)
 
       this.applyToolCallsToResponse(result, transformed)
+      this.logEmptyToolCallDiagnostic(result, 'Kimi', transformed)
 
       if (shouldDeleteSession()) {
         const realChatId = handler.getConversationId()
@@ -723,23 +805,41 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
+      const assembly = this.prepareRequest(request, provider)
 
       const adapter = new QwenAdapter(provider, account)
-      const { response, sessionId, reqId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformedRequest.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        enableThinking: !!request.reasoning_effort,
-        enableWebSearch: !!request.web_search,
-      })
+      let responseResult: { response: any; sessionId: string; reqId: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enableThinking: !!request.reasoning_effort,
+          enableWebSearch: !!request.web_search,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        const transformedRequest = {
+          ...request,
+          messages: transformed.messages,
+          tools: transformed.tools,
+        }
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformedRequest.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enableThinking: !!request.reasoning_effort,
+          enableWebSearch: !!request.web_search,
+        })
+      }
+
+      const { response, sessionId, reqId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -782,6 +882,7 @@ export class RequestForwarder {
       const result = await handler.handleNonStream(response.data, response)
 
       this.applyToolCallsToResponse(result, transformed)
+      this.logEmptyToolCallDiagnostic(result, 'Qwen', transformed)
 
       const sid = handler.getSessionId()
       if (deleteSessionCallback && sid) {
@@ -817,17 +918,34 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
+      const assembly = this.prepareRequest(request, provider)
+
       const adapter = new QwenAiAdapter(provider, account)
-      const { response, chatId, parentId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        enable_thinking: !!request.reasoning_effort,
-      })
+      let responseResult: { response: any; chatId: string; parentId: string | null }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enable_thinking: !!request.reasoning_effort,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformed.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          enable_thinking: !!request.reasoning_effort,
+        })
+      }
+
+      const { response, chatId, parentId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -871,6 +989,7 @@ export class RequestForwarder {
       const result = await handler.handleNonStream(response.data)
 
       this.applyToolCallsToResponse(result, transformed)
+      this.logEmptyToolCallDiagnostic(result, 'QwenAI', transformed)
 
       if (shouldDeleteSession()) {
         await adapter.deleteChat(chatId)
@@ -907,18 +1026,41 @@ export class RequestForwarder {
     console.log('[forwardZai] actualModel:', actualModel)
     console.log('[forwardZai] provider.modelMappings:', provider.modelMappings)
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
+      const assembly = this.prepareRequest(request, provider)
+
       const adapter = new ZaiAdapter(provider, account)
-      const { response, chatId, requestId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        web_search: request.web_search,
-        reasoning_effort: request.reasoning_effort,
-      })
+      let responseResult: { response: any; chatId: string; requestId: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          web_search: request.web_search,
+          reasoning_effort: request.reasoning_effort,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        const transformedRequest = {
+          ...request,
+          messages: transformed.messages,
+          tools: transformed.tools,
+        }
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformedRequest.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          web_search: request.web_search,
+          reasoning_effort: request.reasoning_effort,
+        })
+      }
+
+      const { response, chatId, requestId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -962,7 +1104,8 @@ export class RequestForwarder {
       const result = await handler.handleNonStream(response.data)
 
       this.applyToolCallsToResponse(result, transformed)
-      
+      this.logEmptyToolCallDiagnostic(result, 'ZAI', transformed)
+
       if (deleteChatCallback) {
         await deleteChatCallback(chatId)
       }
@@ -998,17 +1141,34 @@ export class RequestForwarder {
     console.log('[forwardMiniMax] actualModel:', actualModel)
     console.log('[forwardMiniMax] provider.modelMappings:', provider.modelMappings)
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
+      const assembly = this.prepareRequest(request, provider)
+
       const adapter = new MiniMaxAdapter(provider, account)
-      const { response, stream, chatId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        toolCallingPlan: transformed.plan,
-      })
+      let responseResult: { response: any; stream: any; chatId: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.model,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          toolCallingPlan: transformed.plan,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformed.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+          toolCallingPlan: transformed.plan,
+        })
+      }
+
+      const { response, stream, chatId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -1059,7 +1219,8 @@ export class RequestForwarder {
 
       if (response) {
         this.applyToolCallsToResponse(response.data, transformed)
-        
+        this.logEmptyToolCallDiagnostic(response.data, 'MiniMax', transformed)
+
         if (deleteChatCallback) {
           await deleteChatCallback(chatId)
         }
@@ -1079,6 +1240,7 @@ export class RequestForwarder {
         handler.setChatId(chatId)
         const result = await handler.handleNonStream(stream.stream)
         this.applyToolCallsToResponse(result, transformed)
+        this.logEmptyToolCallDiagnostic(result, 'MiniMax', transformed)
 
         if (deleteChatCallback) {
           await deleteChatCallback(chatId)
@@ -1121,21 +1283,37 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
-      const adapter = new MimoAdapter(provider, account)
+      const assembly = this.prepareRequest(request, provider)
 
-      const { response, conversationId, query } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.originalModel,
-        messages: transformedRequest.messages as any,
-        stream: transformedRequest.stream,
-        temperature: transformedRequest.temperature,
-      })
+      const adapter = new MimoAdapter(provider, account)
+      let responseResult: { response: any; conversationId: string; query: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          originalModel: request.originalModel,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+        })
+      } else {
+        // Fallback: old path for requests without tool manifest
+        const transformedRequest = {
+          ...request,
+          messages: transformed.messages,
+          tools: transformed.tools,
+        }
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.originalModel,
+          messages: transformedRequest.messages as any,
+          stream: transformedRequest.stream,
+          temperature: transformedRequest.temperature,
+        })
+      }
+
+      const { response, conversationId, query } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -1199,6 +1377,7 @@ export class RequestForwarder {
       const result = await handler.handleNonStream(response.data)
       const parsedResult = JSON.parse(result)
       this.applyToolCallsToResponse(parsedResult, transformed)
+      this.logEmptyToolCallDiagnostic(parsedResult, 'Mimo', transformed)
       await adapter.generateConversationTitle(
         conversationId,
         query,
@@ -1241,16 +1420,30 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     console.log('[forwardPerplexity] actualModel:', actualModel)
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
+      const assembly = this.prepareRequest(request, provider)
+
       const adapter = new PerplexityAdapter(provider, account)
-      
-      const { stream, sessionId } = await adapter.chatCompletion({
-        model: actualModel,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-      })
+      let responseResult: { stream: any; sessionId: string }
+
+      if (assembly.toolManifest) {
+        // New assembly-based path: tool contract comes from manifest, not from messages
+        responseResult = await adapter.chatCompletionWithAssembly(assembly, {
+          model: actualModel,
+          messages: request.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+        } as any)
+      } else {
+        // Fallback: old path for requests without tool manifest
+        responseResult = await adapter.chatCompletion({
+          model: actualModel,
+          messages: transformed.messages as any,
+          stream: request.stream,
+          temperature: request.temperature,
+        })
+      }
+
+      const { stream, sessionId } = responseResult
 
       const latency = Date.now() - startTime
 
@@ -1281,9 +1474,10 @@ export class RequestForwarder {
 
       const handler = new PerplexityStreamHandler(actualModel, sessionId, undefined, adapter, transformed.plan)
       const result = await handler.handleNonStream(stream)
-      
+
       this.applyToolCallsToResponse(result, transformed)
-      
+      this.logEmptyToolCallDiagnostic(result, 'Perplexity', transformed)
+
       if (shouldDeleteSession()) {
         await adapter.deleteSession(sessionId)
       }
