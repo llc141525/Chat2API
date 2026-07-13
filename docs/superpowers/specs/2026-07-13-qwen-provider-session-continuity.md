@@ -111,6 +111,17 @@ Acceptance:
 - Non-stream path stores state after parsing.
 - Deterministic tests prove the request body and forwarder source/behavior.
 
+Main-agent review checklist:
+
+- `ConversationState` keeps Qwen fields separate from GLM `conversationId` and DeepSeek `parentMessageId`.
+- `forwardQwen` computes `conversationStateKey` and `toolSessionKey` before creating the adapter.
+- The adapter receives `convState?.qwenSessionId` and `convState?.qwenParentReqId` in both assembly and non-assembly paths.
+- Stream path wraps/end-hooks the transformed stream and stores the handler's final `sessionId` + `responseId`.
+- Non-stream path stores state after `handleNonStream()` and before returning success.
+- Delete-after-chat behavior should not leave a known-deleted provider session as the preferred future state.
+- Tests cover both fresh and continued request body shape.
+- Tests include a guard that `parent_req_id: '0'` is not the only Qwen path.
+
 Checkpoint compression:
 
 - Worker final answer must include changed files, test commands, and a 10-line max state summary.
@@ -135,6 +146,15 @@ Acceptance:
 - Qwen assembly path does not drop context summary system messages.
 - Tool manifest remains authoritative and after summary.
 - Tests fail if summary is omitted from assembly path.
+
+Main-agent review checklist:
+
+- `prepareRequest()` must not build an assembly from stale/original messages after context management has already compacted the request.
+- `assembly.summaryText` must be populated either from the summary strategy output or by extracting the `[Prior conversation summary` system message from processed messages.
+- Qwen should prefer `renderFinalPrompt({ template: 'prefix' })` over another hand-rolled prompt joiner.
+- Prompt order for Qwen must be: base system -> non-authoritative summary -> authoritative tool contract -> conversation text.
+- Tests must assert content presence and relative ordering, not just that `toolManifest` exists.
+- No provider adapter may import prompt injection helpers forbidden by INV-001.
 
 ### Node 3: Qwen Delta Prompt Mode
 
