@@ -15,6 +15,51 @@ const tools = [
   },
 ]
 
+const questionTool = {
+  name: 'question',
+  parameters: {
+    type: 'object',
+    properties: {
+      questions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            question: { type: 'string' },
+            header: { type: 'string' },
+            options: { type: 'array' },
+          },
+        },
+      },
+    },
+    required: ['questions'],
+  },
+  source: 'openai' as const,
+}
+
+const todowriteTool = {
+  name: 'todowrite',
+  parameters: {
+    type: 'object',
+    properties: {
+      todos: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            content: { type: 'string' },
+            status: { type: 'string' },
+            priority: { type: 'string' },
+          },
+          required: ['content', 'status', 'priority'],
+        },
+      },
+    },
+    required: ['todos'],
+  },
+  source: 'openai' as const,
+}
+
 function plan(protocol: ToolCallingPlan['protocol'] = 'managed_xml'): ToolCallingPlan {
   return {
     mode: 'managed',
@@ -70,6 +115,58 @@ function plan(protocol: ToolCallingPlan['protocol'] = 'managed_xml'): ToolCallin
       toolCount: 1,
       injected: true,
       reason: 'test',
+    },
+  }
+}
+
+function qwenQuestionPlan(): ToolCallingPlan {
+  const base = plan('managed_xml')
+  return {
+    ...base,
+    providerId: 'qwen',
+    tools: [questionTool],
+    allowedToolNames: new Set(['question']),
+    catalogSnapshot: {
+      ...base.catalogSnapshot!,
+      tools: [questionTool],
+      allowedToolNames: ['question'],
+    },
+    contract: {
+      ...base.contract,
+      providerId: 'qwen',
+      tools: [questionTool],
+      allowedToolNames: new Set(['question']),
+    },
+    diagnostics: {
+      ...base.diagnostics,
+      providerId: 'qwen',
+      toolCount: 1,
+    },
+  }
+}
+
+function qwenTodowritePlan(): ToolCallingPlan {
+  const base = plan('managed_xml')
+  return {
+    ...base,
+    providerId: 'qwen',
+    tools: [todowriteTool],
+    allowedToolNames: new Set(['todowrite']),
+    catalogSnapshot: {
+      ...base.catalogSnapshot!,
+      tools: [todowriteTool],
+      allowedToolNames: ['todowrite'],
+    },
+    contract: {
+      ...base.contract,
+      providerId: 'qwen',
+      tools: [todowriteTool],
+      allowedToolNames: new Set(['todowrite']),
+    },
+    diagnostics: {
+      ...base.diagnostics,
+      providerId: 'qwen',
+      toolCount: 1,
     },
   }
 }
@@ -233,6 +330,116 @@ test('XML tool call preserves literal angle brackets in CDATA arguments', () => 
   assert.deepEqual(JSON.parse(toolCall.function.arguments), {
     filePath: 'tests/<literal>/input.txt with <tag>value</tag>',
   })
+})
+
+test('Qwen stream repairs question tool call with truncated Chat2API XML tail', () => {
+  const parser = new ToolStreamParser(qwenQuestionPlan())
+  const payload = '{"question":"Dark mode style?","header":"Dark Mode Style","options":[{"label":"Unified Light","description":"Use the same quiet design language."}]}'
+
+  const first = parser.push(
+    `<|CHAT2API|tool_calls><|CHAT2API|invoke name="question"><|CHAT2API|parameter name="questions"><![CDATA[${payload}]]</|CHAT2API|parameter></|`,
+    baseChunk,
+  )
+  assert.deepEqual(first, [])
+
+  const repaired = parser.flush(baseChunk)
+  const toolCall = repaired.at(-1)?.choices[0].delta.tool_calls[0]
+
+  assert.equal(toolCall.function.name, 'question')
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), { questions: [JSON.parse(payload)] })
+  assert.equal(parser.hasEmittedToolCall(), true)
+  assert.equal(parser.getObservation().suppressedMalformedToolOutput, false)
+})
+
+test('Qwen stream accepts question singleton object for array schema', () => {
+  const parser = new ToolStreamParser(qwenQuestionPlan())
+  const payload = '{"question":"Dark mode direction?","header":"Dark Mode Direction","options":[{"label":"Unified Light","description":"Keep dark aligned with light."},{"label":"Restrained Dark","description":"Keep dark but reduce glow."}]}'
+
+  const chunks = parser.push(
+    `<|CHAT2API|tool_calls><|CHAT2API|invoke name="question"><|CHAT2API|parameter name="questions"><![CDATA[${payload}]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>`,
+    baseChunk,
+  )
+
+  const toolCall = chunks.at(-1)?.choices[0].delta.tool_calls[0]
+  assert.equal(toolCall.function.name, 'question')
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), { questions: [JSON.parse(payload)] })
+  assert.equal(parser.hasEmittedToolCall(), true)
+  assert.equal(parser.getObservation().suppressedMalformedToolOutput, false)
+})
+
+test('Qwen stream repairs question object truncated after options array', () => {
+  const parser = new ToolStreamParser(qwenQuestionPlan())
+  const payload = '{"question":"Dark mode direction?","header":"Dark Mode Style","options":[{"label":"Unified Light","description":"Keep dark aligned with light."},{"label":"Restrained Dark","description":"Keep dark but reduce glow."}], '
+
+  const first = parser.push(
+    `<|CHAT2API|tool_calls><|CHAT2API|invoke name="question"><|CHAT2API|parameter name="questions"><![CDATA[${payload}`,
+    baseChunk,
+  )
+  assert.deepEqual(first, [])
+
+  const repaired = parser.flush(baseChunk)
+  const toolCall = repaired.at(-1)?.choices[0].delta.tool_calls[0]
+  assert.equal(toolCall.function.name, 'question')
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), {
+    questions: [{
+      question: 'Dark mode direction?',
+      header: 'Dark Mode Style',
+      options: [
+        { label: 'Unified Light', description: 'Keep dark aligned with light.' },
+        { label: 'Restrained Dark', description: 'Keep dark but reduce glow.' },
+      ],
+    }],
+  })
+  assert.equal(parser.hasEmittedToolCall(), true)
+  assert.equal(parser.getObservation().suppressedMalformedToolOutput, false)
+})
+
+test('Qwen stream repairs todowrite array truncated after complete todo items', () => {
+  const parser = new ToolStreamParser(qwenTodowritePlan())
+  const completeTodos = [
+    { content: 'Update dark mode CSS variables', status: 'in_progress', priority: 'high' },
+    { content: 'Remove decorative background animation', status: 'pending', priority: 'high' },
+    { content: 'Adjust sidebar and topbar shadows', status: 'pending', priority: 'high' },
+  ]
+  const payload = `${JSON.stringify(completeTodos).slice(0, -1)}, {"content": "Update tailwind.config.js dark tokens`
+
+  const first = parser.push(
+    `<|CHAT2API|tool_calls><|CHAT2API|invoke name="todowrite"><|CHAT2API|parameter name="todos"><![CDATA[${payload}`,
+    baseChunk,
+  )
+  assert.deepEqual(first, [])
+
+  const repaired = parser.flush(baseChunk)
+  const toolCall = repaired.at(-1)?.choices[0].delta.tool_calls[0]
+
+  assert.equal(toolCall.function.name, 'todowrite')
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), { todos: completeTodos })
+  assert.equal(parser.hasEmittedToolCall(), true)
+  assert.equal(parser.getObservation().suppressedMalformedToolOutput, false)
+})
+
+test('Qwen stream repairs todowrite bare object sequence for array parameter', () => {
+  const parser = new ToolStreamParser(qwenTodowritePlan())
+  const completeTodos = [
+    { content: 'Update dark mode CSS variables', status: 'in_progress', priority: 'high' },
+    { content: 'Remove decorative background animation', status: 'pending', priority: 'high' },
+    { content: 'Adjust sidebar and topbar shadows', status: 'pending', priority: 'medium' },
+  ]
+  const payload = `${completeTodos.map((todo) => JSON.stringify(todo)).join(', ')}, {"content": "Verify light mode", "status": "pending", "priori`
+
+  const first = parser.push(
+    `<|CHAT2API|tool_calls><|CHAT2API|invoke name="todowrite"><|CHAT2API|parameter name="todos"><![CDATA[${payload}`,
+    baseChunk,
+  )
+  assert.deepEqual(first, [])
+
+  const repaired = parser.flush(baseChunk)
+  const toolCall = repaired.at(-1)?.choices[0].delta.tool_calls[0]
+
+  assert.equal(toolCall.function.name, 'todowrite')
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), { todos: completeTodos })
+  assert.equal(parser.hasEmittedToolCall(), true)
+  assert.equal(parser.getObservation().suppressedMalformedToolOutput, false)
 })
 
 test('generated call IDs stay stable between emitted chunks and final state', () => {

@@ -70,9 +70,11 @@ test('Qwen request body keeps router query as the latest real user message', () 
     '修复 glm 无法使用工具的问题, 地址在E:\\Chat2API',
   )
   assert.equal(body.messages.length, 1)
-  assert.equal(countOccurrences(body.messages[0].content, '## Available Tools'), 1)
-  assert.equal(countOccurrences(body.messages[0].content, '<|CHAT2API|tool_calls>'), 1)
-  assert.match(body.messages[0].content, /default_api:read_file/)
+  // Tool contract now lives in toolManifest.renderedPrompt, not in messages
+  assert.ok(transformed.toolManifest, 'toolManifest should be present')
+  assert.match(transformed.toolManifest!.renderedPrompt, /## Available Tools/)
+  assert.match(transformed.toolManifest!.renderedPrompt, /<\|CHAT2API\|tool_calls>/)
+  assert.match(transformed.toolManifest!.renderedPrompt, /default_api:read_file/)
   assert.match(body.messages[0].content, /修复 glm 无法使用工具的问题/)
 })
 
@@ -157,17 +159,17 @@ test('Qwen request body preserves tool contract after low-threshold summary comp
   })
 
   const content = body.messages[0].content
+  // Summary text is still embedded in messages (by context management)
   assert.match(content, /\[Prior conversation summary/)
-  assert.match(content, /## Available Tools/)
-  assert.match(content, /catalog_fingerprint:/)
-  assert.match(content, /allowed_tools: bash, read/)
-  assert.match(content, /<\|CHAT2API\|tool_calls>/)
-  assert.match(content, /Tool `read`: Read a file/)
-  assert.match(content, /Tool `bash`: Run a shell command/)
-  assert.ok(
-    content.indexOf('[Prior conversation summary') < content.indexOf('## Available Tools'),
-    'authoritative tool contract should be after the non-authoritative summary',
-  )
+  // Tool contract now lives in toolManifest.renderedPrompt, not in messages
+  assert.ok(transformed.toolManifest, 'toolManifest should be present')
+  const renderedPrompt = transformed.toolManifest!.renderedPrompt
+  assert.match(renderedPrompt, /## Available Tools/)
+  assert.match(renderedPrompt, /catalog_fingerprint:/)
+  assert.match(renderedPrompt, /allowed_tools: bash, read/)
+  assert.match(renderedPrompt, /<\|CHAT2API\|tool_calls>/)
+  assert.match(renderedPrompt, /Tool `read`: Read a file/)
+  assert.match(renderedPrompt, /Tool `bash`: Run a shell command/)
   assert.equal(body.messages[0].meta_data.ori_query, 'turn 3: run a real read tool now')
 })
 

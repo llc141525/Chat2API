@@ -276,7 +276,10 @@ function extractMalformedParameters(
     const payloadStart = variant.paramOpen.lastIndex
     const close = findAnyClose(parseable, payloadStart)
     const rawBody = close === -1 ? parseable.slice(payloadStart) : parseable.slice(payloadStart, close)
-    const { rawPayload, payloadEncoding } = unwrapPayload(rawBody)
+    const { rawPayload, payloadEncoding } = unwrapPayload(rawBody, { allowUnclosedCdata: true })
+    if (close === -1 && !looksLikeJsonPayload(rawPayload)) {
+      continue
+    }
 
     parameters.push({
       name: decodeXmlAttribute(match[1]),
@@ -289,14 +292,22 @@ function extractMalformedParameters(
 }
 
 function findAnyClose(value: string, start: number): number {
-  const closers = [PARAM_CLOSE, '</arg_value>', '</parameter>', '</tool_call>']
+  const closers = [PARAM_CLOSE, INVOKE_CLOSE, CHAT2API_END, '</arg_value>', '</parameter>', '</invoke>', '</tool_call>', '</tool_calls>']
     .map((marker) => value.indexOf(marker, start))
     .filter((index) => index !== -1)
 
   return closers.length === 0 ? -1 : Math.min(...closers)
 }
 
-function unwrapPayload(value: string): { rawPayload: string; payloadEncoding: PayloadEncoding } {
+function looksLikeJsonPayload(value: string): boolean {
+  const trimmed = value.trim()
+  return trimmed.startsWith('{') || trimmed.startsWith('[')
+}
+
+function unwrapPayload(
+  value: string,
+  options: { allowUnclosedCdata?: boolean } = {},
+): { rawPayload: string; payloadEncoding: PayloadEncoding } {
   if (value.includes(']]>') && !value.includes('<![CDATA[')) {
     return { rawPayload: '', payloadEncoding: 'text' }
   }
@@ -304,12 +315,16 @@ function unwrapPayload(value: string): { rawPayload: string; payloadEncoding: Pa
   const cdataOpen = value.indexOf('<![CDATA[')
   if (cdataOpen !== -1) {
     const afterOpen = value.slice(cdataOpen + 9)
-    const cdataClose = afterOpen.indexOf(']]>')
+    const cdataClose = findCdataClose(afterOpen)
     if (cdataClose === -1) {
+      if (options.allowUnclosedCdata) {
+        return { rawPayload: afterOpen.trim(), payloadEncoding: 'cdata' }
+      }
       return { rawPayload: '', payloadEncoding: 'text' }
     }
+    const closeWidth = afterOpen.startsWith(']]>', cdataClose) ? 3 : 2
     const inner = afterOpen.slice(0, cdataClose)
-    const trailing = afterOpen.slice(cdataClose + 3).trim()
+    const trailing = afterOpen.slice(cdataClose + closeWidth).trim()
     if (trailing.length > 0) {
       return { rawPayload: '', payloadEncoding: 'text' }
     }
@@ -321,6 +336,20 @@ function unwrapPayload(value: string): { rawPayload: string; payloadEncoding: Pa
     trimmed.startsWith('{') || trimmed.startsWith('[') ? 'json_text' : 'text'
 
   return { rawPayload: decodeXmlText(trimmed), payloadEncoding }
+}
+
+function findCdataClose(value: string): number {
+  const canonicalClose = value.indexOf(']]>')
+  if (canonicalClose !== -1) {
+    return canonicalClose
+  }
+
+  // Qwen can occasionally stream a complete parameter payload as
+  // <![CDATA[payload]]</|CHAT2API|parameter>, missing the ">" in the CDATA
+  // terminator. Treat only a tail-position "]]" as recoverable; anything with
+  // trailing payload text remains malformed.
+  const truncatedClose = value.match(/\]\]\s*$/)
+  return truncatedClose?.index ?? -1
 }
 
 function detectForeignMarkers(value: string): ProtocolContainerWarning[] {

@@ -292,23 +292,22 @@ test('GLM adapter: tool prompt is injected correctly after persisted restart', (
   assert.equal(turn2.plan.shouldInjectPrompt, true)
   assert.equal(turn2.plan.shouldParseResponse, true)
 
-  // Verify the prompt was injected into messages
-  const allContent = turn2.messages
-    .map((m) => (typeof m.content === 'string' ? m.content : ''))
-    .join('\n')
-  assert.ok(allContent.includes('## Available Tools'), 'Tool prompt header present')
-  assert.ok(allContent.includes('Tool Contract Header'), 'Contract header present')
-  assert.ok(allContent.includes('catalog_fingerprint:'), 'Fingerprint line present')
+  // Verify the prompt was injected into toolManifest.renderedPrompt
+  assert.ok(turn2.toolManifest, 'toolManifest should be present')
+  const prompt = turn2.toolManifest!.renderedPrompt
+  assert.ok(prompt.includes('## Available Tools'), 'Tool prompt header present')
+  assert.ok(prompt.includes('Tool Contract Header'), 'Contract header present')
+  assert.ok(prompt.includes('catalog_fingerprint:'), 'Fingerprint line present')
 
   // Verify each tool name appears in the prompt
   for (const name of ['read_file', 'bash', 'write', 'grep']) {
-    assert.ok(allContent.includes(name), `Tool "${name}" appears in prompt`)
+    assert.ok(prompt.includes(name), `Tool "${name}" appears in prompt`)
   }
 
   // Verify tool descriptions are in the prompt (not stubs)
-  assert.ok(allContent.includes('Read the contents of a file'),
+  assert.ok(prompt.includes('Read the contents of a file'),
     'read_file description in prompt')
-  assert.ok(allContent.includes('Execute a shell command'),
+  assert.ok(prompt.includes('Execute a shell command'),
     'bash description in prompt')
 
   console.log('  Prompt injection verified: Contract Header + full tool descriptions present.\n')

@@ -566,9 +566,13 @@ export class QwenAdapter {
     }
 
     // Build conversation parts from non-system messages
+    // Truncate tool result content to prevent unbounded context bloat
+    const MAX_TOOL_RESULT_LENGTH = 2000
     const conversationParts: string[] = []
     for (const msg of assembly.messages) {
-      if (msg.role === 'user') {
+      if (msg.role === 'system') {
+        continue
+      } else if (msg.role === 'user') {
         conversationParts.push(extractTextContent(msg.content as any))
       } else if (msg.role === 'assistant' && msg.tool_calls && (msg.tool_calls as any[]).length > 0) {
         const calls = (msg.tool_calls as any[]).map(tc => ({
@@ -580,9 +584,13 @@ export class QwenAdapter {
       } else if (msg.role === 'assistant') {
         conversationParts.push(`Assistant: ${extractTextContent(msg.content as any)}`)
       } else if (msg.role === 'tool' && msg.tool_call_id) {
+        const rawContent = extractTextContent(msg.content as any)
+        const truncated = rawContent.length > MAX_TOOL_RESULT_LENGTH
+          ? rawContent.slice(0, MAX_TOOL_RESULT_LENGTH) + '\n...(truncated)'
+          : rawContent
         conversationParts.push(toolProfile.formatToolResult({
           toolCallId: msg.tool_call_id as string,
-          content: extractTextContent(msg.content as any),
+          content: truncated,
         }))
       }
     }

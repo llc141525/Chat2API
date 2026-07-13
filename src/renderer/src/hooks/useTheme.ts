@@ -2,7 +2,7 @@ import { useEffect, useMemo } from 'react'
 import { useSettingsStore } from '@/stores/settingsStore'
 
 export function useTheme() {
-  const { theme, setTheme } = useSettingsStore()
+  const { theme, setTheme, accentColor, setAccentColor } = useSettingsStore()
 
   const isDark = useMemo(() => {
     if (theme === 'system') {
@@ -37,6 +37,11 @@ export function useTheme() {
     return () => mediaQuery.removeEventListener('change', handleChange)
   }, [theme])
 
+  useEffect(() => {
+    const root = window.document.documentElement
+    root.setAttribute('data-accent', accentColor)
+  }, [accentColor])
+
   const toggleTheme = () => {
     setTheme(isDark ? 'light' : 'dark')
   }
@@ -46,5 +51,7 @@ export function useTheme() {
     setTheme,
     toggleTheme,
     isDark,
+    accentColor,
+    setAccentColor,
   }
 }

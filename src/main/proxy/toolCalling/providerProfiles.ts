@@ -61,27 +61,27 @@ function managedProviderProfile(
 }
 
 const profiles: Record<string, ProviderToolProfile> = {
-  deepseek: {
-    providerId: 'deepseek',
-    ...chat2ApiXmlHistoryProfile,
-  },
-  kimi: {
-    providerId: 'kimi',
-    ...chat2ApiXmlHistoryProfile,
-  },
-  glm: {
-    providerId: 'glm',
-    ...chat2ApiXmlHistoryProfile,
-  },
-  qwen: {
-    providerId: 'qwen',
-    ...chat2ApiXmlHistoryProfile,
-  },
+  deepseek: managedProviderProfile('deepseek', 'accepted', 'openai_chat_completions'),
+  kimi: managedProviderProfile('kimi', 'experimental', 'grpc_web_stream'),
+  glm: managedProviderProfile('glm', 'accepted', 'openai_chat_completions'),
+  minimax: managedProviderProfile('minimax', 'experimental', 'polling_stream'),
+  qwen: managedProviderProfile('qwen', 'accepted', 'openai_chat_completions'),
+  'qwen-ai': managedProviderProfile('qwen-ai', 'accepted', 'openai_chat_completions'),
   zai: {
     providerId: 'zai',
     managedSupport: true,
+    managedToolSupportStatus: 'experimental',
     supportsNativeTools: false,
     preferredManagedProtocol: 'managed_bracket',
+    contractHeaderVersion: 1,
+    availabilityDriftRetry: 'enabled',
+    managedPromptOwner: 'ToolCallingEngine',
+    parseStreaming: true,
+    parseNonStreaming: true,
+    supportsIntentionalEmptyOutput: false,
+    preservesToolHistory: true,
+    managedTransport: 'provider_chat_api',
+    providerRiskControlCaveats: ['captcha_or_risk_control'],
     formatAssistantToolCalls(calls) {
       return managedBracketProtocol.formatAssistantToolCalls(calls)
     },

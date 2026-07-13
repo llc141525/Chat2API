@@ -53,6 +53,17 @@ interface KimiMessage {
   tool_calls?: any[]
 }
 
+function extractKimiTextContent(content: any): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: any) => c.type === 'text')
+      .map((c: any) => c.text)
+      .join('\n')
+  }
+  return String(content || '')
+}
+
 interface ChatCompletionRequest {
   model: string
   messages: KimiMessage[]
@@ -175,9 +186,13 @@ export class KimiAdapter {
           arguments: tc.function.arguments,
         }))))
       } else if (msg.role === 'tool' && msg.tool_call_id) {
+        const rawContent = extractKimiTextContent(msg.content)
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
         conversationParts.push(toolProfile.formatToolResult({
           toolCallId: msg.tool_call_id,
-          content: extractKimiTextContent(msg.content),
+          content: truncated,
         }))
       } else if (msg.role === 'assistant') {
         conversationParts.push(`Assistant: ${extractKimiTextContent(msg.content)}`)

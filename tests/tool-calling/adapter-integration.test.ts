@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
 import type { ChatCompletionRequest } from '../../src/main/proxy/types.ts'
 import type { Provider } from '../../src/main/store/types.ts'
+import type { ToolManifest } from '../../src/main/proxy/toolCalling/ToolManifest.ts'
 
 function makeProvider(id: string): Provider {
   return {
@@ -49,19 +50,15 @@ function request(overrides: Partial<ChatCompletionRequest> = {}): ChatCompletion
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-function assertToolPromptInjected(messages: ChatCompletionRequest['messages'], toolNames: string[]): void {
-  const allContent = messages.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n')
-  assert.ok(allContent.includes('## Available Tools'), 'Expected tool prompt header')
-  assert.ok(allContent.includes('Tool Contract Header'), 'Expected tool contract header')
-  assert.ok(allContent.includes('catalog_fingerprint:'), 'Expected catalog fingerprint in prompt')
+function assertToolPromptInjected(result: { toolManifest?: ToolManifest }, toolNames: string[]): void {
+  assert.ok(result.toolManifest, 'toolManifest should be present')
+  const rendered = result.toolManifest!.renderedPrompt
+  assert.ok(rendered.includes('## Available Tools'), 'Expected tool prompt header')
+  assert.ok(rendered.includes('Tool Contract Header'), 'Expected tool contract header')
+  assert.ok(rendered.includes('catalog_fingerprint:'), 'Expected catalog fingerprint in prompt')
   for (const name of toolNames) {
-    assert.ok(allContent.includes(name), `Expected tool "${name}" in prompt`)
+    assert.ok(rendered.includes(name), `Expected tool "${name}" in prompt`)
   }
-}
-
-function assertNoToolPromptInjected(messages: ChatCompletionRequest['messages']): void {
-  const allContent = messages.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n')
-  assert.ok(!allContent.includes('## Available Tools'), 'Tool prompt should NOT be present')
 }
 
 function makeMultiTurnMessages(): ChatCompletionRequest['messages'] {
@@ -96,7 +93,7 @@ test('GLM adapter injects tool prompt for first turn with tools', () => {
 
   assert.equal(result.plan.mode, 'managed')
   assert.equal(result.plan.protocol, 'managed_xml')
-  assertToolPromptInjected(result.messages, ['read_file', 'write_file'])
+  assertToolPromptInjected(result, ['read_file', 'write_file'])
 })
 
 test('GLM adapter restores tools from history on second turn without tools', () => {
@@ -121,7 +118,7 @@ test('GLM adapter restores tools from history on second turn without tools', () 
   assert.equal(second.plan.mode, 'managed')
   assert.equal(second.plan.catalogDiagnostics.source, 'session_catalog')
   assert.equal(second.plan.catalogSnapshot?.fingerprint, first.plan.catalogSnapshot?.fingerprint)
-  assertToolPromptInjected(second.messages, ['read_file', 'write_file'])
+  assertToolPromptInjected(second, ['read_file', 'write_file'])
 })
 
 test('GLM adapter session miss falls back to history', () => {
@@ -154,7 +151,7 @@ test('Qwen adapter injects tool prompt for first turn with tools', () => {
 
   assert.equal(result.plan.mode, 'managed')
   assert.ok(result.plan.diagnostics.reason.startsWith('managed_'))
-  assertToolPromptInjected(result.messages, ['read_file', 'write_file'])
+  assertToolPromptInjected(result, ['read_file', 'write_file'])
 })
 
 test('Qwen adapter restores tools from session on second turn', () => {
@@ -210,7 +207,7 @@ test('MiniMax adapter injects managed tool prompt', () => {
   })
 
   assert.equal(result.plan.mode, 'managed')
-  assertToolPromptInjected(result.messages, ['read_file', 'write_file'])
+  assertToolPromptInjected(result, ['read_file', 'write_file'])
 })
 
 test('MiniMax adapter session miss restores from tool history', () => {
@@ -241,7 +238,7 @@ test('Kimi adapter injects managed tool prompt', () => {
   })
 
   assert.equal(result.plan.mode, 'managed')
-  assertToolPromptInjected(result.messages, ['read_file', 'write_file'])
+  assertToolPromptInjected(result, ['read_file', 'write_file'])
 })
 
 test('Kimi adapter session miss restores from tool history', () => {
@@ -272,7 +269,7 @@ test('DeepSeek adapter injects managed tool prompt', () => {
   })
 
   assert.equal(result.plan.mode, 'managed')
-  assertToolPromptInjected(result.messages, ['read_file', 'write_file'])
+  assertToolPromptInjected(result, ['read_file', 'write_file'])
 })
 
 test('DeepSeek adapter session miss restores from tool history', () => {
@@ -319,7 +316,7 @@ test('tool_choice "none" disables managed mode for all providers', () => {
   })
 
   assert.equal(result.plan.mode, 'disabled')
-  assertNoToolPromptInjected(result.messages)
+  assert.equal(result.toolManifest, undefined)
 })
 
 test('second turn without tools reuses catalog fingerprint when session is present', () => {

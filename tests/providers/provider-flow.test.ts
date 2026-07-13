@@ -346,6 +346,7 @@ test('Qwen AI defaults keep only the filtered current web model set', () => {
 
 test('Z.ai default models match the latest chat.z.ai HAR model ids', () => {
   const expectedModels = [
+    'GLM-5.2',
     'GLM-5.1',
     'GLM-5-Turbo',
     'GLM-5V-Turbo',
@@ -353,6 +354,7 @@ test('Z.ai default models match the latest chat.z.ai HAR model ids', () => {
     'GLM-4.7',
   ]
   const expectedMappings = {
+    'GLM-5.2': 'GLM-5.2',
     'GLM-5.1': 'GLM-5.1',
     'GLM-5-Turbo': 'GLM-5-Turbo',
     'GLM-5V-Turbo': 'GLM-5v-Turbo',
@@ -368,6 +370,7 @@ test('Z.ai default models match the latest chat.z.ai HAR model ids', () => {
   }
 
   const zaiAdapterSource = readFileSync(join(root, 'src/main/proxy/adapters/zai.ts'), 'utf8')
+  assert.match(zaiAdapterSource, /'glm-5\.2': 'GLM-5\.2'/)
   assert.match(zaiAdapterSource, /'glm-5\.1': 'GLM-5\.1'/)
   assert.match(zaiAdapterSource, /'glm-5v-turbo': 'GLM-5v-Turbo'/)
   assert.match(zaiAdapterSource, /'GLM-5V-Turbo': 'GLM-5v-Turbo'/)
@@ -576,7 +579,8 @@ test('README Supported Providers model lists mirror current defaults with Perple
 })
 
 test('Mimo model names and conversation flow match Xiaomi AI Studio web requests', () => {
-  assert.deepEqual(mimoConfig.supportedModels, ['MiMo-V2.5-Pro', 'MiMo-V2.5', 'MiMo-V2-Flash'])
+  assert.deepEqual(mimoConfig.supportedModels, ['MiMo-V2.5-Pro-UltraSpeed', 'MiMo-V2.5-Pro', 'MiMo-V2.5', 'MiMo-V2-Flash'])
+  assert.equal(mimoConfig.modelMappings?.['MiMo-V2.5-Pro-UltraSpeed'], 'mimo-v2.5-pro-ultraspeed')
   assert.equal(mimoConfig.modelMappings?.['MiMo-V2.5-Pro'], 'mimo-v2.5-pro')
   assert.equal(mimoConfig.modelMappings?.['MiMo-V2.5'], 'mimo-v2.5')
   assert.equal(mimoConfig.modelMappings?.['MiMo-V2-Flash'], 'mimo-v2-flash')
@@ -591,7 +595,7 @@ test('Mimo model names and conversation flow match Xiaomi AI Studio web requests
 
   assert.match(forwardMimoSource, /model:\s*actualModel/)
   assert.doesNotMatch(forwardMimoSource, /model:\s*request\.model/)
-  assert.match(forwardMimoSource, /const transformed = this\.transformRequestForPromptToolUse\([\s\S]*?this\.buildToolCatalogSessionKey/s)
+  assert.match(forwardMimoSource, /const \{ assembly, transformed \} = this\.prepareRequest\(request, provider\)/)
   assert.match(forwardMimoSource, /messages:\s*transformedRequest\.messages/)
   assert.match(forwardMimoSource, /new MimoStreamHandler\(actualModel, conversationId, 'separate', transformed\.plan\)/)
   assert.match(forwardMimoSource, /this\.inspectManagedNonStreamOutput\(parsedResult, transformed/)

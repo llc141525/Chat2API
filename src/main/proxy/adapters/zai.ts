@@ -344,16 +344,18 @@ export class ZaiAdapter {
     console.log('[Z.ai] chatCompletion called with request.model:', request.model)
     
     // Z.ai API requires specific model name casing:
-    // - GLM-5.1 and GLM-5-Turbo keep uppercase
+    // - GLM-5.2, GLM-5.1, and GLM-5-Turbo keep uppercase
     // - GLM-5V-Turbo uses lowercase "v" in the request model id
     // - GLM-5 and GLM-4.7 use lowercase request model ids
     const modelMapping: Record<string, string> = {
+      'glm-5.2': 'GLM-5.2',
       'glm-5.1': 'GLM-5.1',
       'glm-5-turbo': 'GLM-5-Turbo',
       'glm-5v-turbo': 'GLM-5v-Turbo',
       'glm-5': 'glm-5',
       'glm-4.7': 'glm-4.7',
       // Also handle uppercase input
+      'GLM-5.2': 'GLM-5.2',
       'GLM-5.1': 'GLM-5.1',
       'GLM-5-Turbo': 'GLM-5-Turbo',
       'GLM-5V-Turbo': 'GLM-5v-Turbo',
@@ -574,16 +576,18 @@ export class ZaiAdapter {
     console.log('[Z.ai] chatCompletionWithAssembly called with request.model:', request.model)
 
     // Z.ai API requires specific model name casing:
-    // - GLM-5.1 and GLM-5-Turbo keep uppercase
+    // - GLM-5.2, GLM-5.1, and GLM-5-Turbo keep uppercase
     // - GLM-5V-Turbo uses lowercase "v" in the request model id
     // - GLM-5 and GLM-4.7 use lowercase request model ids
     const modelMapping: Record<string, string> = {
+      'glm-5.2': 'GLM-5.2',
       'glm-5.1': 'GLM-5.1',
       'glm-5-turbo': 'GLM-5-Turbo',
       'glm-5v-turbo': 'GLM-5v-Turbo',
       'glm-5': 'glm-5',
       'glm-4.7': 'glm-4.7',
       // Also handle uppercase input
+      'GLM-5.2': 'GLM-5.2',
       'GLM-5.1': 'GLM-5.1',
       'GLM-5-Turbo': 'GLM-5-Turbo',
       'GLM-5V-Turbo': 'GLM-5v-Turbo',

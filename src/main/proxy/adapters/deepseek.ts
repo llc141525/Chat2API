@@ -306,9 +306,13 @@ export class DeepSeekAdapter {
       }
       // Handle tool response message
       else if (message.role === 'tool' && message.tool_call_id) {
+        const rawContent = String(message.content || '')
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
         text = toolProfile.formatToolResult({
           toolCallId: message.tool_call_id,
-          content: String(message.content || ''),
+          content: truncated,
         })
       }
       else if (Array.isArray(message.content)) {

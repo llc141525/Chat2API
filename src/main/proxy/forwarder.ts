@@ -113,6 +113,16 @@ function hasManagedToolHistory(messages?: ChatCompletionRequest['messages']): bo
   ))
 }
 
+/**
+ * Compact messages for retry after malformed tool output.
+ * Keeps all system messages + last 20 non-system messages to reduce context size.
+ */
+function compactMessagesForRetry(messages: ChatCompletionRequest['messages']): ChatCompletionRequest['messages'] {
+  const systemMessages = messages.filter((m) => m.role === 'system')
+  const nonSystemMessages = messages.filter((m) => m.role !== 'system')
+  return [...systemMessages, ...nonSystemMessages.slice(-20)]
+}
+
 export function getProviderConversationState(input: {
   primaryKey: string
   fallbackToolSessionKey?: string | null
@@ -224,12 +234,15 @@ export class RequestForwarder {
   /**
    * Prepare request assembly by transforming the request and building the assembly.
    */
-  private prepareRequest(request: ChatCompletionRequest, provider?: Provider): RequestAssembly {
+  private prepareRequest(request: ChatCompletionRequest, provider?: Provider): { assembly: RequestAssembly; transformed: ToolCallingTransformResult } {
     const transformed = this.transformRequestForPromptToolUse(request, provider)
-    return buildRequestAssembly({
-      messages: request.messages,
-      toolManifest: transformed.toolManifest ?? null,
-    })
+    return {
+      assembly: buildRequestAssembly({
+        messages: request.messages,
+        toolManifest: transformed.toolManifest ?? null,
+      }),
+      transformed,
+    }
   }
 
   /**
@@ -608,6 +621,7 @@ export class RequestForwarder {
     const maxRetries = config.retryCount
 
     let lastError: string | undefined
+    let compactedForRetry = false
     context.originalMessages = request.messages.map(message => ({ ...message }))
     context.summaryContaminated = false
     context.summaryRetryAttempted = false
@@ -617,7 +631,9 @@ export class RequestForwarder {
         await this.delay(5000)
       }
 
-      let modifiedRequest = request
+      let modifiedRequest = compactedForRetry
+        ? { ...request, messages: compactMessagesForRetry(request.messages) }
+        : request
 
       if (config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
         try {
@@ -672,6 +688,13 @@ export class RequestForwarder {
 
         if (result.success) {
           return result
+        }
+
+        // Auto-recovery: if managed provider returns malformed tool output,
+        // compact messages (keep recent history) and retry transparently
+        if (!compactedForRetry && result.error?.startsWith('Provider returned malformed tool output')) {
+          console.log('[Forwarder] Malformed tool output detected, compacting messages and retrying...')
+          compactedForRetry = true
         }
 
         lastError = result.error
@@ -785,9 +808,11 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const assembly = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider)
 
       // Check for existing conversation state (multi-turn)
+      const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
+      const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
       const convState = getProviderConversationState({
         primaryKey: conversationStateKey,
         fallbackToolSessionKey: toolSessionKey,
@@ -956,9 +981,11 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const assembly = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider)
 
       // Check for existing conversation state (multi-turn)
+      const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
+      const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
       const convState = getProviderConversationState({
         primaryKey: conversationStateKey,
         fallbackToolSessionKey: toolSessionKey,
@@ -1115,7 +1142,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const assembly = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider)
 
       const adapter = new KimiAdapter(provider, account)
       let responseResult: { response: any; conversationId: string }
@@ -1233,7 +1260,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const assembly = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider)
 
       const adapter = new QwenAdapter(provider, account)
       let responseResult: { response: any; sessionId: string; reqId: string }
@@ -1350,7 +1377,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const assembly = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider)
 
       const adapter = new QwenAiAdapter(provider, account)
       let responseResult: { response: any; chatId: string; parentId: string | null }
@@ -1456,12 +1483,11 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    context: ProxyContext
   ): Promise<ForwardResult> {
-    console.log('[forwardZai] actualModel:', actualModel)
-    console.log('[forwardZai] provider.modelMappings:', provider.modelMappings)
     try {
-      const assembly = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider)
 
       const adapter = new ZaiAdapter(provider, account)
       let responseResult: { response: any; chatId: string; requestId: string }
@@ -1589,10 +1615,8 @@ export class RequestForwarder {
     startTime: number,
     context: ProxyContext
   ): Promise<ForwardResult> {
-    console.log('[forwardMiniMax] actualModel:', actualModel)
-    console.log('[forwardMiniMax] provider.modelMappings:', provider.modelMappings)
     try {
-      const assembly = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider)
 
       const adapter = new MiniMaxAdapter(provider, account)
       let responseResult: { response: any; stream: any; chatId: string }
@@ -1676,14 +1700,14 @@ export class RequestForwarder {
           await deleteChatCallback(chatId)
         }
 
-        const emptyOutputFailure = this.inspectManagedNonStreamOutput(responseData, transformed, startTime)
+        const emptyOutputFailure = this.inspectManagedNonStreamOutput(response.data, transformed, startTime)
         if (emptyOutputFailure) return emptyOutputFailure
 
         return {
           success: true,
           status: response.status,
           headers: this.extractHeaders(response.headers),
-          body: responseData,
+          body: response.data,
           latency,
           providerSessionId: chatId,
         }
@@ -1741,7 +1765,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const assembly = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider)
 
       const adapter = new MimoAdapter(provider, account)
       let responseResult: { response: any; conversationId: string; query: string }
@@ -1880,9 +1904,8 @@ export class RequestForwarder {
     startTime: number,
     context: ProxyContext
   ): Promise<ForwardResult> {
-    console.log('[forwardPerplexity] actualModel:', actualModel)
     try {
-      const assembly = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider)
 
       const adapter = new PerplexityAdapter(provider, account)
       let responseResult: { stream: any; sessionId: string }

@@ -415,9 +415,13 @@ export class GLMAdapter {
               arguments: tc.function.arguments,
             }))))
           } else if (msg.role === 'tool' && msg.tool_call_id) {
+            const rawContent = extractGLMTextContent(msg.content)
+            const truncated = rawContent.length > 2000
+              ? rawContent.slice(0, 2000) + '\n...(truncated)'
+              : rawContent
             deltaParts.push(toolProfile.formatToolResult({
               toolCallId: msg.tool_call_id,
-              content: extractGLMTextContent(msg.content),
+              content: truncated,
             }))
           } else if (msg.role === 'assistant') {
             deltaParts.push(`Assistant: ${extractGLMTextContent(msg.content)}`)
@@ -460,9 +464,13 @@ export class GLMAdapter {
           arguments: tc.function.arguments,
         }))))
       } else if (msg.role === 'tool' && msg.tool_call_id) {
+        const rawContent = extractGLMTextContent(msg.content)
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
         conversationParts.push(toolProfile.formatToolResult({
           toolCallId: msg.tool_call_id,
-          content: extractGLMTextContent(msg.content),
+          content: truncated,
         }))
       } else if (msg.role === 'assistant') {
         conversationParts.push(`Assistant: ${extractGLMTextContent(msg.content)}`)

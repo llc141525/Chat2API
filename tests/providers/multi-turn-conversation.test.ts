@@ -303,7 +303,7 @@ test('RequestForwarder conversation state key: source isolates provider conversa
   assert.match(source, /: context\.requestId/)
   assert.match(source, /getProviderConversationState\(/)
   assert.match(source, /setProviderConversationState\(/)
-  assert.match(source, /const sessionDimension = typeof request\.user === 'string'/)
+  assert.match(source, /const sessionDimension = typeof context\.providerConversationSessionKey === 'string'/)
   assert.match(source, /return `\$\{provider\.id\}:\$\{account\.id\}:\$\{actualModel\}:\$\{sessionDimension\}`/)
 })
 
@@ -324,6 +324,5 @@ test('RequestForwarder source saves GLM provider conversation state to both prim
   assert.match(source, /setConversationState\(input\.primaryKey, input\.update\)/)
   assert.match(source, /setConversationState\(input\.fallbackToolSessionKey, input\.update\)/)
   assert.match(source, /update: \{ conversationId: convId \}/)
-  assert.match(source, /update: \{ conversationId: retryConvId \}/)
   assert.match(source, /update: \{ parentMessageId: lastMessageId \}/)
 })

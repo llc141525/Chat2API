@@ -283,11 +283,15 @@ export function buildMimoQuery(messages: MimoMessage[]): string {
     }
 
     if (message.role === 'tool' && message.tool_call_id) {
+      const rawContent = extractTextContent(message.content)
+      const truncated = rawContent.length > 2000
+        ? rawContent.slice(0, 2000) + '\n...(truncated)'
+        : rawContent
       entries.push({
         role: 'User',
         content: toolProfile.formatToolResult({
           toolCallId: message.tool_call_id,
-          content: extractTextContent(message.content),
+          content: truncated,
         }),
       })
       continue
@@ -531,11 +535,15 @@ export class MimoAdapter {
       }
 
       if (message.role === 'tool' && message.tool_call_id) {
+        const rawContent = extractTextContent(message.content)
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
         entries.push({
           role: 'User',
           content: toolProfile.formatToolResult({
             toolCallId: message.tool_call_id,
-            content: extractTextContent(message.content),
+            content: truncated,
           }),
         })
         continue

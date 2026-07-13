@@ -4,7 +4,9 @@ import { getToolProtocol } from './protocols/index.ts'
 import {
   assembleOpenAIToolCalls,
   getStructureProtocolAdapter,
+  repairStructure,
   validateToolCallStructure,
+  type MalformedToolIntent,
   type ProtocolStructureResult,
 } from '../toolRuntime/data/index.ts'
 
@@ -129,7 +131,7 @@ export class ToolStreamParser {
     if (!this.buffer) return []
 
     this.observeAvailabilityDrift()
-    const parsed = parseBufferedToolCall(this.buffer, this.plan)
+    const parsed = parseBufferedToolCall(this.buffer, this.plan, { final: true })
     if (parsed.toolCalls.length > 0) {
       const chunks = parsed.toolCalls.map((toolCall) => {
         const indexedToolCall = {
@@ -210,9 +212,13 @@ function recordEmittedContent(observation: ToolStreamObservation, content: strin
   observation.emittedVisibleContentLength += content.trim().length
 }
 
-function parseBufferedToolCall(buffer: string, plan: ToolCallingPlan): ToolParseResult {
+function parseBufferedToolCall(
+  buffer: string,
+  plan: ToolCallingPlan,
+  options: { final?: boolean } = {},
+): ToolParseResult {
   if (plan.protocol === 'managed_xml') {
-    const parsed = parseManagedXmlBufferedToolCall(buffer, plan)
+    const parsed = parseManagedXmlBufferedToolCall(buffer, plan, options)
     if (parsed) return parsed
   }
 
@@ -220,7 +226,11 @@ function parseBufferedToolCall(buffer: string, plan: ToolCallingPlan): ToolParse
   return selected.parse(buffer, { tools: plan.tools, protocol: plan.protocol })
 }
 
-function parseManagedXmlBufferedToolCall(buffer: string, plan: ToolCallingPlan): ToolParseResult | null {
+function parseManagedXmlBufferedToolCall(
+  buffer: string,
+  plan: ToolCallingPlan,
+  options: { final?: boolean } = {},
+): ToolParseResult | null {
   const adapter = getStructureProtocolAdapter(plan.protocol)
   const protocolResult = adapter.extractStructure(buffer)
 
@@ -228,7 +238,7 @@ function parseManagedXmlBufferedToolCall(buffer: string, plan: ToolCallingPlan):
     return null
   }
 
-  if (isUnterminated(protocolResult)) {
+  if (isUnterminated(protocolResult) && !options.final) {
     return emptyParseResult(buffer, 'managed_xml')
   }
 
@@ -252,12 +262,17 @@ function parseManagedXmlBufferedToolCall(buffer: string, plan: ToolCallingPlan):
   }
 
   if (validation.status === 'invalid_structure') {
+    const repaired = tryRepairManagedXmlToolCall(validation.malformedIntent, plan)
+    if (repaired) {
+      return repaired
+    }
+
     return {
       content: buffer,
       toolCalls: [],
       protocol: 'managed_xml',
       rawMatches: protocolRawMatches(protocolResult, buffer),
-      malformedReason: validation.failure.kind,
+      malformedReason: `${validation.failure.kind}: ${validation.failure.detail}`,
       invalidToolNames: validation.failure.kind === 'unknown_tool_name' && validation.failure.toolName
         ? [validation.failure.toolName]
         : [],
@@ -265,6 +280,37 @@ function parseManagedXmlBufferedToolCall(buffer: string, plan: ToolCallingPlan):
   }
 
   return null
+}
+
+function tryRepairManagedXmlToolCall(
+  malformedIntent: MalformedToolIntent | undefined,
+  plan: ToolCallingPlan,
+): ToolParseResult | null {
+  if (!malformedIntent) return null
+
+  const repair = repairStructure(malformedIntent)
+  if (repair.status !== 'repaired') return null
+
+  const adapter = getStructureProtocolAdapter(plan.protocol)
+  const reparsed = adapter.extractStructure(repair.repairedText)
+  const validation = validateToolCallStructure({
+    plan: runtimePlanFromCallingPlan(plan),
+    protocolResult: reparsed,
+    tools: plan.tools,
+  })
+
+  if (validation.status !== 'valid_structure') return null
+
+  return {
+    content: validation.cleanContent ?? '',
+    toolCalls: assembleOpenAIToolCalls({
+      validated: validation.validated,
+      tools: plan.tools,
+    }),
+    protocol: 'managed_xml',
+    rawMatches: [repair.repairedText],
+    invalidToolNames: [],
+  }
 }
 
 function emptyParseResult(buffer: string, protocol: ToolParseResult['protocol']): ToolParseResult {

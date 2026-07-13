@@ -307,9 +307,13 @@ export class QwenAiAdapter {
           })))
         }
       } else if (msg.role === 'tool') {
+        const rawContent = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? '')
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
         allContent += (allContent ? '\n\n' : '') + toolProfile.formatToolResult({
           toolCallId: msg.tool_call_id || '',
-          content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? ''),
+          content: truncated,
         })
       }
     }

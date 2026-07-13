@@ -90,6 +90,17 @@ interface ChatCompletionRequest {
   toolCallingPlan?: ToolCallingPlan
 }
 
+function extractMiniMaxTextContent(content: any): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: any) => c.type === 'text')
+      .map((c: any) => c.text)
+      .join('\n')
+  }
+  return String(content || '')
+}
+
 interface DeviceInfo {
   deviceId: string
   userId: string
@@ -450,9 +461,13 @@ export class MiniMaxAdapter {
           arguments: tc.function.arguments,
         }))))
       } else if (msg.role === 'tool' && msg.tool_call_id) {
+        const rawContent = extractMiniMaxTextContent(msg.content)
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
         conversationParts.push(toolProfile.formatToolResult({
           toolCallId: msg.tool_call_id,
-          content: extractMiniMaxTextContent(msg.content),
+          content: truncated,
         }))
       } else if (msg.role === 'assistant') {
         conversationParts.push(`Assistant: ${extractMiniMaxTextContent(msg.content)}`)

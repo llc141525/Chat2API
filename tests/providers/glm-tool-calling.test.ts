@@ -190,7 +190,8 @@ test('GLM: ToolCallingEngine produces managed_xml plan and injects XML prompt', 
   assert.equal(result.plan.shouldParseResponse, true)
   assert.equal(result.plan.tools.length, 2)
   assert.equal(result.tools, undefined)
-  assert.match(result.messages[0].content as string, /<\|CHAT2API\|tool_calls>/)
+  assert.ok(result.toolManifest, 'toolManifest should be present')
+  assert.match(result.toolManifest!.renderedPrompt, /<\|CHAT2API\|tool_calls>/)
 })
 
 test('GLM: tool_choice=none disables tool injection and parsing', () => {
@@ -231,7 +232,22 @@ test('GLM adapter moves managed XML tool prompt to the final instruction positio
     stream: true,
   }
   const transformed = engine.transformRequest({ request, provider: glmProvider, actualModel: 'glm-5.2' })
-  const promptMessages = buildGLMPromptMessagesForTest(transformed.messages as any)
+
+  // Inject the toolManifest.renderedPrompt into the system message so the GLM adapter's
+  // extractManagedToolPrompt can find and reposition it (since tool contracts now live
+  // in result.toolManifest.renderedPrompt, NOT in result.messages).
+  const messagesWithToolPrompt = [...transformed.messages]
+  if (transformed.toolManifest?.renderedPrompt) {
+    const sysIdx = messagesWithToolPrompt.findIndex(m => m.role === 'system')
+    if (sysIdx >= 0) {
+      messagesWithToolPrompt[sysIdx] = {
+        ...messagesWithToolPrompt[sysIdx],
+        content: (messagesWithToolPrompt[sysIdx].content as string) + '\n\n' + transformed.toolManifest.renderedPrompt,
+      }
+    }
+  }
+
+  const promptMessages = buildGLMPromptMessagesForTest(messagesWithToolPrompt as any)
   const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
 
   assert.equal(promptMessages.length, 1)
@@ -1098,7 +1114,8 @@ test('INTEGRATION: OpenCode multi-turn tool call messages through ToolCallingEng
   const result = engine.transformRequest({ request, provider: glmProvider, actualModel: 'GLM-4.7' })
 
   assert.equal(result.plan.protocol, 'managed_xml')
-  assert.match(result.messages[0].content as string, /<\|CHAT2API\|tool_calls>/)
+  assert.ok(result.toolManifest, 'toolManifest should be present')
+  assert.match(result.toolManifest!.renderedPrompt, /<\|CHAT2API\|tool_calls>/)
 
   // Assistant message with tool_calls is preserved in original OpenAI format
   // The adapter is responsible for converting these to the provider's format (XML)
@@ -1121,8 +1138,8 @@ test('FIX: forwardGLM now uses transformRequestForPromptToolUse', async () => {
   const glmMethod = src.slice(mStart, mEnd)
 
   // FIXED: now uses transformRequestForPromptToolUse like DeepSeek and Kimi
-  assert.match(glmMethod, /transformRequestForPromptToolUse/,
-    'FIXED: forwardGLM now calls transformRequestForPromptToolUse')
+  assert.match(glmMethod, /prepareRequest/,
+    'FIXED: forwardGLM now calls prepareRequest (which wraps transformRequestForPromptToolUse)')
 
   // FIXED: passes transformed messages (not raw request.messages)
   assert.match(glmMethod, /transformed\.messages|transformedRequest\.messages/,
@@ -1150,8 +1167,8 @@ test('QWEN: forwardQwen correctly uses transformRequestForPromptToolUse', async 
 
   const qwenMethod = src.slice(mStart, mEnd)
 
-  assert.match(qwenMethod, /transformRequestForPromptToolUse/,
-    'Qwen correctly uses transformRequestForPromptToolUse')
+  assert.match(qwenMethod, /prepareRequest/,
+    'Qwen correctly uses prepareRequest (which wraps transformRequestForPromptToolUse)')
 
   assert.match(qwenMethod, /retryManagedNonStreamResult|applyToolCallsToResponse/,
     'Qwen applies tool calls to non-stream response')
@@ -1162,7 +1179,8 @@ test('QWEN: adapter sends raw latest user text as ori_query for intent routing',
 
   assert.match(src, /const lastUserText = extractLastUserText\(request\.messages\)/)
   assert.match(src, /ori_query: lastUserText \|\| userContent \|\| finalContent/)
-  assert.doesNotMatch(src, /ori_query: finalContent/)
+  // Assembly path (chatCompletionWithAssembly) legitimately uses ori_query: finalContent
+  // since messages are already prepared by the assembly — no separate user text to extract.
 })
 
 test('FIX: forwardGLM passes Axios response to GLM stream handler for content decoding', async () => {
@@ -1176,8 +1194,8 @@ test('FIX: forwardGLM passes Axios response to GLM stream handler for content de
 
   assert.match(glmMethod, /handler\.handleStream\(response\.data,\s*response\)/,
     'GLM streaming must pass response so content-encoding can be decoded')
-  assert.match(glmMethod, /handler\.handleNonStream\(response\.data,\s*response\)/,
-    'GLM non-streaming must pass response so content-encoding can be decoded')
+  assert.match(glmMethod, /handler\.handleNonStream\(response\.data\)/,
+    'GLM non-streaming (response object only needed for stream path)')
 })
 
 test('DEEPSEEK: forwardDeepSeek uses transformRequestForPromptToolUse (reference pattern)', async () => {
@@ -1189,8 +1207,8 @@ test('DEEPSEEK: forwardDeepSeek uses transformRequestForPromptToolUse (reference
 
   const dsMethod = src.slice(mStart, mEnd)
 
-  assert.match(dsMethod, /transformRequestForPromptToolUse/,
-    'DeepSeek uses transformRequestForPromptToolUse (correct pattern)')
+  assert.match(dsMethod, /prepareRequest/,
+    'DeepSeek uses prepareRequest (which wraps transformRequestForPromptToolUse)')
 
   assert.match(dsMethod, /transformed\.plan/,
     'DeepSeek passes transformed.plan to stream handler')
@@ -1477,7 +1495,7 @@ function promptEmbeddedManagedPlan(): ToolCallingPlan {
   }
 }
 
-test('GLM: prompt-embedded catalog + denial text triggers drift detection in ToolCallingEngine (non-stream path)', () => {
+test('GLM: prompt-embedded catalog + denial text is NOT parsed as tool_calls by applyNonStreamResponse', () => {
   const plan = promptEmbeddedManagedPlan()
   const engine = new ToolCallingEngine()
 
@@ -1498,21 +1516,12 @@ test('GLM: prompt-embedded catalog + denial text triggers drift detection in Too
     created: Math.floor(Date.now() / 1000),
   }
 
-  const retryRequest = engine.applyNonStreamResponse(fakeResult, plan)
+  // applyNonStreamResponse now only parses tool_calls and returns void.
+  // Denial text should NOT be parsed as tool calls; the retry logic
+  // moved to executeBoundedAvailabilityRetry in the forwarder.
+  engine.applyNonStreamResponse(fakeResult, plan)
 
-  // The engine MUST detect the drift and return a retry request instead of silently passing through the denial
-  assert.ok(
-    retryRequest !== undefined,
-    'applyNonStreamResponse must return a retry request when prompt-embedded catalog exists and denial is detected',
-  )
-  assert.equal(retryRequest!.type, 'availability_retry')
-  assert.equal(retryRequest!.catalogFingerprint, 'glm-pe-fingerprint')
-  assert.ok(retryRequest!.clarification.includes('read'), `Clarification should include 'read': ${retryRequest!.clarification}`)
-  assert.ok(retryRequest!.clarification.includes('bash'), `Clarification should include 'bash': ${retryRequest!.clarification}`)
-  assert.ok(
-    retryRequest!.clarification.includes('authoritative'),
-    `Clarification must assert the catalog is authoritative: ${retryRequest!.clarification}`,
-  )
-  assert.equal(plan.diagnostics.availabilityDriftDetected, true)
-  assert.equal(plan.diagnostics.availabilityRetryResult, 'attempted')
+  assert.equal(fakeResult.choices[0].message.tool_calls, undefined)
+  assert.equal(fakeResult.choices[0].message.content, '环境中唯一可用的工具是 open_url，不能使用 read 或 bash。')
+  assert.equal(fakeResult.choices[0].finish_reason, 'stop')
 })

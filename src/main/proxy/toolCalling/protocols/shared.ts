@@ -185,6 +185,19 @@ export function repairArgumentsForSchema(
     if (schema.type === 'array' && repaired[name] !== undefined && !Array.isArray(repaired[name])) {
       repaired = { ...repaired, [name]: [repaired[name]] }
     }
+    // Coerce string values to number/integer when schema expects a number
+    if ((schema.type === 'number' || schema.type === 'integer') && typeof repaired[name] === 'string') {
+      const trimmed = (repaired[name] as string).trim()
+      if (trimmed && !isNaN(Number(trimmed))) {
+        repaired = { ...repaired, [name]: schema.type === 'integer' ? Math.floor(Number(trimmed)) : Number(trimmed) }
+      }
+    }
+    // Coerce "true"/"false" strings to boolean when schema expects boolean
+    if (schema.type === 'boolean' && typeof repaired[name] === 'string') {
+      const lower = (repaired[name] as string).trim().toLowerCase()
+      if (lower === 'true') repaired = { ...repaired, [name]: true }
+      else if (lower === 'false') repaired = { ...repaired, [name]: false }
+    }
   }
 
   const required = Array.isArray(parameters.required) ? parameters.required : []
