@@ -206,6 +206,19 @@ Acceptance:
 - `qwen-session-memory-probe.mjs` still passes.
 - A proxy-level two-turn request confirms Chat2API reuses Qwen session state.
 
+Checkpoint result after Node 3:
+
+- Deterministic layer passed with `node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts` (272 passing tests).
+- Proxy-level two-turn memory probe passed after Node 1/2 and again after Node 3. Same OpenAI `user` with no resent prior messages reused the same Qwen provider session and recalled the nonce; a different `user` did not.
+- Bare `opencode run --model Qwen3-Max` failed before reaching Chat2API because OpenCode did not select the intended provider in this environment. Use `qwen/Qwen3-Max` for the Qwen provider-specific gate.
+- `verify-opencode-capability.ps1 -Model "qwen/Qwen3-Max"` generated `.agent-probe/result.json` matching local deterministic computation, proving at least the `read -> bash` tool chain executed through the proxy, but the wrapper timed out before producing a complete event log/final pass.
+- A minimal manual OpenCode run showed a remaining risk: after a tool result, Qwen can emit managed tool XML for a valid tool name with missing required parameters; the stream parser correctly rejects it as schema-invalid, and OpenCode reports a malformed managed-tool turn.
+
+Next checkpoint:
+
+- Treat provider session continuity as proven at the Chat2API/Qwen web-session layer.
+- Treat full OpenCode agent capability as not yet proven. The next node should focus on managed-tool retry/repair or stricter turn prompts for Qwen after tool results, then rerun the OpenCode gate.
+
 ## Risks
 
 - Qwen may keep memory by `session_id` but still use `parent_req_id` for branching; preserve both.
