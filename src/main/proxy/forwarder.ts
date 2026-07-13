@@ -81,6 +81,8 @@ function buildDeepSeekProviderErrorMessage(payload: DeepSeekEnvelope | null | un
 export interface ConversationState {
   parentMessageId?: string
   conversationId?: string
+  qwenSessionId?: string
+  qwenParentReqId?: string
   lastUsedAt: number
 }
 
@@ -1261,9 +1263,20 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     try {
       const { assembly, transformed } = this.prepareRequest(request, provider)
+      const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
+      const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
+      const convState = getProviderConversationState({
+        primaryKey: conversationStateKey,
+        fallbackToolSessionKey: toolSessionKey,
+        messages: request.messages,
+      })
 
       const adapter = new QwenAdapter(provider, account)
       let responseResult: { response: any; sessionId: string; reqId: string }
+      const requestOptions = {
+        sessionId: convState?.qwenSessionId,
+        parentReqId: convState?.qwenParentReqId,
+      }
 
       if (assembly.toolManifest) {
         // New assembly-based path: tool contract comes from manifest, not from messages
@@ -1275,6 +1288,7 @@ export class RequestForwarder {
           temperature: request.temperature,
           enableThinking: !!request.reasoning_effort,
           enableWebSearch: !!request.web_search,
+          ...requestOptions,
         } as any)
       } else {
         // Fallback: old path for requests without tool manifest
@@ -1291,6 +1305,7 @@ export class RequestForwarder {
           temperature: request.temperature,
           enableThinking: !!request.reasoning_effort,
           enableWebSearch: !!request.web_search,
+          ...requestOptions,
         })
       }
 
@@ -1308,6 +1323,19 @@ export class RequestForwarder {
         }
       }
 
+      const saveConversationState = (sid?: string, parentReqId?: string) => {
+        if (!sid) return
+        setProviderConversationState({
+          primaryKey: conversationStateKey,
+          fallbackToolSessionKey: toolSessionKey,
+          messages: request.messages,
+          update: {
+            qwenSessionId: sid,
+            qwenParentReqId: parentReqId || '0',
+          },
+        })
+      }
+
       const deleteSessionCallback = shouldDeleteSession()
         ? async (sid: string) => {
             try {
@@ -1318,10 +1346,24 @@ export class RequestForwarder {
           }
         : undefined
 
-      const handler = new QwenStreamHandler(actualModel, deleteSessionCallback, transformed.plan)
+      const handler = new QwenStreamHandler(actualModel, undefined, transformed.plan)
 
       if (request.stream) {
         const transformedStream = await handler.handleStream(response.data, response)
+        const originalEnd = transformedStream.end.bind(transformedStream)
+        transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
+          const finalSessionId = handler.getSessionId() || sessionId
+          const finalResponseId = handler.getResponseId() || reqId
+          if (!deleteSessionCallback) {
+            saveConversationState(finalSessionId, finalResponseId)
+          }
+          if (deleteSessionCallback && finalSessionId) {
+            deleteSessionCallback(finalSessionId).catch(err => {
+              console.error('[Qwen] Failed to delete session:', err)
+            })
+          }
+          return originalEnd(chunk, encoding, callback)
+        }
 
         return {
           success: true,
@@ -1339,9 +1381,13 @@ export class RequestForwarder {
       this.applyToolCallsToResponse(result, transformed)
       this.logEmptyToolCallDiagnostic(result, 'Qwen', transformed)
 
-      const sid = handler.getSessionId()
-      if (deleteSessionCallback && sid) {
-        await deleteSessionCallback(sid)
+      const finalSessionId = handler.getSessionId() || sessionId
+      const finalResponseId = handler.getResponseId() || reqId
+      if (!deleteSessionCallback) {
+        saveConversationState(finalSessionId, finalResponseId)
+      }
+      if (deleteSessionCallback && finalSessionId) {
+        await deleteSessionCallback(finalSessionId)
       }
 
       const emptyOutputFailure = this.inspectManagedNonStreamOutput(result, transformed, startTime)

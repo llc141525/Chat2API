@@ -81,6 +81,8 @@ interface ChatCompletionRequest {
   reasoning_effort?: 'low' | 'medium' | 'high'
   enableThinking?: boolean
   enableWebSearch?: boolean
+  sessionId?: string
+  parentReqId?: string
 }
 
 interface QwenSessionListPage {
@@ -125,6 +127,7 @@ interface QwenChatRequestBodyInput {
   actualModel: string
   sessionId: string
   reqId: string
+  parentReqId?: string
   timestamp: number
   enableThinking: boolean
   enableWebSearch: boolean
@@ -142,11 +145,13 @@ function buildQwenChatRequestBody(input: QwenChatRequestBodyInput): any {
     actualModel,
     sessionId,
     reqId,
+    parentReqId,
     timestamp,
     enableThinking,
     enableWebSearch,
   } = input
   const toolProfile = getProviderToolProfile('qwen')
+  const isContinuation = Boolean(parentReqId)
 
   const systemPrompts: string[] = []
   const conversationParts: string[] = []
@@ -209,10 +214,10 @@ function buildQwenChatRequestBody(input: QwenChatRequestBodyInput): any {
       },
     ],
     from: 'default',
-    parent_req_id: '0',
+    parent_req_id: parentReqId || '0',
     enable_search: enableWebSearch,
     biz_data: '{"entryPoint":"tongyigw"}',
-    scene_param: 'first_turn',
+    scene_param: isContinuation ? 'chat' : 'first_turn',
     chat_client: 'h5',
     client_tm: timestamp.toString(),
     protocol_version: 'v2',
@@ -434,7 +439,8 @@ export class QwenAdapter {
     }
 
     const reqId = uuid(false)
-    const sessionId = uuid(false)
+    const sessionId = request.sessionId || uuid(false)
+    const parentReqId = request.sessionId ? (request.parentReqId || '0') : undefined
     
     let actualModel = this.mapModel(request.model)
     
@@ -469,6 +475,7 @@ export class QwenAdapter {
     console.log('[Qwen] Session info:', {
       sessionId,
       reqId,
+      parentReqId,
     })
     console.log('[Qwen] Using model:', actualModel)
 
@@ -482,6 +489,7 @@ export class QwenAdapter {
       actualModel,
       sessionId,
       reqId,
+      parentReqId,
       timestamp,
       enableThinking,
       enableWebSearch,
@@ -523,7 +531,8 @@ export class QwenAdapter {
     }
 
     const reqId = uuid(false)
-    const sessionId = uuid(false)
+    const sessionId = request.sessionId || uuid(false)
+    const parentReqId = request.sessionId ? (request.parentReqId || '0') : undefined
 
     let actualModel = this.mapModel(request.model)
 
@@ -549,7 +558,7 @@ export class QwenAdapter {
       }
     }
 
-    console.log('[Qwen] Session info:', { sessionId, reqId })
+    console.log('[Qwen] Session info:', { sessionId, reqId, parentReqId })
     console.log('[Qwen] Using model:', actualModel)
 
     const toolProfile = getProviderToolProfile('qwen')
@@ -638,10 +647,10 @@ export class QwenAdapter {
         }
       ],
       from: 'default',
-      parent_req_id: '0',
+      parent_req_id: parentReqId || '0',
       enable_search: enableWebSearch,
       biz_data: '{"entryPoint":"tongyigw"}',
-      scene_param: 'first_turn',
+      scene_param: request.sessionId ? 'chat' : 'first_turn',
       chat_client: 'h5',
       client_tm: timestamp.toString(),
       protocol_version: 'v2',
@@ -1443,6 +1452,10 @@ export class QwenStreamHandler {
 
   getSessionId(): string {
     return this.sessionId
+  }
+
+  getResponseId(): string {
+    return this.responseId
   }
 }
 
