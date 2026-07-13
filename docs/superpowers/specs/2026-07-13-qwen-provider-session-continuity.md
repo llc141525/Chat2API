@@ -32,6 +32,18 @@ Proxy-level validation after Node 1/2:
 - Response IDs for turn 1 and turn 2 matched the same Qwen provider session.
 - Test Qwen sessions were deleted after the probe.
 
+Default OpenAI-route validation gap found on 2026-07-13:
+
+- The proxy-level validation above used a fixed OpenAI `user`.
+- Real clients often omit `user`.
+- In that default path, `buildProviderConversationStateKey()` falls back to the per-request `context.requestId`.
+- Because `context.requestId` is regenerated on every `/v1/chat/completions` request, Qwen state is missed and the adapter starts a fresh provider session.
+- Dev log evidence showed both modes:
+  - reused mode: same Qwen `sessionId`, later turn has previous `reqId` as `parentReqId`
+  - broken default mode: new Qwen `sessionId` with `parentReqId: undefined`
+
+Conclusion: Node 1-3 implemented the lower provider-session reuse layer, but the OpenAI chat route still lacks a stable conversation identity. That makes the architecture incomplete for default clients.
+
 ## Goals
 
 1. Reuse Qwen provider sessions across Chat2API turns.
@@ -218,6 +230,178 @@ Next checkpoint:
 
 - Treat provider session continuity as proven at the Chat2API/Qwen web-session layer.
 - Treat full OpenCode agent capability as not yet proven. The next node should focus on managed-tool retry/repair or stricter turn prompts for Qwen after tool results, then rerun the OpenCode gate.
+
+### Node 5: OpenAI Route Session Identity Closure
+
+Planning timebox: 20-30 minutes
+Execution timebox: 35-55 minutes
+Review/verification timebox: 25-40 minutes
+
+Owner split:
+
+- Main agent owns this written plan, acceptance, and review.
+- Worker subagent (`gpt-5.4`, low reasoning) owns the code execution only after this node is documented.
+
+Problem statement:
+
+- `forwardQwen()` can reuse provider sessions only when its `conversationStateKey` is stable.
+- `/v1/chat/completions` currently does not set `context.providerConversationSessionKey`.
+- If the client omits OpenAI `user`, `buildProviderConversationStateKey()` uses `context.requestId`, which is unique per request.
+- Result: multi-turn requests through the default OpenAI route can create one Qwen website conversation record per turn.
+- Boundary: if a client sends neither a stable identity (`user`/header/metadata) nor any repeated history, Chat2API cannot safely infer conversation continuity. This node targets default OpenAI-style clients that omit `user` but resend stable conversation history.
+
+Files for worker:
+
+- `src/main/proxy/routes/chat.ts`
+- new or existing route identity helper under `src/main/proxy/routes/`
+- route tests under `tests/routes/`
+- proxy probe script under `scripts/probes/`
+
+Task plan for worker:
+
+1. Add an OpenAI chat session identity helper, modeled after `anthropicSession.ts` but named for the OpenAI route.
+2. Identity priority must be:
+   - explicit request headers: `x-session-id`, `x-conversation-id`, `x-chat-session-id`, `x-client-session-id`
+   - request body `user`
+   - request body metadata fields if the type already permits or a safe `any` access is required: `session_id`, `sessionId`, `conversation_id`, `conversationId`, `thread_id`, `threadId`
+   - derived hash from stable conversation prefix: client IP + provider id + model + earliest stable user/assistant text prefix from resent history
+   - process fallback only if no stable prefix exists
+3. In `chat.ts`, derive the identity after provider/account/model selection and pass it to both:
+   - `toolCatalogSessionKey`
+   - `providerConversationSessionKey`
+4. Keep INV-001 intact: do not move tool prompt injection into any provider adapter.
+5. Keep existing `request.user` support; this node must broaden the default path, not remove the explicit user path.
+6. Add deterministic tests proving:
+   - same message prefix without `user` derives the same key across two requests
+   - different first user prefix derives a different key
+   - explicit header wins over derived hash
+   - `chat.ts` passes the derived key into `providerConversationSessionKey`
+7. Add or update a proxy probe script that can validate the live route behavior without relying on source inspection.
+
+Live validation command:
+
+```powershell
+# Terminal 1
+npm run dev:win 2>&1 | Tee-Object -FilePath .\dev-qwen-session.log
+
+# Terminal 2, before Node 5 fix: expected to fail reuse when no user/header is sent,
+# even though the second request resends stable OpenAI history
+node .\scripts\probes\qwen-proxy-session-identity-probe.mjs --model "Qwen3.7-Max" --log .\dev-qwen-session.log --no-user
+
+# Terminal 2, after Node 5 fix: expected to reuse one Qwen provider session
+node .\scripts\probes\qwen-proxy-session-identity-probe.mjs --model "Qwen3.7-Max" --log .\dev-qwen-session.log --no-user
+```
+
+Live validation acceptance:
+
+- Before the fix, the probe must show at least two Qwen `Session info` blocks with different `sessionId` values or a second block whose `parentReqId` is `undefined`.
+- After the fix, the probe must show the second turn reusing the first Qwen `sessionId`.
+- After the fix, the second turn must have `parentReqId` equal to the first turn response `reqId` or at least not be `undefined`.
+- The probe must print the model answer preview, but the authoritative reuse evidence is the Qwen `Session info` sequence from the dev log.
+- The no-user probe intentionally resends stable OpenAI history on turn 2. It is not proof that identity-free, history-free requests can be correlated.
+- If cleanup is disabled, the probe must state that it may create website-side Qwen records. Do not run broad delete-all cleanup as part of this node.
+
+Pre-fix live validation result on 2026-07-13:
+
+Command:
+
+```powershell
+node .\scripts\probes\qwen-proxy-session-identity-probe.mjs --model "Qwen3.7-Max" --log .\dev-qwen-session.log --no-user --expect fresh
+```
+
+Observed:
+
+- First turn Qwen `sessionId`: `ec22882a4f544cb281f242a2d6a4df69`
+- First turn Qwen `reqId`: `853fc6c39b914c589f17b9a9422e21c7`
+- Second turn Qwen `sessionId`: `0ec0880740624391932902e588ab5c84`
+- Second turn Qwen `parentReqId`: `undefined`
+- Probe result: `ok: true` for the expected pre-fix failure mode.
+
+Control command:
+
+```powershell
+node .\scripts\probes\qwen-proxy-session-identity-probe.mjs --model "Qwen3.7-Max" --log .\dev-qwen-session.log --expect reuse
+```
+
+Observed:
+
+- First turn Qwen `sessionId`: `2c529e583dd64199b70859986ecd9b08`
+- First turn Qwen `reqId`: `2ce0b5d4428249e19836f91e96304491`
+- Second turn Qwen `sessionId`: `2c529e583dd64199b70859986ecd9b08`
+- Second turn Qwen `parentReqId`: `2ce0b5d4428249e19836f91e96304491`
+- Probe result: `ok: true` for fixed-user reuse.
+
+Interpretation:
+
+- Qwen provider-session reuse works when the route supplies a stable identity.
+- The default no-user OpenAI route still fails provider-session reuse even when the second request resends stable OpenAI history.
+
+Post-fix live validation result on 2026-07-13:
+
+Command:
+
+```powershell
+node .\scripts\probes\qwen-proxy-session-identity-probe.mjs --model "Qwen3.7-Max" --log .\dev-qwen-session.log --no-user --expect reuse
+```
+
+Observed:
+
+- First turn Qwen `sessionId`: `2609690b43214712bc1e3b39c6a73ae6`
+- First turn Qwen `reqId`: `6458a71003874d18a154c1ebce763c87`
+- Second turn Qwen `sessionId`: `2609690b43214712bc1e3b39c6a73ae6`
+- Second turn Qwen `parentReqId`: `6458a71003874d18a154c1ebce763c87`
+- Probe result: `ok: true` for no-user, history-derived reuse.
+
+Interpretation:
+
+- The OpenAI chat route now supplies a stable provider conversation key for no-user clients that resend conversation history.
+- This closes the route-level gap that caused one Qwen website conversation record per turn in that default client shape.
+- Main-agent review caught and fixed one subagent gap before live acceptance: the first implementation derived the hash from the first three user/assistant messages, which would change between turn 1 and an appended-history turn 2. The accepted implementation derives from the first stable user/assistant text only.
+
+Targeted deterministic result:
+
+```powershell
+node --test tests/routes/openai-session-identity.test.ts tests/providers/qwen-session-continuity.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Observed: 17 passing tests.
+
+Regression gate result:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Observed: 272 passing tests.
+
+Deterministic verification:
+
+```powershell
+node --test tests/routes/openai-session-identity.test.ts tests/providers/qwen-session-continuity.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Regression gate after worker returns:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Main-agent review checklist:
+
+- The route identity helper is route-level code, not provider adapter code.
+- Header/body explicit identity wins over derived hash.
+- Derived hash uses stable early conversation content, not `requestId`.
+- The same OpenAI conversation sent without `user` maps to the same `providerConversationSessionKey` across turns.
+- A different conversation does not collide with the first conversation under ordinary use.
+- The key is namespaced, for example `openai-chat:<hash>` or equivalent.
+- Logs or tests make the failure mode visible if the route falls back to per-request identity.
+- Existing Anthropic route behavior is not changed.
+
+Subagent handoff requirements:
+
+- Return a compact handoff with changed files, tests run, and any failed live probe output.
+- Do not declare final acceptance.
+- Do not broaden scope into managed-tool retry/repair; that remains a later node.
 
 ## Risks
 

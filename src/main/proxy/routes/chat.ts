@@ -13,6 +13,7 @@ import { streamHandler } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { storeManager } from '../../store/store'
+import { applyOpenAISessionIdentity } from './openaiSession.ts'
 import { 
   isAnthropicToolFormat,
   transformResponseToAnthropic,
@@ -213,7 +214,7 @@ router.post('/completions', async (ctx: Context) => {
 
   const { account, provider, actualModel } = selection
 
-  const context: ProxyContext = {
+  const baseContext: ProxyContext = {
     requestId,
     providerId: provider.id,
     accountId: account.id,
@@ -223,6 +224,12 @@ router.post('/completions', async (ctx: Context) => {
     isStream: request.stream || false,
     clientIP,
   }
+
+  const context = applyOpenAISessionIdentity(
+    baseContext,
+    request,
+    ctx.headers as Record<string, string | string[] | undefined>,
+  )
 
   proxyStatusManager.recordRequestStart(request.model, provider.id, account.id)
 

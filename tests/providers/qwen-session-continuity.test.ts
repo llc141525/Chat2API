@@ -58,3 +58,13 @@ test('forwardQwen source reads and writes qwen conversation state', () => {
   assert.match(forwarderSource, /if \(!deleteSessionCallback\) \{\s*saveConversationState\(finalSessionId, finalResponseId\)\s*\}/)
   assert.doesNotMatch(forwarderSource, /saveConversationState\(finalSessionId, finalResponseId\)\s*[\r\n]+\s*if \(deleteSessionCallback && finalSessionId\)/)
 })
+
+test('chat route sets provider conversation keys from openai session identity helper', () => {
+  const chatRouteSource = readFileSync('src/main/proxy/routes/chat.ts', 'utf8')
+  const helperSource = readFileSync('src/main/proxy/routes/openaiSession.ts', 'utf8')
+
+  assert.match(chatRouteSource, /import\s+\{\s*applyOpenAISessionIdentity\s*\}\s+from\s+'\.\/openaiSession\.ts'/)
+  assert.match(chatRouteSource, /const context = applyOpenAISessionIdentity\(/)
+  assert.match(helperSource, /toolCatalogSessionKey: sessionIdentity\.sessionKey/)
+  assert.match(helperSource, /providerConversationSessionKey: sessionIdentity\.sessionKey/)
+})
