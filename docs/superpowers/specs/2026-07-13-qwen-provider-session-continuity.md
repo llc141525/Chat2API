@@ -23,6 +23,15 @@ Observed result:
 
 Conclusion: Qwen provider-side session memory is usable. `session_id` is the minimum continuity key; `parent_req_id` should still be preserved for message-tree correctness.
 
+Proxy-level validation after Node 1/2:
+
+- Local Chat2API proxy: `http://127.0.0.1:8081/v1/chat/completions`
+- Turn 1 used a unique `user` and no prior history.
+- Turn 2 used the same `user`, no prior history, and asked for the nonce.
+- Result: Turn 2 recalled the nonce; a different `user` control did not.
+- Response IDs for turn 1 and turn 2 matched the same Qwen provider session.
+- Test Qwen sessions were deleted after the probe.
+
 ## Goals
 
 1. Reuse Qwen provider sessions across Chat2API turns.
