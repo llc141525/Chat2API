@@ -296,3 +296,147 @@ test('Qwen assembly path extracts summary from system messages when assembly.sum
   assert.ok(toolIndex < conversationIndex, 'tool contract should appear before conversation')
   assert.equal(countOccurrences(content, '[Prior conversation summary]'), 1)
 })
+
+test('Qwen assembly path keeps full prompt when provider session is absent', () => {
+  const assembly = buildRequestAssembly({
+    messages: [
+      { role: 'system', content: 'base system instruction' },
+      { role: 'system', content: '[Prior conversation summary]\nsummary text' },
+      { role: 'user', content: 'early user text to keep' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"a.txt"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_1', content: 'tool result payload' },
+      { role: 'user', content: 'latest user text' },
+    ] as any,
+    toolManifest: {
+      renderedPrompt: '## Available Tools\ncatalog_fingerprint: fp\n<|CHAT2API|tool_calls>',
+    } as any,
+  })
+
+  const body = buildQwenAssemblyRequestBodyForTest({
+    assembly,
+    request: {
+      model: 'Qwen3.7-Max',
+      originalModel: 'Qwen3.7-Max',
+      stream: true,
+      messages: assembly.messages as any,
+    },
+    actualModel: 'Qwen3.7-Max',
+    sessionId: 'session',
+    reqId: 'req',
+    timestamp: 1,
+    enableThinking: false,
+    enableWebSearch: false,
+  })
+
+  const content = body.messages[0].content as string
+  assert.match(content, /early user text to keep/)
+  assert.match(content, /\[Prior conversation summary]/)
+  assert.ok(content.indexOf('[Prior conversation summary]') < content.indexOf('## Available Tools'))
+  assert.ok(content.indexOf('## Available Tools') < content.indexOf('early user text to keep'))
+})
+
+test('Qwen assembly path uses conservative delta when provider session and recent tool suffix exist', () => {
+  const assembly = buildRequestAssembly({
+    messages: [
+      { role: 'system', content: 'base system instruction' },
+      { role: 'system', content: '[Prior conversation summary]\nsummary text' },
+      { role: 'user', content: 'very early user text to drop' },
+      { role: 'assistant', content: 'ordinary assistant text to drop' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"b.txt"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_1', content: 'tool result payload' },
+      { role: 'user', content: 'latest user text to keep' },
+    ] as any,
+    toolManifest: {
+      renderedPrompt: '## Available Tools\ncatalog_fingerprint: fp\n<|CHAT2API|tool_calls>',
+    } as any,
+  })
+
+  const body = buildQwenAssemblyRequestBodyForTest({
+    assembly,
+    request: {
+      model: 'Qwen3.7-Max',
+      originalModel: 'Qwen3.7-Max',
+      stream: true,
+      sessionId: 'existing-provider-session',
+      messages: assembly.messages as any,
+    },
+    actualModel: 'Qwen3.7-Max',
+    sessionId: 'existing-provider-session',
+    reqId: 'req',
+    parentReqId: 'parent',
+    timestamp: 1,
+    enableThinking: false,
+    enableWebSearch: false,
+  })
+
+  const content = body.messages[0].content as string
+  assert.doesNotMatch(content, /very early user text to drop/)
+  assert.doesNotMatch(content, /ordinary assistant text to drop/)
+  assert.match(content, /<\|CHAT2API\|tool_calls>/)
+  assert.match(content, /read/)
+  assert.match(content, /tool result payload/)
+  assert.match(content, /latest user text to keep/)
+  assert.ok(content.indexOf('[Prior conversation summary]') < content.indexOf('## Available Tools'))
+  assert.ok(content.indexOf('## Available Tools') < content.indexOf('latest user text to keep'))
+  assert.equal(body.messages[0].meta_data.ori_query, 'latest user text to keep')
+})
+
+test('Qwen assembly path keeps full prompt with provider session when no tool-call suffix exists', () => {
+  const assembly = buildRequestAssembly({
+    messages: [
+      { role: 'system', content: 'base system instruction' },
+      { role: 'system', content: '[Prior conversation summary]\nsummary text' },
+      { role: 'user', content: 'early ordinary user text' },
+      { role: 'assistant', content: 'ordinary assistant reply' },
+      { role: 'user', content: 'latest ordinary user text' },
+    ] as any,
+    toolManifest: {
+      renderedPrompt: '## Available Tools\ncatalog_fingerprint: fp\n<|CHAT2API|tool_calls>',
+    } as any,
+  })
+
+  const body = buildQwenAssemblyRequestBodyForTest({
+    assembly,
+    request: {
+      model: 'Qwen3.7-Max',
+      originalModel: 'Qwen3.7-Max',
+      stream: true,
+      sessionId: 'existing-provider-session',
+      messages: assembly.messages as any,
+    },
+    actualModel: 'Qwen3.7-Max',
+    sessionId: 'existing-provider-session',
+    reqId: 'req',
+    parentReqId: 'parent',
+    timestamp: 1,
+    enableThinking: false,
+    enableWebSearch: false,
+  })
+
+  const content = body.messages[0].content as string
+  assert.match(content, /early ordinary user text/)
+  assert.match(content, /ordinary assistant reply/)
+  assert.match(content, /latest ordinary user text/)
+  assert.ok(content.indexOf('[Prior conversation summary]') < content.indexOf('## Available Tools'))
+  assert.ok(content.indexOf('## Available Tools') < content.indexOf('early ordinary user text'))
+})

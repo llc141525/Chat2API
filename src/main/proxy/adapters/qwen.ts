@@ -153,6 +153,27 @@ interface QwenAssemblyRequestBodyInput {
   enableWebSearch: boolean
 }
 
+function selectQwenDeltaMessages(messages: Array<QwenMessage | import('../types.ts').ChatMessage>, hasProviderSession: boolean) {
+  if (!hasProviderSession) {
+    return messages
+  }
+
+  let lastAssistantToolCallIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index] as QwenMessage
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+      lastAssistantToolCallIndex = index
+      break
+    }
+  }
+
+  if (lastAssistantToolCallIndex === -1) {
+    return messages
+  }
+
+  return messages.slice(lastAssistantToolCallIndex)
+}
+
 function buildQwenChatRequestBody(input: QwenChatRequestBodyInput): any {
   const {
     request,
@@ -274,6 +295,7 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
   const conversationParts: string[] = []
   const lastUserText = extractLastUserText(request.messages)
   const explicitSummaryText = assembly.summaryText?.trim() || null
+  const conversationMessages = selectQwenDeltaMessages(assembly.messages as QwenMessage[], Boolean(request.sessionId))
 
   const MAX_TOOL_RESULT_LENGTH = 2000
   for (const msg of assembly.messages) {
@@ -292,6 +314,12 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
       } else {
         baseSystemPrompts.push(content)
       }
+      continue
+    }
+  }
+
+  for (const msg of conversationMessages) {
+    if (msg.role === 'system') {
       continue
     }
 
