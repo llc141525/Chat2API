@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
 import { inspectNonStreamAssistantOutput } from '../../src/main/proxy/toolCalling/outputInspection.ts'
 import type { ChatCompletionRequest } from '../../src/main/proxy/types.ts'
@@ -187,6 +189,7 @@ test('tool session key reuses catalog snapshot across omitted-tool turns', () =>
   assert.equal(first.plan.catalogSnapshot?.fingerprint, second.plan.catalogSnapshot?.fingerprint)
   assert.equal(second.plan.catalogDiagnostics.source, 'session_catalog')
   assert.ok(second.toolManifest, 'toolManifest should be present on reuse')
+  assert.deepEqual(second.plan.tools.map((tool) => tool.parameters), first.plan.tools.map((tool) => tool.parameters))
 })
 
 test('tool session key keeps the full catalog when a later request sends only a subset of tools', () => {
@@ -404,4 +407,33 @@ test('toolManifest uses catalogFingerprint from plan snapshot', () => {
   assert.equal(result.plan.shouldInjectPrompt, true)
   // catalogFingerprint matches the plan's snapshot fingerprint
   assert.equal(result.toolManifest!.catalogFingerprint, result.plan.catalogSnapshot?.fingerprint ?? '')
+})
+
+test('provider adapters do not import tool prompt injection helpers (INV-001 guard)', () => {
+  const adapterDir = path.resolve('src/main/proxy/adapters')
+  const adapterFiles = fs.readdirSync(adapterDir)
+    .filter((file) => file.endsWith('.ts'))
+
+  const forbiddenImports = [
+    'hasToolPromptInjected',
+    'toolsToSystemPrompt',
+    'TOOL_WRAP_HINT',
+    'shouldInjectToolPrompt',
+  ]
+
+  for (const file of adapterFiles) {
+    const source = fs.readFileSync(path.join(adapterDir, file), 'utf8')
+    const importLines = source
+      .split(/\r?\n/)
+      .filter((line) => /^\s*import\b/.test(line))
+      .join('\n')
+
+    for (const symbol of forbiddenImports) {
+      assert.doesNotMatch(
+        importLines,
+        new RegExp(`\\b${symbol}\\b`),
+        `${file} must not import ${symbol}`,
+      )
+    }
+  }
 })

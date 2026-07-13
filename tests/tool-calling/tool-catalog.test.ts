@@ -70,6 +70,8 @@ test('omitted tools reuse an existing session catalog without changing fingerpri
   assert.equal(second.snapshot?.source, 'session_catalog')
   assert.equal(second.snapshot?.fingerprint, first.snapshot?.fingerprint)
   assert.deepEqual(second.diagnostics.driftKinds, ['missing_current_tools_with_session_catalog'])
+  assert.deepEqual(second.snapshot?.tools[0]?.parameters, bashTool.parameters)
+  assert.notEqual(second.snapshot?.tools[0]?.parameters, bashTool.parameters)
 })
 
 test('omitted tools with managed history and no catalog restore from history as degraded fallback', () => {
@@ -84,6 +86,7 @@ test('omitted tools with managed history and no catalog restore from history as 
   assert.equal(result.snapshot?.source, 'restored_from_history')
   assert.deepEqual(result.snapshot?.allowedToolNames, ['bash'])
   assert.ok(result.diagnostics.driftKinds.includes('restored_from_history'))
+  assert.deepEqual(result.snapshot?.tools[0]?.parameters, { type: 'object', additionalProperties: true })
 })
 
 test('added tools create a new snapshot and new fingerprint', () => {

@@ -11,7 +11,10 @@ const tools: NormalizedToolDefinition[] = [{
     type: 'object',
     properties: {
       city: { type: 'string' },
+      units: { type: 'string', enum: ['celsius', 'fahrenheit'] },
     },
+    required: ['city'],
+    additionalProperties: false,
   },
   source: 'mcp',
 }]
@@ -172,6 +175,9 @@ test('existing catalog is reused when a later turn omits request tools', () => {
   assert.equal(first.catalogSnapshot?.fingerprint, second.catalogSnapshot?.fingerprint)
   assert.equal(second.catalogDiagnostics.source, 'session_catalog')
   assert.deepEqual(second.tools.map((tool) => tool.name), ['weather-test:get_weather'])
+  assert.deepEqual(second.tools[0]?.parameters, tools[0]?.parameters)
+  assert.notEqual(second.tools[0]?.parameters, tools[0]?.parameters)
+  assert.equal(second.contract.toolSourceChain.includes('message_history'), false)
 })
 
 test('forced tool selection uses session catalog when the current turn omits tools', () => {
@@ -266,6 +272,8 @@ test('managed history without catalog restores tools from history and proceeds i
   assert.equal(plan.mode, 'managed')
   assert.equal(plan.catalogDiagnostics.source, 'restored_from_history')
   assert.deepEqual([...plan.allowedToolNames], ['weather-test:get_weather'])
+  assert.deepEqual(plan.tools[0]?.parameters, { type: 'object', additionalProperties: true })
+  assert.ok(plan.catalogDiagnostics.driftKinds.includes('restored_from_history'))
 })
 
 test('assistant managed xml content without a catalog restores bash tool from history', () => {

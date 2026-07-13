@@ -139,3 +139,16 @@ test('chat route context receives providerConversationSessionKey and toolCatalog
   assert.equal(context.toolCatalogSessionKey, expected.sessionKey)
   assert.equal(context.providerConversationSessionKey, expected.sessionKey)
 })
+
+test('explicit header identity is assigned to both provider and tool session keys', () => {
+  const request = createRequest([
+    { role: 'user', content: 'Remember nonce gamma.' },
+  ])
+
+  const context = applyOpenAISessionIdentity(createContext(), request, {
+    'x-session-id': 'stable-client-session',
+  })
+
+  assert.equal(context.toolCatalogSessionKey, context.providerConversationSessionKey)
+  assert.match(context.toolCatalogSessionKey ?? '', /^openai-chat:[a-f0-9]{24}$/)
+})

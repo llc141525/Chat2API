@@ -403,6 +403,134 @@ Subagent handoff requirements:
 - Do not declare final acceptance.
 - Do not broaden scope into managed-tool retry/repair; that remains a later node.
 
+### Node 6: Tool Catalog Boundary and No-Loss Regression Guard
+
+Planning timebox: 15-20 minutes
+Execution timebox: 25-40 minutes
+Review/verification timebox: 20-35 minutes
+
+Owner split:
+
+- Main agent owns this written plan, route/tool-catalog acceptance, and review.
+- Worker subagent (`gpt-5.4`, low reasoning) owns bounded test/code execution.
+
+Problem statement:
+
+- Node 5 made OpenAI route identity stable for no-user clients that resend history.
+- That same stable identity is also used as `toolCatalogSessionKey`.
+- This is required, but it creates a hard regression boundary: after turn 1 registers tools, later turns may omit `request.tools` and rely on the session catalog, compacted managed XML history, or request fallback.
+- The old long-debugged failure mode was tools definitions disappearing across turns. This node makes that impossible to regress silently.
+
+Non-goals:
+
+- Do not implement Qwen delta prompt mode in this node.
+- Do not move tool prompt injection into provider adapters.
+- Do not change the managed XML protocol or parser behavior unless a failing boundary test proves it is required.
+- Do not replace the catalog architecture; this is a boundary hardening node.
+
+Required invariants:
+
+- `ToolCallingEngine` remains the single owner of prompt injection.
+- `toolCatalogSessionKey` and `providerConversationSessionKey` may share the same route identity, but their semantics remain separate.
+- Tool definition resolution must degrade as: Session Store -> Message History Extraction -> Request Tools / prompt-embedded tools -> Safe Empty.
+- If any non-empty trustworthy catalog source exists, the runtime plan must not report `catalogSource: "none"` and must not inject an empty tool prompt.
+- Later turns with a stable session key and omitted `request.tools` must reuse the full prior tool definitions, not only stub names from managed history.
+- Restored-from-history stubs remain an emergency fallback only when no session catalog exists.
+
+Files for worker:
+
+- `tests/routes/openai-session-identity.test.ts`
+- `tests/tool-calling/runtime-plan.test.ts` or `tests/tool-calling/tool-engine.test.ts`
+- `tests/tool-calling/tool-catalog.test.ts`
+- `src/main/proxy/toolCalling/catalog.ts` or `src/main/proxy/toolCalling/runtimePlan.ts` only if a new test fails
+- `docs/superpowers/specs/2026-07-13-qwen-provider-session-continuity.md` only to append worker result notes
+
+Task plan for worker:
+
+1. Add deterministic tests proving an OpenAI route-derived session key is usable as both provider state and tool catalog state.
+2. Add a runtime/tool-engine test for this sequence:
+   - Turn 1: request contains full tool definitions and a stable `toolSessionKey`.
+   - Turn 2: same stable `toolSessionKey`, `request.tools` omitted or empty, messages contain managed tool history.
+   - Expected: `catalogSource` is `session_catalog`, tool count equals turn 1, and tool parameter schema is preserved.
+3. Add a contrasting test for no session catalog:
+   - managed history exists but no prior catalog.
+   - Expected: `catalogSource` is `restored_from_history`, stub parameters are permissive, and this fallback is visibly degraded.
+4. Add a route-level guard if missing:
+   - `applyOpenAISessionIdentity()` must keep assigning both `toolCatalogSessionKey` and `providerConversationSessionKey`.
+   - A future edit that assigns only provider state must fail tests.
+5. If any test fails due to a real bug, make the smallest fix in catalog/runtime-plan code.
+6. Do not touch provider adapters except to add source guards proving they do not import prompt injection helpers.
+
+Acceptance:
+
+- Tests explicitly cover the previous tools-definition-loss shape.
+- Session catalog reuse preserves full tool schemas across a turn without current `request.tools`.
+- History restoration remains available but is labeled degraded and does not masquerade as full schema recovery.
+- OpenAI route identity tests still prove both session keys are set.
+- INV-001 remains guarded: provider adapters do not own tool prompt injection.
+
+Verification:
+
+```powershell
+node --test tests/routes/openai-session-identity.test.ts tests/tool-calling/runtime-plan.test.ts tests/tool-calling/tool-catalog.test.ts tests/tool-calling/tool-engine.test.ts
+```
+
+Regression gate:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Main-agent review checklist:
+
+- The new tests would fail if `toolCatalogSessionKey` fell back to per-request `requestId`.
+- The new tests would fail if turn 2 restored only stub tool definitions while a session catalog exists.
+- The new tests would fail if `request.tools` omission disabled managed tool parsing for a session with known tools.
+- No adapter imports `toolsToSystemPrompt`, `hasToolPromptInjected`, `TOOL_WRAP_HINT`, or `shouldInjectToolPrompt`.
+- No unrelated generated probe logs or Qwen website records are committed.
+
+Node 6 result on 2026-07-13:
+
+- Worker subagent added deterministic no-loss guards without changing runtime architecture.
+- Route tests now guard that explicit OpenAI header identity assigns both `toolCatalogSessionKey` and `providerConversationSessionKey`.
+- Runtime-plan and tool-engine tests now prove a later omitted-tools turn with the same `toolSessionKey` reuses `session_catalog` and preserves full parameter schemas.
+- Catalog tests now prove `restored_from_history` remains visibly degraded with permissive stub parameters only when no session catalog exists.
+- Tool-engine tests now guard INV-001 by scanning adapter import lines for forbidden prompt-injection helpers.
+
+Targeted deterministic result:
+
+```powershell
+node --test tests/routes/openai-session-identity.test.ts tests/tool-calling/runtime-plan.test.ts tests/tool-calling/tool-catalog.test.ts tests/tool-calling/tool-engine.test.ts
+```
+
+Observed: 46 passing tests.
+
+Regression gate result:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Observed: 273 passing tests.
+
+Node 6 checkpoint compression:
+
+Goal:
+- Protect Qwen/OpenAI-route long-context work from regressing the previous tools-definition-loss fix.
+
+Done:
+- Added tests for session catalog schema retention, degraded history fallback, dual route session keys, and adapter prompt-injection ownership.
+
+Verified:
+- Targeted gate: 46/46 passing.
+- Tool-calling regression gate: 273/273 passing.
+
+Open:
+- Full OpenCode live capability is still not proven; next node remains managed-tool retry/repair or stricter Qwen post-tool-result prompting.
+
+Next:
+- Continue with the OpenCode/Qwen malformed managed-tool turn boundary, not Qwen delta prompt mode, unless the user reprioritizes.
+
 ## Risks
 
 - Qwen may keep memory by `session_id` but still use `parent_req_id` for branching; preserve both.
