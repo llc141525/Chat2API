@@ -169,6 +169,21 @@ Acceptance:
 - Full-history prompt remains fallback when no provider session exists.
 - Long tool results are not duplicated across provider memory and prompt history.
 
+Preconditions:
+
+- Node 1 deterministic tests pass.
+- Node 2 summary/tool prompt ordering tests pass.
+- A live or proxy-level probe confirms Chat2API actually reuses Qwen `session_id` across turns.
+
+Main-agent review checklist:
+
+- Delta mode must be guarded by an existing `qwenSessionId`; no provider session means full prompt.
+- Delta mode must preserve the latest user request, any assistant tool call immediately awaiting tool results, and matching tool results.
+- Delta mode must not drop system/tool contract for managed-tool turns until a replacement contract persistence strategy is proven.
+- Delta mode should mirror GLM's conservative pattern: find the most recent assistant tool call, send from there forward, otherwise send full prompt.
+- Tests must cover: no provider session -> full prompt, provider session + tool result suffix -> compact delta, provider session without tool suffix -> safe full prompt.
+- Live probe must be rerun after enabling delta mode.
+
 ### Node 4: Live Probe and Regression Gate
 
 Planning timebox: 10-15 minutes

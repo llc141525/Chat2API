@@ -2,8 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  buildQwenAssemblyRequestBodyForTest,
   buildQwenChatRequestBodyForTest,
 } from '../../src/main/proxy/adapters/qwen.ts'
+import { buildRequestAssembly } from '../../src/main/proxy/RequestAssembly.ts'
 import { createContextManagementService } from '../../src/main/proxy/services/contextManagementService.ts'
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
 import type { ChatCompletionRequest, ChatMessage } from '../../src/main/proxy/types.ts'
@@ -201,4 +203,96 @@ test('Qwen request body concatenates multiple system messages instead of keeping
     content.indexOf('[Prior conversation summary]') < content.indexOf('## Available Tools'),
     'tool contract should remain after summary when multiple system messages are present',
   )
+})
+
+test('Qwen assembly path keeps summary after base system and before authoritative tool contract', () => {
+  const assembly = buildRequestAssembly({
+    messages: [
+      { role: 'system', content: 'base system instruction' },
+      { role: 'system', content: '[Prior conversation summary]\nsummary text' },
+      { role: 'user', content: 'please read a file' },
+      { role: 'assistant', content: 'working on it' },
+    ] as any,
+    toolManifest: {
+      renderedPrompt: '## Available Tools\ncatalog_fingerprint: fp\n<|CHAT2API|tool_calls>',
+    } as any,
+    summaryText: '[Prior conversation summary]\nsummary text',
+  })
+
+  const body = buildQwenAssemblyRequestBodyForTest({
+    assembly,
+    request: {
+      model: 'Qwen3.7-Max',
+      originalModel: 'Qwen3.7-Max',
+      stream: true,
+      messages: assembly.messages as any,
+    },
+    actualModel: 'Qwen3.7-Max',
+    sessionId: 'session',
+    reqId: 'req',
+    timestamp: 1,
+    enableThinking: false,
+    enableWebSearch: false,
+  })
+
+  const content = body.messages[0].content as string
+  const baseIndex = content.indexOf('base system instruction')
+  const summaryIndex = content.indexOf('[Prior conversation summary]')
+  const toolIndex = content.indexOf('## Available Tools')
+  const conversationIndex = content.indexOf('User: please read a file')
+
+  assert.ok(baseIndex !== -1, 'base system instruction should be present')
+  assert.ok(summaryIndex !== -1, 'summary should be present in assembly path')
+  assert.ok(toolIndex !== -1, 'tool contract should be present in assembly path')
+  assert.ok(conversationIndex !== -1, 'conversation should be present in assembly path')
+  assert.ok(baseIndex < summaryIndex, 'base system should appear before summary')
+  assert.ok(summaryIndex < toolIndex, 'summary should appear before tool contract')
+  assert.ok(toolIndex < conversationIndex, 'tool contract should appear before conversation')
+  assert.equal(countOccurrences(content, '[Prior conversation summary]'), 1)
+  assert.equal(body.messages[0].meta_data.ori_query, 'please read a file')
+})
+
+test('Qwen assembly path extracts summary from system messages when assembly.summaryText is absent', () => {
+  const assembly = buildRequestAssembly({
+    messages: [
+      { role: 'system', content: 'base system instruction' },
+      { role: 'system', content: '[Prior conversation summary]\nsummary text from processed messages' },
+      { role: 'user', content: 'please inspect this file' },
+      { role: 'assistant', content: 'on it' },
+    ] as any,
+    toolManifest: {
+      renderedPrompt: '## Available Tools\ncatalog_fingerprint: fp\n<|CHAT2API|tool_calls>',
+    } as any,
+  })
+
+  const body = buildQwenAssemblyRequestBodyForTest({
+    assembly,
+    request: {
+      model: 'Qwen3.7-Max',
+      originalModel: 'Qwen3.7-Max',
+      stream: true,
+      messages: assembly.messages as any,
+    },
+    actualModel: 'Qwen3.7-Max',
+    sessionId: 'session',
+    reqId: 'req',
+    timestamp: 1,
+    enableThinking: false,
+    enableWebSearch: false,
+  })
+
+  const content = body.messages[0].content as string
+  const baseIndex = content.indexOf('base system instruction')
+  const summaryIndex = content.indexOf('[Prior conversation summary]')
+  const toolIndex = content.indexOf('## Available Tools')
+  const conversationIndex = content.indexOf('User: please inspect this file')
+
+  assert.ok(baseIndex !== -1, 'base system instruction should be present')
+  assert.ok(summaryIndex !== -1, 'summary should be extracted from assembly messages')
+  assert.ok(toolIndex !== -1, 'tool contract should be present')
+  assert.ok(conversationIndex !== -1, 'conversation should be present')
+  assert.ok(baseIndex < summaryIndex, 'base system should appear before extracted summary')
+  assert.ok(summaryIndex < toolIndex, 'extracted summary should appear before tool contract')
+  assert.ok(toolIndex < conversationIndex, 'tool contract should appear before conversation')
+  assert.equal(countOccurrences(content, '[Prior conversation summary]'), 1)
 })

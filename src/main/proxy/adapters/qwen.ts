@@ -26,6 +26,8 @@ import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
+import { renderFinalPrompt } from './renderFinalPrompt.ts'
+import type { RequestAssembly } from '../RequestAssembly.ts'
 
 /**
  * Check if content contains tool calls (both bracket and XML formats)
@@ -139,6 +141,18 @@ interface QwenContentDeltaDecision {
   resetParser: boolean
 }
 
+interface QwenAssemblyRequestBodyInput {
+  assembly: RequestAssembly
+  request: ChatCompletionRequest
+  actualModel: string
+  sessionId: string
+  reqId: string
+  parentReqId?: string
+  timestamp: number
+  enableThinking: boolean
+  enableWebSearch: boolean
+}
+
 function buildQwenChatRequestBody(input: QwenChatRequestBodyInput): any {
   const {
     request,
@@ -239,6 +253,112 @@ function traceQwenRequestAssembly(input: {
 
 export function buildQwenChatRequestBodyForTest(input: QwenChatRequestBodyInput): any {
   return buildQwenChatRequestBody(input)
+}
+
+function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any {
+  const {
+    assembly,
+    request,
+    actualModel,
+    sessionId,
+    reqId,
+    parentReqId,
+    timestamp,
+    enableThinking,
+    enableWebSearch,
+  } = input
+
+  const toolProfile = getProviderToolProfile('qwen')
+  const baseSystemPrompts: string[] = []
+  const summaryPrompts: string[] = []
+  const conversationParts: string[] = []
+  const lastUserText = extractLastUserText(request.messages)
+  const explicitSummaryText = assembly.summaryText?.trim() || null
+
+  const MAX_TOOL_RESULT_LENGTH = 2000
+  for (const msg of assembly.messages) {
+    if (msg.role === 'system') {
+      const content = extractTextContent(msg.content as any)
+      const trimmedContent = content.trim()
+      if (trimmedContent.length === 0) {
+        continue
+      }
+      const isSummaryMessage = trimmedContent.includes('[Prior conversation summary')
+
+      if (isSummaryMessage) {
+        if (!explicitSummaryText || trimmedContent !== explicitSummaryText) {
+          summaryPrompts.push(content)
+        }
+      } else {
+        baseSystemPrompts.push(content)
+      }
+      continue
+    }
+
+    if (msg.role === 'user') {
+      conversationParts.push(extractTextContent(msg.content as any))
+    } else if (msg.role === 'assistant' && msg.tool_calls && (msg.tool_calls as any[]).length > 0) {
+      const calls = (msg.tool_calls as any[]).map(tc => ({
+        id: tc.id,
+        name: tc.function.name,
+        arguments: tc.function.arguments,
+      }))
+      conversationParts.push(toolProfile.formatAssistantToolCalls(calls))
+    } else if (msg.role === 'assistant') {
+      conversationParts.push(`Assistant: ${extractTextContent(msg.content as any)}`)
+    } else if (msg.role === 'tool' && msg.tool_call_id) {
+      const rawContent = extractTextContent(msg.content as any)
+      const truncated = rawContent.length > MAX_TOOL_RESULT_LENGTH
+        ? rawContent.slice(0, MAX_TOOL_RESULT_LENGTH) + '\n...(truncated)'
+        : rawContent
+      conversationParts.push(toolProfile.formatToolResult({
+        toolCallId: msg.tool_call_id as string,
+        content: truncated,
+      }))
+    }
+  }
+
+  const effectiveSummaryText = explicitSummaryText || (summaryPrompts.length > 0 ? summaryPrompts.join('\n\n') : null)
+
+  const finalContent = renderFinalPrompt({
+    systemText: baseSystemPrompts.join('\n\n') || null,
+    summaryText: effectiveSummaryText,
+    toolContractText: assembly.toolManifest?.renderedPrompt ?? null,
+    conversationText: conversationParts.length > 0 ? `User: ${conversationParts.join('\n\n')}` : '',
+    template: 'prefix',
+  })
+
+  return {
+    deep_search: (enableWebSearch || enableThinking) ? '1' : '0',
+    req_id: reqId,
+    model: actualModel,
+    scene: 'chat',
+    session_id: sessionId,
+    sub_scene: 'chat',
+    temporary: false,
+    messages: [
+      {
+        content: finalContent,
+        mime_type: 'text/plain',
+        meta_data: {
+          ori_query: lastUserText || finalContent,
+        },
+      },
+    ],
+    from: 'default',
+    parent_req_id: parentReqId || '0',
+    enable_search: enableWebSearch,
+    biz_data: '{"entryPoint":"tongyigw"}',
+    scene_param: request.sessionId ? 'chat' : 'first_turn',
+    chat_client: 'h5',
+    client_tm: timestamp.toString(),
+    protocol_version: 'v2',
+    biz_id: 'ai_qwen',
+  }
+}
+
+export function buildQwenAssemblyRequestBodyForTest(input: QwenAssemblyRequestBodyInput): any {
+  return buildQwenAssemblyRequestBody(input)
 }
 
 function extractLastUserText(messages: QwenMessage[]): string {
@@ -561,101 +681,20 @@ export class QwenAdapter {
     console.log('[Qwen] Session info:', { sessionId, reqId, parentReqId })
     console.log('[Qwen] Using model:', actualModel)
 
-    const toolProfile = getProviderToolProfile('qwen')
-
-    // === NEW: Build prompt from assembly, not from embedded strings in messages ===
-    let systemPrompt = ''
-
-    // Extract system text from messages (these are base instructions, NOT tool contracts)
-    for (const msg of assembly.messages) {
-      if (msg.role === 'system') {
-        systemPrompt = extractTextContent(msg.content as any)
-        break  // Take only the first non-tool system message
-      }
-    }
-
-    // Build conversation parts from non-system messages
-    // Truncate tool result content to prevent unbounded context bloat
-    const MAX_TOOL_RESULT_LENGTH = 2000
-    const conversationParts: string[] = []
-    for (const msg of assembly.messages) {
-      if (msg.role === 'system') {
-        continue
-      } else if (msg.role === 'user') {
-        conversationParts.push(extractTextContent(msg.content as any))
-      } else if (msg.role === 'assistant' && msg.tool_calls && (msg.tool_calls as any[]).length > 0) {
-        const calls = (msg.tool_calls as any[]).map(tc => ({
-          id: tc.id,
-          name: tc.function.name,
-          arguments: tc.function.arguments,
-        }))
-        conversationParts.push(toolProfile.formatAssistantToolCalls(calls))
-      } else if (msg.role === 'assistant') {
-        conversationParts.push(`Assistant: ${extractTextContent(msg.content as any)}`)
-      } else if (msg.role === 'tool' && msg.tool_call_id) {
-        const rawContent = extractTextContent(msg.content as any)
-        const truncated = rawContent.length > MAX_TOOL_RESULT_LENGTH
-          ? rawContent.slice(0, MAX_TOOL_RESULT_LENGTH) + '\n...(truncated)'
-          : rawContent
-        conversationParts.push(toolProfile.formatToolResult({
-          toolCallId: msg.tool_call_id as string,
-          content: truncated,
-        }))
-      }
-    }
-
-    let userContent = conversationParts.join('\n\n')
-
-    // === KEY CHANGE: tool contract comes from assembly.toolManifest, not from messages ===
-    if (assembly.toolManifest) {
-      // Summary text (non-authoritative) goes before tool contract
-      if (assembly.summaryText) {
-        systemPrompt = systemPrompt
-          ? `${systemPrompt}\n\n${assembly.summaryText}`
-          : assembly.summaryText
-      }
-      // Tool contract (authoritative, injected AFTER summary to take precedence)
-      const toolContractText = assembly.toolManifest.renderedPrompt
-      systemPrompt = systemPrompt
-        ? `${systemPrompt}\n\n${toolContractText}`
-        : toolContractText
-    }
-
-    // If system prompt exists, prepend it to user content
-    const finalContent = systemPrompt
-      ? `${systemPrompt}\n\nUser: ${userContent}`
-      : userContent
-
     const timestamp = Date.now()
     const nonce = generateNonce()
 
-    const requestBody = {
-      deep_search: (enableWebSearch || enableThinking) ? '1' : '0',
-      req_id: reqId,
-      model: actualModel,
-      scene: 'chat',
-      session_id: sessionId,
-      sub_scene: 'chat',
-      temporary: false,
-      messages: [
-        {
-          content: finalContent,
-          mime_type: 'text/plain',
-          meta_data: {
-            ori_query: finalContent
-          }
-        }
-      ],
-      from: 'default',
-      parent_req_id: parentReqId || '0',
-      enable_search: enableWebSearch,
-      biz_data: '{"entryPoint":"tongyigw"}',
-      scene_param: request.sessionId ? 'chat' : 'first_turn',
-      chat_client: 'h5',
-      client_tm: timestamp.toString(),
-      protocol_version: 'v2',
-      biz_id: 'ai_qwen',
-    }
+    const requestBody = buildQwenAssemblyRequestBody({
+      assembly,
+      request,
+      actualModel,
+      sessionId,
+      reqId,
+      parentReqId,
+      timestamp,
+      enableThinking,
+      enableWebSearch,
+    })
 
     const queryString = `biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen&ut=${uuid(false)}&nonce=${nonce}&timestamp=${timestamp}`
     const url = `${QWEN_API_BASE}/api/v2/chat?${queryString}`
