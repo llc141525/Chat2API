@@ -35,6 +35,7 @@ import {
   rebuildMessagesForSummaryContaminationRetry,
 } from './services/contextManagementRetry.ts'
 import { sanitizeMessagesForSummary, detectSummaryContamination } from './services/summarySanitizer.ts'
+import { inspectNonStreamAssistantOutput } from './toolCalling/outputInspection.ts'
 
 function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()

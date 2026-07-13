@@ -47,6 +47,8 @@ test('Qwen request body keeps first_turn semantics for new sessions', () => {
 test('forwardQwen source reads and writes qwen conversation state', () => {
   const forwarderSource = readFileSync('src/main/proxy/forwarder.ts', 'utf8')
 
+  assert.match(forwarderSource, /import\s+\{\s*inspectNonStreamAssistantOutput\s*\}\s+from\s+'\.\/toolCalling\/outputInspection\.ts'/)
+  assert.match(forwarderSource, /inspectNonStreamAssistantOutput\(\{/)
   assert.match(forwarderSource, /qwenSessionId\?: string/)
   assert.match(forwarderSource, /qwenParentReqId\?: string/)
   assert.match(forwarderSource, /const convState = getProviderConversationState\(/)
