@@ -63,9 +63,9 @@ interface ProviderCardProps {
 }
 
 const statusColors: Record<ProviderStatus, string> = {
-  online: 'bg-green-500',
-  offline: 'bg-red-500',
-  unknown: 'bg-gray-500',
+  online: 'status-dot-online',
+  offline: 'status-dot-offline',
+  unknown: 'status-dot-unknown',
 }
 
 export function ProviderCard({

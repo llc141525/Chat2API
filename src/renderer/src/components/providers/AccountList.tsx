@@ -74,26 +74,26 @@ export function AccountList({
   }> = {
     active: {
       labelKey: 'providers.active',
-      color: 'text-green-600',
-      bgColor: 'bg-green-100',
+      color: 'text-[var(--accent-primary)]',
+      bgColor: 'status-active',
       icon: Check,
     },
     inactive: {
       labelKey: 'providers.inactive',
-      color: 'text-gray-600',
-      bgColor: 'bg-gray-100',
+      color: 'text-[var(--text-muted)]',
+      bgColor: 'status-inactive',
       icon: Clock,
     },
     expired: {
       labelKey: 'providers.expired',
-      color: 'text-orange-600',
-      bgColor: 'bg-orange-100',
+      color: 'text-[var(--warning)]',
+      bgColor: 'status-warning',
       icon: AlertCircle,
     },
     error: {
       labelKey: 'common.error',
-      color: 'text-red-600',
-      bgColor: 'bg-red-100',
+      color: 'text-[var(--error)]',
+      bgColor: 'status-error',
       icon: X,
     },
   }
@@ -181,7 +181,7 @@ export function AccountList({
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <span>{t('providers.total')}: {totalCount}</span>
           <span>•</span>
-          <span className="text-green-600">{activeCount} {t('providers.onlineCount')}</span>
+          <span className="text-[var(--accent-primary)]">{activeCount} {t('providers.onlineCount')}</span>
         </div>
         <Button size="sm" onClick={onAddAccount}>
           <Plus className="mr-2 h-4 w-4" />
@@ -217,7 +217,7 @@ export function AccountList({
                           <span className="font-medium truncate">{account.name}</span>
                           <Badge 
                             variant="outline" 
-                            className={cn('text-xs', config.color, config.bgColor)}
+                            className={cn('text-xs status-chip', config.color, config.bgColor)}
                           >
                             <StatusIcon className="mr-1 h-3 w-3" />
                             {t(config.labelKey)}

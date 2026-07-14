@@ -89,26 +89,26 @@ export function AccountDetail({
   }> = {
     active: {
       labelKey: 'providers.active',
-      color: 'text-green-600',
-      bgColor: 'bg-green-100',
+      color: 'text-[var(--accent-primary)]',
+      bgColor: 'status-active',
       icon: CheckCircle2,
     },
     inactive: {
       labelKey: 'providers.inactive',
-      color: 'text-gray-600',
-      bgColor: 'bg-gray-100',
+      color: 'text-[var(--text-muted)]',
+      bgColor: 'status-inactive',
       icon: Clock,
     },
     expired: {
       labelKey: 'providers.expired',
-      color: 'text-orange-600',
-      bgColor: 'bg-orange-100',
+      color: 'text-[var(--warning)]',
+      bgColor: 'status-warning',
       icon: AlertCircle,
     },
     error: {
       labelKey: 'common.error',
-      color: 'text-red-600',
-      bgColor: 'bg-red-100',
+      color: 'text-[var(--error)]',
+      bgColor: 'status-error',
       icon: XCircle,
     },
   }
@@ -178,30 +178,30 @@ export function AccountDetail({
       labelKey: 'dashboard.totalRequests',
       value: account.requestCount || 0,
       icon: BarChart3,
-      color: 'text-blue-600',
-      bgColor: 'bg-blue-100',
+      color: 'text-[var(--accent-secondary)]',
+      bgColor: 'bg-[var(--accent-secondary)]/10',
     },
     {
       labelKey: 'providers.usedToday',
       value: account.todayUsed || 0,
       subtitle: account.dailyLimit ? `${t('providers.dailyLimit')}: ${account.dailyLimit}` : undefined,
       icon: Zap,
-      color: 'text-amber-600',
-      bgColor: 'bg-amber-100',
+      color: 'text-[var(--warning)]',
+      bgColor: 'bg-[var(--accent-tertiary)]/10',
     },
     {
       labelKey: 'providers.lastCheck',
       value: formatRelativeTime(account.lastUsed),
       icon: Clock,
-      color: 'text-purple-600',
-      bgColor: 'bg-purple-100',
+      color: 'text-[var(--accent-primary)]',
+      bgColor: 'bg-[var(--accent-primary)]/10',
     },
     {
       labelKey: 'apiKeys.createdAt',
       value: formatDate(account.createdAt),
       icon: Calendar,
-      color: 'text-green-600',
-      bgColor: 'bg-green-100',
+      color: 'text-[var(--accent-primary)]',
+      bgColor: 'bg-[var(--accent-primary)]/10',
     },
   ]
 
@@ -216,7 +216,7 @@ export function AccountDetail({
             {account.name}
             <Badge 
               variant="outline" 
-              className={cn('text-xs', config.color, config.bgColor)}
+              className={cn('text-xs status-chip', config.color, config.bgColor)}
             >
               <StatusIcon className="mr-1 h-3 w-3" />
               {t(config.labelKey)}
@@ -278,7 +278,7 @@ export function AccountDetail({
                 </div>
                 <Badge 
                   variant="outline" 
-                  className={cn('text-xs', config.color, config.bgColor)}
+                  className={cn('text-xs status-chip', config.color, config.bgColor)}
                 >
                   <StatusIcon className="mr-1 h-3 w-3" />
                   {t(config.labelKey)}
@@ -345,8 +345,8 @@ export function AccountDetail({
                   <div 
                     className={cn(
                       'h-full transition-all',
-                      usagePercent >= 90 ? 'bg-red-500' :
-                      usagePercent >= 70 ? 'bg-amber-500' : 'bg-green-500'
+                      usagePercent >= 90 ? 'bg-[var(--error)]' :
+                      usagePercent >= 70 ? 'bg-[var(--warning)]' : 'bg-[var(--accent-primary)]'
                     )}
                     style={{ width: `${usagePercent}%` }}
                   />
@@ -387,7 +387,7 @@ export function AccountDetail({
               <div className="space-y-4">
                 <div className="p-4 rounded-lg bg-muted/50 text-center">
                   <p className="text-sm text-muted-foreground mb-1">{t('minimax.remainingCredits')}</p>
-                  <p className="text-3xl font-bold text-green-600">{credits.remainingCredits.toLocaleString()}</p>
+                  <p className="text-3xl font-bold text-[var(--accent-primary)]">{credits.remainingCredits.toLocaleString()}</p>
                   {credits.expiresAt && (
                     <p className="text-xs text-muted-foreground mt-2">
                       {t('minimax.creditResetsAt')}: {formatDate(credits.expiresAt)}

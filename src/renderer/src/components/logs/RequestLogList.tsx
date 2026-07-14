@@ -15,6 +15,7 @@ import {
 import { RequestLogDetail } from './RequestLogDetail'
 import { RequestLogStats } from './RequestLogStats'
 import { Trash2 } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 interface RequestLogEntry {
   id: string
@@ -56,10 +57,10 @@ interface RowProps {
 const ITEM_HEIGHT = 72
 
 function getStatusColor(status: 'success' | 'error', statusCode: number) {
-  if (status === 'success') return 'bg-green-500/10 text-green-500 border-green-500/20'
-  if (statusCode >= 500) return 'bg-red-500/10 text-red-500 border-red-500/20'
-  if (statusCode >= 400) return 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20'
-  return 'bg-red-500/10 text-red-500 border-red-500/20'
+  if (status === 'success') return 'status-online'
+  if (statusCode >= 500) return 'status-error'
+  if (statusCode >= 400) return 'status-warning'
+  return 'status-error'
 }
 
 function formatTime(timestamp: number) {
@@ -170,7 +171,7 @@ export function RequestLogList() {
           onClick={() => onSelectLog(log)}
         >
           <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/30 hover:bg-muted/50 cursor-pointer transition-colors h-[68px]">
-            <Badge variant="outline" className={getStatusColor(log.status, log.statusCode)}>
+            <Badge variant="outline" className={cn('status-chip', getStatusColor(log.status, log.statusCode))}>
               {log.statusCode}
             </Badge>
 

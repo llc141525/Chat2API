@@ -79,10 +79,10 @@ export function ProviderFilter({
   ]
 
   const statusFilterOptions: { value: StatusFilter; labelKey: string; color: string }[] = [
-    { value: 'all', labelKey: 'providers.allStatus', color: 'bg-gray-500' },
-    { value: 'online', labelKey: 'providers.online', color: 'bg-green-500' },
-    { value: 'offline', labelKey: 'providers.offline', color: 'bg-red-500' },
-    { value: 'unknown', labelKey: 'providers.unknown', color: 'bg-gray-400' },
+    { value: 'all', labelKey: 'providers.allStatus', color: 'status-dot-neutral' },
+    { value: 'online', labelKey: 'providers.online', color: 'status-dot-online' },
+    { value: 'offline', labelKey: 'providers.offline', color: 'status-dot-offline' },
+    { value: 'unknown', labelKey: 'providers.unknown', color: 'status-dot-unknown' },
   ]
 
   const hasActiveFilters = typeFilter !== 'all' || statusFilter !== 'all' || searchQuery !== ''
@@ -222,7 +222,7 @@ export function ProviderFilter({
           <span>{t('providers.total')}: {stats.total}</span>
           <span>•</span>
           <span className="flex items-center gap-1">
-            <div className="w-2 h-2 rounded-full bg-green-500" />
+            <div className="w-2 h-2 rounded-full status-dot-online" />
             {stats.online} {t('providers.onlineCount')}
           </span>
           <span>•</span>

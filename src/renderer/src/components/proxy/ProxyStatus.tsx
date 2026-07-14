@@ -130,7 +130,7 @@ export function ProxyStatus({ onStatusChange }: ProxyStatusProps) {
       title: t('common.success'),
       value: proxyStatistics?.successRequests ?? 0,
       icon: CheckCircle2,
-      color: 'text-green-500',
+      color: 'text-[var(--accent-primary)]',
     },
     {
       title: t('common.error'),
@@ -142,13 +142,13 @@ export function ProxyStatus({ onStatusChange }: ProxyStatusProps) {
       title: t('dashboard.successRate'),
       value: `${getSuccessRate()}%`,
       icon: Activity,
-      color: 'text-blue-500',
+      color: 'text-[var(--accent-secondary)]',
     },
     {
       title: t('dashboard.avgLatency'),
       value: formatLatency(proxyStatistics?.avgLatency ?? 0),
       icon: Timer,
-      color: 'text-amber-500',
+      color: 'text-[var(--warning)]',
     },
   ]
 
@@ -163,8 +163,8 @@ export function ProxyStatus({ onStatusChange }: ProxyStatusProps) {
             </div>
             <div className="flex items-center gap-2">
               <Badge
-                variant={isRunning ? 'default' : 'secondary'}
-                className={isRunning ? 'bg-green-500 hover:bg-green-600' : ''}
+                variant="outline"
+                className={cn('status-chip', isRunning ? 'status-running' : 'status-neutral')}
               >
                 {isRunning ? (
                   <>
@@ -217,7 +217,7 @@ export function ProxyStatus({ onStatusChange }: ProxyStatusProps) {
                 onClick={handleStop}
                 disabled={isLoading}
                 variant="secondary"
-                className="bg-orange-100 text-orange-700 hover:bg-orange-200 dark:bg-orange-950/50 dark:text-orange-400 dark:hover:bg-orange-900/50"
+                className="app-button-warning"
               >
                 <Square className="h-4 w-4 mr-2" />
                 {t('dashboard.stopProxy')}

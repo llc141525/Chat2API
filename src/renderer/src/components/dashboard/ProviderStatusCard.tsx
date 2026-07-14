@@ -43,22 +43,22 @@ export function ProviderStatusCard({ providers, className }: ProviderStatusCardP
   const getStatusColor = (status: ProviderStatus) => {
     switch (status) {
       case 'online':
-        return 'bg-green-500'
+        return 'status-dot-online'
       case 'offline':
-        return 'bg-red-500'
+        return 'status-dot-offline'
       default:
-        return 'bg-yellow-500'
+        return 'status-dot-unknown'
     }
   }
 
-  const getStatusBadge = (status: ProviderStatus) => {
+  const getStatusClass = (status: ProviderStatus) => {
     switch (status) {
       case 'online':
-        return 'default'
+        return 'status-online'
       case 'offline':
-        return 'destructive'
+        return 'status-offline'
       default:
-        return 'secondary'
+        return 'status-unknown'
     }
   }
 
@@ -109,7 +109,7 @@ export function ProviderStatusCard({ providers, className }: ProviderStatusCardP
                         />
                         <span className="font-medium text-sm">{provider.name}</span>
                       </div>
-                      <Badge variant={getStatusBadge(provider.status) as "default" | "secondary" | "destructive"} className="text-xs">
+                      <Badge variant="outline" className={cn('text-xs status-chip', getStatusClass(provider.status))}>
                         {getStatusIcon(provider.status)}
                         <span className="ml-1">{getStatusText(provider.status)}</span>
                       </Badge>
