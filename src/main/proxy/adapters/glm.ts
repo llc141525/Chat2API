@@ -171,7 +171,7 @@ export function buildGLMAssemblyPromptMessagesForTest(
 }
 
 function shouldLogPromptPreview(messages: GLMMessage[]): boolean {
-  return messages.some((message) =>
+  return process.env.CHAT2API_DEBUG_RAW_PROMPTS === '1' && messages.some((message) =>
     typeof message.content === 'string' &&
     (
       message.content.includes('agent-capability-probe') ||
@@ -743,7 +743,7 @@ export class GLMAdapter {
       `${GLM_API_BASE}/backend-api/assistant/stream`,
       {
         assistant_id: assistantId,
-        conversation_id: '',
+        conversation_id: request.conversationId || '',
         project_id: '',
         chat_type: 'user_chat',
         messages: preparedMessages,

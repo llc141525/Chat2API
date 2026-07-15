@@ -19,7 +19,8 @@ export interface ProviderToolProfile {
   parseStreaming: boolean
   parseNonStreaming: boolean
   supportsIntentionalEmptyOutput: boolean
-  preservesToolHistory: boolean
+  preservesToolExchangeHistory: boolean
+  requiresHistoricalToolContractReplay: boolean
   managedTransport: ProviderManagedTransport
   providerRiskControlCaveats: string[]
   formatAssistantToolCalls(calls: Array<{ id: string; name: string; arguments: string }>): string
@@ -36,7 +37,8 @@ const chat2ApiXmlHistoryProfile: Omit<ProviderToolProfile, 'providerId' | 'manag
   parseStreaming: true,
   parseNonStreaming: true,
   supportsIntentionalEmptyOutput: false,
-  preservesToolHistory: true,
+  preservesToolExchangeHistory: true,
+  requiresHistoricalToolContractReplay: false,
   formatAssistantToolCalls(calls) {
     return managedXmlProtocol.formatAssistantToolCalls(calls)
   },
@@ -79,7 +81,8 @@ const profiles: Record<string, ProviderToolProfile> = {
     parseStreaming: true,
     parseNonStreaming: true,
     supportsIntentionalEmptyOutput: false,
-    preservesToolHistory: true,
+    preservesToolExchangeHistory: true,
+    requiresHistoricalToolContractReplay: false,
     managedTransport: 'provider_chat_api',
     providerRiskControlCaveats: ['captcha_or_risk_control'],
     formatAssistantToolCalls(calls) {

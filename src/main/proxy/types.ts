@@ -215,6 +215,14 @@ export interface ModelsResponse {
 /**
  * Proxy Request Context
  */
+export type SessionBoundaryReason =
+  | 'normal'
+  | 'client_compact'
+  | 'server_summary'
+  | 'summary_generator'
+  | 'tool_child'
+  | 'subagent_child'
+
 export interface ProxyContext {
   requestId: string
   providerId?: string
@@ -228,7 +236,7 @@ export interface ProxyContext {
   providerConversationSessionKey?: string
   providerSessionEpoch?: string
   parentProviderConversationSessionKey?: string
-  sessionBoundaryReason?: 'normal' | 'client_compact' | 'server_summary' | 'summary_generator' | 'tool_child' | 'subagent_child'
+  sessionBoundaryReason?: SessionBoundaryReason
   originalMessages?: ChatMessage[]
   summaryContaminated?: boolean
   summaryRetryAttempted?: boolean

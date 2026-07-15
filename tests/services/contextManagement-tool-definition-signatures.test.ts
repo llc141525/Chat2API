@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { SlidingWindowStrategy } from '../../src/main/proxy/services/contextManagementService.ts'
+import { buildRequestAssembly } from '../../src/main/proxy/RequestAssembly.ts'
 import type { ChatMessage } from '../../src/main/proxy/types.ts'
 
 // Verify that containsToolDefinitions (used internally by strategies) correctly
@@ -21,18 +22,23 @@ function findInResult(messages: ChatMessage[], content: string): boolean {
   return messages.some(m => typeof m.content === 'string' && m.content.includes(content))
 }
 
+function assertContractAvailableForExtractionButNotProviderVisible(messages: ChatMessage[], marker: string): void {
+  assert.ok(findInResult(messages, marker), `${marker} must remain available until catalog extraction`)
+  const assembly = buildRequestAssembly({ messages, toolManifest: null })
+  assert.equal(findInResult(assembly.messages, marker), false, `${marker} must not remain in provider-visible history`)
+}
+
 // Use a window size smaller than the conversation to force trimming
 const WINDOW = { enabled: true, maxMessages: 6 }
 
 // ── Tool definition signature coverage ────────────────────────────────────────
 
-test('SlidingWindow preserves OpenCode ## Available Tools signature', () => {
+test('SlidingWindow keeps OpenCode catalog extractable while assembly strips its history', () => {
   const toolDefContent = '## Available Tools\nTool `bash`: Execute a shell command'
   const conversation = makeConversation(toolDefContent)
   const strategy = new SlidingWindowStrategy(WINDOW)
   const result = strategy.execute(conversation)
-  assert.ok(findInResult(result.messages, '## Available Tools'),
-    '## Available Tools message must be preserved')
+  assertContractAvailableForExtractionButNotProviderVisible(result.messages, '## Available Tools')
 })
 
 test('SlidingWindow preserves Chat2API managed XML tool_calls marker', () => {
@@ -44,40 +50,36 @@ test('SlidingWindow preserves Chat2API managed XML tool_calls marker', () => {
     'Chat2API marker message must be preserved')
 })
 
-test('SlidingWindow preserves TOOL USE signature (Cline/RooCode style)', () => {
+test('SlidingWindow keeps Cline catalog extractable while assembly strips its history', () => {
   const toolDefContent = '# TOOL USE\nYou can use tools in this conversation'
   const conversation = makeConversation(toolDefContent)
   const strategy = new SlidingWindowStrategy(WINDOW)
   const result = strategy.execute(conversation)
-  assert.ok(findInResult(result.messages, 'TOOL USE'),
-    'TOOL USE message must be preserved')
+  assertContractAvailableForExtractionButNotProviderVisible(result.messages, 'TOOL USE')
 })
 
-test('SlidingWindow preserves Cherry Studio <tools> XML block', () => {
+test('SlidingWindow keeps Cherry Studio catalog extractable while assembly strips its history', () => {
   const toolDefContent = '<tools><tool name="bash"><description>Execute command</description></tool></tools>'
   const conversation = makeConversation(toolDefContent)
   const strategy = new SlidingWindowStrategy(WINDOW)
   const result = strategy.execute(conversation)
-  assert.ok(findInResult(result.messages, '<tools>'),
-    'Cherry Studio <tools> message must be preserved')
+  assertContractAvailableForExtractionButNotProviderVisible(result.messages, '<tools>')
 })
 
-test('SlidingWindow preserves ## Tools signature (Kilocode style)', () => {
+test('SlidingWindow keeps Kilocode catalog extractable while assembly strips its history', () => {
   const toolDefContent = '## Tools\nTool definitions:\nbash: Execute commands'
   const conversation = makeConversation(toolDefContent)
   const strategy = new SlidingWindowStrategy(WINDOW)
   const result = strategy.execute(conversation)
-  assert.ok(findInResult(result.messages, '## Tools'),
-    '## Tools message must be preserved')
+  assertContractAvailableForExtractionButNotProviderVisible(result.messages, '## Tools')
 })
 
-test('SlidingWindow preserves ## Tool Use signature', () => {
+test('SlidingWindow keeps Tool Use catalog extractable while assembly strips its history', () => {
   const toolDefContent = '## Tool Use\nWhen using tools, follow this format'
   const conversation = makeConversation(toolDefContent)
   const strategy = new SlidingWindowStrategy(WINDOW)
   const result = strategy.execute(conversation)
-  assert.ok(findInResult(result.messages, '## Tool Use'),
-    '## Tool Use message must be preserved')
+  assertContractAvailableForExtractionButNotProviderVisible(result.messages, '## Tool Use')
 })
 
 test('SlidingWindow preserves function_calls bracket signature', () => {

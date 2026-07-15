@@ -34,7 +34,7 @@ const lazyPluginLoaders: Record<string, () => Promise<WebProviderPlugin | null>>
   minimax: async () => (await import('./MiniMaxProviderPlugin.ts')).MiniMaxProviderPlugin,
   mimo: async () => (await import('./MimoProviderPlugin.ts')).MimoProviderPlugin,
   perplexity: async () => (await import('./PerplexityProviderPlugin.ts')).PerplexityProviderPlugin,
-  qwenai: async () => (await import('./QwenAiProviderPlugin.ts')).QwenAiProviderPlugin,
+  'qwen-ai': async () => (await import('./QwenAiProviderPlugin.ts')).QwenAiProviderPlugin,
   zai: async () => (await import('./ZaiProviderPlugin.ts')).ZaiProviderPlugin,
 }
 

@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 
-import type { ChatCompletionRequest, ChatMessage, ProxyContext } from '../types.ts'
+import type { ChatCompletionRequest, ChatMessage, ProxyContext, SessionBoundaryReason } from '../types.ts'
 
 type HeaderValue = string | string[] | undefined
 
@@ -9,7 +9,7 @@ export interface OpenAISessionIdentity {
   providerConversationSessionKey: string
   providerSessionEpoch: string
   parentProviderConversationSessionKey?: string
-  sessionBoundaryReason: 'normal' | 'client_compact' | 'tool_child' | 'subagent_child'
+  sessionBoundaryReason: SessionBoundaryReason
   source: 'header' | 'user' | 'metadata' | 'derived_hash' | 'process_fallback'
 }
 
@@ -149,6 +149,10 @@ export function applyOpenAISessionIdentity(
   request: ChatCompletionRequest,
   headers?: Record<string, HeaderValue>
 ): ProxyContext {
+  // Preserve runtime-set boundaries (server_summary, summary_generator) that are
+  // not derived from client request signals. deriveOpenAISessionIdentity only
+  // produces normal, tool_child, client_compact, or subagent_child — it should not
+  // overwrite internal boundaries the runtime already determined.
   const sessionIdentity = deriveOpenAISessionIdentity({
     request,
     headers,
@@ -156,13 +160,17 @@ export function applyOpenAISessionIdentity(
     providerId: context.providerId,
   })
 
+  const boundaryReason = context.sessionBoundaryReason && context.sessionBoundaryReason !== 'normal'
+    ? context.sessionBoundaryReason
+    : sessionIdentity.sessionBoundaryReason
+
   return {
     ...context,
     toolCatalogSessionKey: sessionIdentity.toolCatalogSessionKey,
     providerConversationSessionKey: sessionIdentity.providerConversationSessionKey,
     providerSessionEpoch: sessionIdentity.providerSessionEpoch,
     parentProviderConversationSessionKey: sessionIdentity.parentProviderConversationSessionKey,
-    sessionBoundaryReason: sessionIdentity.sessionBoundaryReason,
+    sessionBoundaryReason: boundaryReason,
   }
 }
 

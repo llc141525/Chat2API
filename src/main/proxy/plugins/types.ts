@@ -10,6 +10,7 @@ import type { Provider, Account } from '../../store/types.ts'
 import type { RequestAssembly } from '../RequestAssembly.ts'
 import type { PromptRefreshMode } from '../promptBudgetPolicy.ts'
 import type { ProxyContext } from '../types.ts'
+import type { SessionBoundaryPlan } from '../services/sessionBoundaryPlan.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 // ── Plugin identity ────────────────────────────────────────────────
@@ -36,6 +37,7 @@ export interface ProviderRuntimeRequest {
   assembly: RequestAssembly
   promptRefreshMode?: PromptRefreshMode
   sessionBoundaryReason?: ProxyContext['sessionBoundaryReason']
+  sessionBoundaryPlan?: SessionBoundaryPlan
   messages: Array<{ role: string; content: unknown; tool_call_id?: string; tool_calls?: unknown[] }>
   stream?: boolean
   temperature?: number

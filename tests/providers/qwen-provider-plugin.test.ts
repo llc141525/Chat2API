@@ -233,7 +233,7 @@ test('buildRequest preserves real assembly tool manifest, summary, and prompt re
   assert.match(content, /catalog_fingerprint: fingerprint-1/)
   assert.match(content, /\[Prior conversation summary\]/)
   assert.match(content, /Required next action: call the bash tool/)
-  assert.match(content, /Assembly user message should be used/)
+  assert.match(content, /The runtime generated this checkpoint from completed OpenCode tool events/)
   assert.doesNotMatch(content, /Legacy messages should not be used/)
 })
 
@@ -261,7 +261,7 @@ test('buildRequest passes promptRefreshMode through Qwen assembly path', async (
   const content = bodyContent(req.body)
 
   assert.match(content, /Minimal prompt turn/)
-  assert.doesNotMatch(content, /minimal-fingerprint/)
+  assert.match(content, /minimal-fingerprint/, 'tool contract must remain in minimal mode — Qwen uses managed XML, tools are not native')
   assert.doesNotMatch(content, /This should be omitted in minimal mode/)
 })
 

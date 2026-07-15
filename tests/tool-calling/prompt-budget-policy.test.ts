@@ -51,7 +51,6 @@ test('fresh provider session or missing provider key upgrades to full', () => {
 
 test('boundary reasons that fork provider context always require full refresh', () => {
   const boundaries: Array<Exclude<PromptBudgetSessionBoundaryReason, 'normal'>> = [
-    'client_compact',
     'summary_generator',
     'tool_child',
     'subagent_child',
@@ -63,8 +62,12 @@ test('boundary reasons that fork provider context always require full refresh', 
     assert.ok(decision.reasons.some((reason) => reason.startsWith('session_boundary_')))
   }
 
+  const clientCompactDecision = decidePromptBudgetPolicy(baseInput({ sessionBoundaryReason: 'client_compact' }))
+  assert.equal(clientCompactDecision.promptRefreshMode, 'digest')
+  assert.deepEqual(clientCompactDecision.reasons, ['session_boundary_client_compact'])
+
   const serverSummaryDecision = decidePromptBudgetPolicy(baseInput({ sessionBoundaryReason: 'server_summary' }))
-  assert.equal(serverSummaryDecision.promptRefreshMode, 'full')
+  assert.equal(serverSummaryDecision.promptRefreshMode, 'digest')
   assert.deepEqual(serverSummaryDecision.reasons, ['session_boundary_server_summary'])
 })
 
@@ -102,13 +105,6 @@ test('tool-result continuity upgrades to tool_ready', () => {
   const previousToolCallsDecision = decidePromptBudgetPolicy(baseInput({ hasPreviousAssistantToolCalls: true }))
   assert.equal(previousToolCallsDecision.promptRefreshMode, 'tool_ready')
   assert.deepEqual(previousToolCallsDecision.reasons, ['previous_assistant_tool_calls_present'])
-
-  const managedTurnDecision = decidePromptBudgetPolicy(baseInput({
-    hasManagedToolCapableTurn: true,
-    hasActiveTools: true,
-  }))
-  assert.equal(managedTurnDecision.promptRefreshMode, 'tool_ready')
-  assert.deepEqual(managedTurnDecision.reasons, ['managed_tool_turn_present'])
 })
 
 test('server-summary fork keeps active tool workflow on tool_ready', () => {
@@ -125,7 +121,6 @@ test('server-summary fork keeps active tool workflow on tool_ready', () => {
     'server_summary_active_tool_continuation',
     'current_tool_result_present',
     'previous_assistant_tool_calls_present',
-    'managed_tool_turn_present',
   ])
 })
 
@@ -149,11 +144,10 @@ test('server-summary active tool workflow on first fork still avoids full when o
     'server_summary_active_tool_continuation',
     'current_tool_result_present',
     'previous_assistant_tool_calls_present',
-    'managed_tool_turn_present',
   ])
 })
 
-test('server-summary with tools present but no real tool tail still stays full on a fresh fork', () => {
+test('server-summary with tools present but no real tool tail still stays on digest on a fresh fork', () => {
   const decision = decidePromptBudgetPolicy(baseInput({
     sessionBoundaryReason: 'server_summary',
     previousProviderId: undefined,
@@ -168,9 +162,8 @@ test('server-summary with tools present but no real tool tail still stays full o
     hasActiveTools: true,
   }))
 
-  assert.equal(decision.promptRefreshMode, 'full')
-  assert.ok(decision.reasons.includes('fresh_provider_session'))
-  assert.ok(decision.reasons.includes('session_boundary_server_summary'))
+  assert.equal(decision.promptRefreshMode, 'digest')
+  assert.deepEqual(decision.reasons, ['session_boundary_server_summary'])
 })
 
 test('server-summary active tool workflow still upgrades to full when continuity safety is broken', () => {
@@ -383,13 +376,13 @@ test('digest mode excludes full tool schemas and keeps last ~4 messages', () => 
 
   assert.ok(content.includes('helpful assistant'), 'digest should keep system text')
   assert.ok(content.includes('Prior conversation summary'), 'digest should keep summary')
-  assert.ok(!content.includes('tool_schema_content'), 'digest should drop tool schemas')
+  assert.ok(content.includes('tool_schema_content'), 'digest should keep tool schemas')
   assert.ok(content.includes('third response'), 'digest should keep latest exchange')
   assert.ok(content.includes('second'), 'digest should keep second exchange')
   assert.ok(!content.includes('first response'), 'digest should drop old exchanges beyond last 4')
 })
 
-test('minimal mode drops tool contract and summary, keeps only latest user+assistant', () => {
+test('minimal mode drops summary, keeps tool contract and recent conversation tail', () => {
   const assemblyMessages = [
     { role: 'system', content: 'System instructions here.' },
     { role: 'user', content: 'first turn' },
@@ -424,12 +417,12 @@ test('minimal mode drops tool contract and summary, keeps only latest user+assis
   const content = requestBody.messages[0].content
 
   assert.ok(content.includes('System instructions'), 'minimal should keep system text')
-  assert.ok(!content.includes('tool_schema_text'), 'minimal should drop tool contract')
+  assert.ok(content.includes('tool_schema_text'), 'minimal must keep tool contract — Qwen uses managed XML, tools are not native')
   assert.ok(!content.includes('Prior conversation summary'), 'minimal should drop summary')
   assert.ok(content.includes('second turn'), 'minimal should keep latest user turn')
   assert.ok(content.includes('second response'), 'minimal should keep latest assistant response')
-  assert.ok(!content.includes('first turn'), 'minimal should drop old user turns')
-  assert.ok(!content.includes('first response'), 'minimal should drop old assistant responses')
+  assert.ok(content.includes('first turn'), 'minimal keeps last 4 messages for managed XML context')
+  assert.ok(content.includes('first response'), 'minimal keeps older messages for tool exchange continuity')
 })
 
 test('undefined mode preserves current behavior (backward compatibility)', () => {

@@ -77,7 +77,8 @@ test('managed provider profiles expose parser ownership and empty output policy 
     assert.equal(profile.parseStreaming, true)
     assert.equal(profile.parseNonStreaming, true)
     assert.equal(profile.supportsIntentionalEmptyOutput, false)
-    assert.equal(profile.preservesToolHistory, true)
+    assert.equal(profile.preservesToolExchangeHistory, true)
+    assert.equal(profile.requiresHistoricalToolContractReplay, false)
   }
 })
 

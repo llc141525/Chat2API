@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { createContextManagementService } from '../../src/main/proxy/services/contextManagementService.ts'
 import { renderChildSessionHandoffStateMessage } from '../../src/main/proxy/sessionBoundary.ts'
+import { buildRequestAssembly } from '../../src/main/proxy/RequestAssembly.ts'
 import type { ChatMessage } from '../../src/main/proxy/types.ts'
 
 function makeToolCall(id: string, name: string, args: string) {
@@ -14,6 +15,19 @@ function makeToolCall(id: string, name: string, args: string) {
       arguments: args,
     },
   }
+}
+
+function assertHistoricalContractReplacedByCurrentManifest(messages: ChatMessage[]): void {
+  const assembly = buildRequestAssembly({
+    messages,
+    toolManifest: { renderedPrompt: 'Tool Contract Header\n## Available Tools\ncurrent catalog' } as any,
+  })
+  assert.equal(
+    assembly.messages.some(message => typeof message.content === 'string' && message.content.includes('## Available Tools')),
+    false,
+    'historical tool contract must not remain provider-visible',
+  )
+  assert.match(assembly.toolManifest?.renderedPrompt ?? '', /current catalog/)
 }
 
 test('child session handoff state survives context management as bounded parent-visible state without raw child transcript', async () => {
@@ -125,8 +139,9 @@ test('sliding window compacts completed old tool exchanges into a bounded handof
   assert.ok(result.messages.length <= 7, `expected bounded compacted output, got ${result.messages.length} messages`)
   assert.ok(
     result.messages.some((message) => typeof message.content === 'string' && message.content.includes('## Available Tools')),
-    'tool definition contract message must be preserved',
+    'tool definition contract must remain available until catalog extraction',
   )
+  assertHistoricalContractReplacedByCurrentManifest(result.messages)
 
   const handoffMessages = result.messages.filter(
     (message) => message.role === 'assistant'
@@ -272,8 +287,9 @@ test('summary then sliding window keeps live-like final tool workflow bounded wi
   assert.equal(result.strategyResults[0]?.subkind, 'summary_skipped_active_tool_workflow')
   assert.ok(
     result.messages.some((message) => typeof message.content === 'string' && message.content.includes('## Available Tools')),
-    'tool definition/system contract message must be preserved',
+    'tool definition/system contract must remain available until catalog extraction',
   )
+  assertHistoricalContractReplacedByCurrentManifest(result.messages)
   assert.match(String(handoffMessage?.content), /read completed/)
   assert.match(String(handoffMessage?.content), /bash completed/)
   assert.match(String(handoffMessage?.content), /latest pinned skill instructions remain authoritative/i)

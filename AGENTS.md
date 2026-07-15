@@ -57,62 +57,48 @@ Required behavior:
 - Multi-turn requests must preserve assistant `tool_calls` and tool `tool_call_id`; otherwise later turns can look like plain text and stop using tools.
 - Ordinary model text containing angle brackets, XML examples, escaped tags, malformed tool blocks, unknown tool names, or fenced examples must not become tool calls.
 
-## Final Test
+## Development Loop
 
-After any large feature or behavior change, run the final gate. This gate has two layers: deterministic local regression tests first, then a real OpenCode model probe. The final gate passes only when both layers pass.
+Every non-trivial change follows this cycle. See `CLAUDE.md` for full details.
 
-### 1. Deterministic Regression Layer
-
-Run these tests before the model probe:
-
-```powershell
-node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+探索 → 定计划 → 改代码 → 本地测试 → Probe 测试 → 日志汇总分析
+  ↑                                                           │
+  └──────────────── 发现问题，回到探索 ────────────────────────┘
 ```
 
-These tests must cover the protocol edges that real models can hide by luck:
-- Valid managed XML emits OpenAI tool calls.
-- Bracket-format output is ignored when the selected plan expects managed XML.
-- Stream parsing handles protocol markers split across chunks without leaking partial markers.
-- Non-stream responses are parsed and converted to `message.tool_calls`.
-- Fenced examples and ordinary angle-bracket text remain plain content.
-- Unknown, malformed, or incomplete tool blocks do not emit tool calls.
-- CDATA/tool arguments preserve literal text containing `<`, `>`, XML-like strings, JSON, and newlines.
-- GLM, Qwen, and Qwen AI use `transformRequestForPromptToolUse` and apply non-stream tool parsing.
-- Multi-turn assistant `tool_calls` and tool `tool_call_id` metadata survive context processing.
-
-If a bug is found in any of these areas, add or update a deterministic test first, verify it fails for the bug, then fix the implementation.
-
-### 2. OpenCode Model Probe Layer
-
-Start the app and keep it running:
+### 1. 本地测试 (Local Regression)
 
 ```powershell
+# 核心
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts tests/services/summarySanitizer.test.ts tests/services/contextManagement-summary-input-sanitization.test.ts tests/services/contextPayloadClassifier.test.ts
+
+# 按改动范围追加
+node --test tests/providers/multi-turn-conversation.test.ts
+node --test tests/providers/provider-flow.test.ts
+node --test tests/services/promptBudget-context-economy.test.ts
+```
+
+Covers: managed XML emit, bracket ignore, split-chunk parsing, non-stream parsing, fenced examples, CDATA, multi-turn tool_call_id preservation, summary sanitization, payload classification.
+
+### 2. Probe 测试 (Model Probe)
+
+```powershell
+# Terminal 1: 启动 proxy，保留日志
 npm run dev:win 2>&1 | Tee-Object -FilePath .\dev.log
-```
 
-Then run the OpenCode probe with the model under test:
-
-```powershell
+# Terminal 2: 跑 probe
 .\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
 ```
 
-The probe files live in:
+Probe 验证: multi-turn tool calling, non-stream conversion, catalog continuity across sessions, tool survival after compact.
 
-```text
-tests/agent-capability/
-  input.txt
-  prompt.md
-  verify-opencode-capability.ps1
-.opencode/skills/agent-capability-probe/SKILL.md
+### 3. 日志汇总分析
+
+```powershell
+.\scripts\extract-session-log.ps1 -LogPath .\dev.log
 ```
 
-The verifier must save raw OpenCode JSON events to `.agent-probe/opencode-events.ndjson` and must fail unless all of these are true:
-- `.agent-probe/result.json` exactly matches locally computed SHA-256, byte length, line count, and fixed edge-case echo fields from `tests/agent-capability/input.txt`.
-- The OpenCode event stream contains a real `agent-capability-probe` skill invocation.
-- The event stream contains at least two non-skill tool calls.
-- At least one tool call happens after the first tool result/observation event, proving multi-turn tool use rather than single-turn-only behavior.
-- The final assistant text contains `CAPABILITY_PROBE_DONE`.
+输出 session 时间线表格。关注: `REJ:*` (summary rejected)、compact 后 provider session 不变、`FALLBACK`、ctx 缩减但无 summary、子 session 未清理 (`tool_child` 无 `del:`)。
 
-Do not accept a test that only checks the assistant's final text or a generated JSON file. The authoritative evidence is the generated JSON plus OpenCode's recorded skill/tool event stream.
-
-The probe must remain deterministic: fixed local input, no network dependency, no time-based expected values, no randomness, and no open-ended grading by the model.
+发现异常 → 回到探索步骤。

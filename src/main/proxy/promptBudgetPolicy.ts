@@ -1,3 +1,5 @@
+import type { SessionBoundaryReason } from './types.ts'
+
 export type PromptRefreshMode = 'full' | 'digest' | 'tool_ready' | 'minimal' | 'repair'
 
 export type PromptBudgetReasonCode =
@@ -26,13 +28,7 @@ export type PromptBudgetReasonCode =
   | 'skill_fingerprint_present'
   | 'stable_normal_continuation'
 
-export type PromptBudgetSessionBoundaryReason =
-  | 'normal'
-  | 'client_compact'
-  | 'server_summary'
-  | 'summary_generator'
-  | 'tool_child'
-  | 'subagent_child'
+export type PromptBudgetSessionBoundaryReason = SessionBoundaryReason
 
 export interface PromptBudgetPolicyInput {
   toolCatalogSessionKey?: string | null
@@ -103,6 +99,13 @@ export function decidePromptBudgetPolicy(input: PromptBudgetPolicyInput): Prompt
   const toolReadyReasons = collectToolReadyReasons(input)
   if (toolReadyReasons.length > 0) {
     return { promptRefreshMode: 'tool_ready', reasons: toolReadyReasons }
+  }
+
+  if (isDigestBoundary(input)) {
+    return {
+      promptRefreshMode: 'digest',
+      reasons: [SESSION_BOUNDARY_REASON_CODES[input.sessionBoundaryReason]],
+    }
   }
 
   const boundaryFullReasons = collectBoundaryFullReasons(input)
@@ -307,7 +310,6 @@ function collectToolReadyReasons(input: PromptBudgetPolicyInput): PromptBudgetRe
   if (shouldPreferToolReadyAcrossBoundary(input)) reasons.push('server_summary_active_tool_continuation')
   if (input.hasCurrentToolResult) reasons.push('current_tool_result_present')
   if (input.hasPreviousAssistantToolCalls) reasons.push('previous_assistant_tool_calls_present')
-  if (input.hasManagedToolCapableTurn && input.hasActiveTools) reasons.push('managed_tool_turn_present')
   return reasons
 }
 
@@ -321,7 +323,14 @@ function shouldPreferToolReadyAcrossBoundary(input: PromptBudgetPolicyInput): bo
 }
 
 function shouldExemptEphemeralSummaryForkBlockingReasons(input: PromptBudgetPolicyInput): boolean {
-  return shouldPreferToolReadyAcrossBoundary(input)
+  return isDigestBoundary(input) || shouldPreferToolReadyAcrossBoundary(input)
+}
+
+function isDigestBoundary(
+  input: PromptBudgetPolicyInput,
+): input is PromptBudgetPolicyInput & { sessionBoundaryReason: 'client_compact' | 'server_summary' } {
+  return input.sessionBoundaryReason === 'client_compact'
+    || input.sessionBoundaryReason === 'server_summary'
 }
 
 function hasUncertainIdentity(input: PromptBudgetPolicyInput): boolean {

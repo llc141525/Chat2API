@@ -12,6 +12,9 @@ import type { Account, Provider } from '../../store/types.ts'
 import type { RequestAssembly } from '../RequestAssembly.ts'
 import type { ToolCallingTransformResult } from '../toolCalling/types.ts'
 import type { PromptRefreshMode } from '../promptBudgetPolicy.ts'
+import { buildSessionBoundaryPlan } from './sessionBoundaryPlan.ts'
+import { buildContextEconomyDiagnostics, extractTextContent } from './contextPayloadClassifier.ts'
+import { projectRequestAssemblyForPromptMode } from './providerPromptProjection.ts'
 import type { WebProviderPlugin } from '../plugins/WebProviderPlugin.ts'
 import type { ProviderRuntimeError, ProviderRuntimeEvent, ProviderWebRequest, ProviderWebResponse } from '../plugins/types.ts'
 import { normalizeProviderStreamToOpenAI } from './streamNormalizer.ts'
@@ -130,19 +133,54 @@ export class ProviderRuntime {
       providerStateShape: input.provider.id === 'qwen' ? 'qwen' : input.provider.id === 'glm' ? 'glm' : 'generic',
     })
 
+    const sessionBoundaryPlan = buildSessionBoundaryPlan({
+      context: input.context,
+      priorState,
+      request: input.request,
+    })
+    const requestedSessionId = input.request.sessionId
+    const stateSessionId = priorState?.qwenSessionId ?? priorState?.conversationId ?? priorState?.parentMessageId
+    const providerSessionId = sessionBoundaryPlan.expectedProviderSessionIdReuse
+      ? requestedSessionId ?? stateSessionId
+      : undefined
+    const providerParentReqId = sessionBoundaryPlan.expectedProviderSessionIdReuse
+      ? input.request.parentReqId ?? priorState?.qwenParentReqId ?? priorState?.parentMessageId
+      : undefined
+    const providerSessionIdSource = providerSessionId
+      ? requestedSessionId ? 'request' : 'state'
+      : 'fresh'
+
+    const providerAssembly = projectRequestAssemblyForPromptMode(input.assembly, input.promptRefreshMode)
+
+    const promptChars = providerAssembly.messages.reduce(
+      (total, message) => total + extractTextContent(message.content).length,
+      0,
+    ) + (providerAssembly.summaryText?.length ?? 0) + (providerAssembly.toolManifest?.renderedPrompt.length ?? 0)
+    const contextEconomy = buildContextEconomyDiagnostics(providerAssembly.messages, {
+      boundary: sessionBoundaryPlan.boundary,
+      promptRefreshMode: input.promptRefreshMode,
+      promptChars,
+    })
+    console.log('[ProviderRuntime] Context economy:', JSON.stringify({
+      contextEconomy,
+      providerSessionAction: sessionBoundaryPlan.providerSessionAction,
+      providerSessionIdSource,
+    }))
+
     const webRequest = await plugin.buildRequest({
       provider: input.provider,
       account: input.account,
       model: input.actualModel,
       originalModel: input.request.originalModel,
       messages: input.request.messages as any,
-      assembly: input.assembly,
+      assembly: providerAssembly,
       promptRefreshMode: input.promptRefreshMode,
       sessionBoundaryReason: input.context.sessionBoundaryReason,
+      sessionBoundaryPlan,
       stream: input.request.stream,
       temperature: input.request.temperature,
-      sessionId: input.request.sessionId ?? priorState?.qwenSessionId ?? priorState?.conversationId ?? priorState?.parentMessageId,
-      parentReqId: input.request.parentReqId ?? priorState?.qwenParentReqId ?? priorState?.parentMessageId,
+      sessionId: providerSessionId,
+      parentReqId: providerParentReqId,
       enableThinking: !!input.request.reasoning_effort,
       enableWebSearch: !!input.request.web_search,
     })

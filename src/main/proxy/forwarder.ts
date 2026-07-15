@@ -36,6 +36,7 @@ import {
   rebuildMessagesForSummaryContaminationRetry,
 } from './services/contextManagementRetry.ts'
 import { sanitizeMessagesForSummary, detectSummaryContamination } from './services/summarySanitizer.ts'
+import { evaluateSummaryInputQuality } from './services/summaryInputQuality.ts'
 import { cleanupChildProviderSession } from './services/childSessionCleanup.ts'
 import { ProviderRuntime } from './services/ProviderRuntime.ts'
 import {
@@ -45,6 +46,7 @@ import {
   type ChildSessionHandoff,
   forkProviderConversationContext,
 } from './sessionBoundary.ts'
+import { buildSessionBoundaryPlan } from './services/sessionBoundaryPlan.ts'
 import {
   getConversationState,
   getProviderConversationState,
@@ -94,11 +96,12 @@ function getSummaryTextContent(content: ContextChatMessage['content']): string {
 function hasSummarizableSummaryInput(messages: ContextChatMessage[]): boolean {
   return messages.some((message) => {
     if (message.role === 'system') return false
+    if (message.role === 'tool') return false
+    if (message.role === 'assistant' && !getSummaryTextContent(message.content).trim() && (message as any).tool_calls?.length) return false
     return getSummaryTextContent(message.content).trim().length > 0
   })
 }
 
-const DEFAULT_PROVIDER_RUNTIME_PILOT_PROVIDERS = new Set(['qwen', 'glm'])
 const REGISTERED_PROVIDER_RUNTIME_PLUGIN_IDS = new Set([
   'deepseek',
   'glm',
@@ -107,7 +110,7 @@ const REGISTERED_PROVIDER_RUNTIME_PLUGIN_IDS = new Set([
   'minimax',
   'perplexity',
   'qwen',
-  'qwenai',
+  'qwen-ai',
   'zai',
 ])
 
@@ -298,6 +301,7 @@ export class RequestForwarder {
   private prepareRequest(
     request: ChatCompletionRequest,
     provider?: Provider,
+    context?: ProxyContext,
     contextResult?: ContextProcessResult,
     toolSessionKey?: string | null
   ): { assembly: RequestAssembly; transformed: ToolCallingTransformResult } {
@@ -306,6 +310,7 @@ export class RequestForwarder {
       assembly: buildRequestAssembly({
         messages: request.messages,
         toolManifest: transformed.toolManifest ?? null,
+        sessionBoundaryReason: context?.sessionBoundaryReason,
         contextResult,
       }),
       transformed,
@@ -313,26 +318,20 @@ export class RequestForwarder {
   }
 
   private shouldUseProviderRuntimePilot(provider: Provider): boolean {
-    const gate = String(process.env.CHAT2API_PROVIDER_RUNTIME_PILOT ?? '').toLowerCase()
-    if (gate.length === 0 || ['0', 'false', 'no', 'off'].includes(gate)) {
+    const providerId = provider.id.toLowerCase()
+    if (!REGISTERED_PROVIDER_RUNTIME_PLUGIN_IDS.has(providerId)) {
       return false
     }
 
-    const providerId = provider.id.toLowerCase()
-    if (['1', 'true', 'yes', 'on'].includes(gate)) {
-      return DEFAULT_PROVIDER_RUNTIME_PILOT_PROVIDERS.has(providerId)
+    const emergencyFallback = String(process.env.CHAT2API_DEDICATED_PROVIDER_FALLBACK ?? '').toLowerCase()
+    if (['1', 'true', 'yes', 'on', 'all', '*'].includes(emergencyFallback)) {
+      return false
     }
-    if (gate === 'all' || gate === '*') {
-      return REGISTERED_PROVIDER_RUNTIME_PLUGIN_IDS.has(providerId)
+    if (new Set(emergencyFallback.split(',').map(value => value.trim()).filter(Boolean)).has(providerId)) {
+      return false
     }
 
-    const enabledProviderIds = new Set(
-      gate
-        .split(',')
-        .map(part => part.trim())
-        .filter(Boolean)
-    )
-    return enabledProviderIds.has(providerId)
+    return true
   }
 
   private shouldConsumeParentChildSessionHandoff(context: ProxyContext): boolean {
@@ -638,10 +637,15 @@ export class RequestForwarder {
           console.log(`[SummaryGenerator] Sanitized input: dropped=${droppedCount} stripped=${strippedSignatureCount}`)
         }
 
-        if (!hasSummarizableSummaryInput(sanitizedMessages)) {
-          console.warn(
-            '[SummaryGenerator] Sanitized summary input has no user/assistant/tool history; using local fallback without provider request'
-          )
+        const summaryQuality = evaluateSummaryInputQuality(sanitizedMessages)
+        if (!hasSummarizableSummaryInput(sanitizedMessages) || !summaryQuality.shouldCallProvider) {
+          console.warn('[SummaryGenerator] Rejected summary input quality:', JSON.stringify({
+            reason: summaryQuality.reason,
+            estimatedUsefulChars: summaryQuality.estimatedUsefulChars,
+            estimatedDiscardedChars: summaryQuality.estimatedDiscardedChars,
+            payloadClassCounts: summaryQuality.classSummary.counts,
+            payloadClassChars: summaryQuality.classSummary.chars,
+          }))
           return ''
         }
 
@@ -852,19 +856,17 @@ export class RequestForwarder {
     if (this.shouldUseProviderRuntimePilot(provider)) {
       const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
       const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      const { assembly, transformed } = this.prepareRequest(request, provider, contextResult, toolSessionKey)
-      const promptBudgetDiagnostics = provider.id.toLowerCase() === 'qwen'
-        ? computeQwenPromptBudgetDiagnostics({
-            request,
-            context,
-            provider,
-            account,
-            actualModel,
-            toolSessionKey,
-            providerConversationStateKey: conversationStateKey,
-            transformed,
-          })
-        : undefined
+      const { assembly, transformed } = this.prepareRequest(request, provider, context, contextResult, toolSessionKey)
+      const promptBudgetDiagnostics = computeQwenPromptBudgetDiagnostics({
+        request,
+        context,
+        provider,
+        account,
+        actualModel,
+        toolSessionKey,
+        providerConversationStateKey: conversationStateKey,
+        transformed,
+      })
       console.log('[Forwarder] Runtime pilot request trace:', JSON.stringify({
         providerId: provider.id,
         sessionBoundaryReason: context.sessionBoundaryReason ?? 'normal',
@@ -872,7 +874,7 @@ export class RequestForwarder {
         providerConversationSessionKeyIsChild: !this.shouldConsumeParentChildSessionHandoff(context),
         parentProviderConversationSessionKeyPresent: typeof context.parentProviderConversationSessionKey === 'string'
           && context.parentProviderConversationSessionKey.length > 0,
-        promptRefreshMode: promptBudgetDiagnostics?.decision.promptRefreshMode ?? null,
+        promptRefreshMode: promptBudgetDiagnostics.decision.promptRefreshMode,
       }))
 
       return this.providerRuntime.forward({
@@ -883,7 +885,7 @@ export class RequestForwarder {
         context,
         assembly,
         transformed,
-        promptRefreshMode: promptBudgetDiagnostics?.decision.promptRefreshMode,
+        promptRefreshMode: promptBudgetDiagnostics.decision.promptRefreshMode,
         conversationStateKey,
         toolSessionKey,
         startTime,
@@ -892,6 +894,10 @@ export class RequestForwarder {
 
     const dedicatedForwarder = this.providerForwarders.find(forwarder => forwarder.matches(provider))
     if (dedicatedForwarder) {
+      console.warn('[Forwarder] dedicated_provider_fallback', JSON.stringify({
+        providerId: provider.id,
+        reason: 'explicit_emergency_or_legacy_gate',
+      }))
       return dedicatedForwarder.forward(request, account, provider, actualModel, startTime, context)
     }
 
@@ -972,7 +978,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const { assembly, transformed } = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider, context)
 
       // Check for existing conversation state (multi-turn)
       const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
@@ -1149,7 +1155,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const { assembly, transformed } = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider, context)
 
       // Check for existing conversation state (multi-turn)
       const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
@@ -1161,6 +1167,10 @@ export class RequestForwarder {
         messages: request.messages,
         providerStateShape: 'glm',
       })
+      const sessionBoundaryPlan = buildSessionBoundaryPlan({ context, priorState: convState, request })
+      const reusableConversationId = sessionBoundaryPlan.expectedProviderSessionIdReuse
+        ? request.sessionId ?? convState?.conversationId
+        : undefined
 
       const adapter = new GLMAdapter(provider, account)
       let responseResult: { response: any; conversationId: string }
@@ -1175,6 +1185,7 @@ export class RequestForwarder {
           web_search: request.web_search,
           reasoning_effort: request.reasoning_effort,
           deep_research: request.deep_research,
+          conversationId: reusableConversationId,
         } as any)
       } else {
         const transformedRequest = {
@@ -1191,6 +1202,7 @@ export class RequestForwarder {
           web_search: transformedRequest.web_search,
           reasoning_effort: transformedRequest.reasoning_effort,
           deep_research: transformedRequest.deep_research,
+          conversationId: reusableConversationId,
         })
       }
 
@@ -1315,7 +1327,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const { assembly, transformed } = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider, context)
 
       const adapter = new KimiAdapter(provider, account)
       let responseResult: { response: any; conversationId: string }
@@ -1442,6 +1454,7 @@ export class RequestForwarder {
         messages: request.messages,
         providerStateShape: 'qwen',
       })
+      const sessionBoundaryPlan = buildSessionBoundaryPlan({ context, priorState: convState, request })
       const consumeParentHandoff = this.shouldConsumeParentChildSessionHandoff(context)
       const requestWithParentHandoff = consumeParentHandoff && convState?.childSessionHandoff
         ? {
@@ -1455,13 +1468,17 @@ export class RequestForwarder {
             ],
           }
         : request
-      const { assembly, transformed } = this.prepareRequest(requestWithParentHandoff, provider)
+      const { assembly, transformed } = this.prepareRequest(requestWithParentHandoff, provider, context)
 
       const adapter = new QwenAdapter(provider, account)
       let responseResult: { response: any; sessionId: string; reqId: string }
       const requestOptions = {
-        sessionId: convState?.qwenSessionId,
-        parentReqId: convState?.qwenParentReqId,
+        sessionId: sessionBoundaryPlan.expectedProviderSessionIdReuse
+          ? request.sessionId ?? convState?.qwenSessionId
+          : undefined,
+        parentReqId: sessionBoundaryPlan.expectedProviderSessionIdReuse
+          ? request.parentReqId ?? convState?.qwenParentReqId
+          : undefined,
       }
       const promptBudgetDiagnostics = computeQwenPromptBudgetDiagnostics({
         request: requestWithParentHandoff,
@@ -1674,7 +1691,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const { assembly, transformed } = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider, context)
 
       const adapter = new QwenAiAdapter(provider, account)
       let responseResult: { response: any; chatId: string; parentId: string | null }
@@ -1784,7 +1801,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const { assembly, transformed } = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider, context)
 
       const adapter = new ZaiAdapter(provider, account)
       let responseResult: { response: any; chatId: string; requestId: string }
@@ -1913,7 +1930,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const { assembly, transformed } = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider, context)
 
       const adapter = new MiniMaxAdapter(provider, account)
       let responseResult: { response: any; stream: any; chatId: string }
@@ -2062,7 +2079,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const { assembly, transformed } = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider, context)
 
       const adapter = new MimoAdapter(provider, account)
       let responseResult: { response: any; conversationId: string; query: string }
@@ -2202,7 +2219,7 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const { assembly, transformed } = this.prepareRequest(request, provider)
+      const { assembly, transformed } = this.prepareRequest(request, provider, context)
 
       const adapter = new PerplexityAdapter(provider, account)
       let responseResult: { stream: any; sessionId: string }

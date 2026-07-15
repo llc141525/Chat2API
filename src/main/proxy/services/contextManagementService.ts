@@ -11,6 +11,10 @@ import { preserveToolExchangePairs } from '../contextMessageMetadata.ts'
 import { hasGeneralToolPromptSignature } from '../constants/signatures.ts'
 import { detectSummaryContamination } from './summarySanitizer.ts'
 import { buildWorkflowLedgerHandoffMessage } from './workflowLedger.ts'
+import {
+  buildLocalWorkflowDigest,
+  type WorkflowStateDigest,
+} from './workflowStateDigest.ts'
 
 /**
  * Sliding Window Strategy Configuration
@@ -73,6 +77,7 @@ export interface StrategyResult {
   strategyName: string
   trimmed: boolean
   subkind?: StrategySubkind
+  workflowDigest?: WorkflowStateDigest
 }
 
 /**
@@ -84,6 +89,7 @@ export interface ContextProcessResult {
   finalCount: number
   strategyResults: StrategyResult[]
   summaryGenerated?: boolean
+  workflowDigest?: WorkflowStateDigest
 }
 
 function isUnusableSummary(summary: string): boolean {
@@ -1100,6 +1106,7 @@ export class SummaryStrategy {
         strategyName: 'summary',
         trimmed: true,
         subkind: 'summary_fallback_local',
+        workflowDigest: buildLocalWorkflowDigest(oldMessages, 'local_fallback'),
       }
     }
 
@@ -1143,6 +1150,7 @@ export class SummaryStrategy {
         strategyName: 'summary',
         trimmed: true,
         subkind: 'summary_skipped_active_tool_workflow',
+        workflowDigest: buildLocalWorkflowDigest(messages, 'tool_handoff'),
       }
     }
 
@@ -1200,6 +1208,7 @@ export class SummaryStrategy {
           strategyName: 'summary',
           trimmed: true,
           subkind: 'summary_fallback_local',
+          workflowDigest: buildLocalWorkflowDigest(oldMessages, 'local_fallback'),
         }
       }
 
@@ -1230,6 +1239,10 @@ export class SummaryStrategy {
         strategyName: 'summary',
         trimmed: true,
         subkind: 'summary_success',
+        workflowDigest: buildLocalWorkflowDigest(
+          [...oldMessages, { role: 'assistant', content: summary }],
+          'external_summary',
+        ),
       }
     } catch (error) {
       console.error('[SummaryStrategy] Failed to generate summary:', error)
@@ -1253,6 +1266,7 @@ export class SummaryStrategy {
         strategyName: 'summary',
         trimmed: true,
         subkind: 'summary_fallback_local',
+        workflowDigest: buildLocalWorkflowDigest(oldMessages, 'local_fallback'),
       }
     }
   }
@@ -1352,6 +1366,7 @@ export class ContextManagementService {
 
     let currentMessages = [...messages]
     let summaryGenerated = false
+    let workflowDigest: WorkflowStateDigest | undefined
 
     for (const strategyName of this.config.executionOrder) {
       let result: StrategyResult
@@ -1367,7 +1382,7 @@ export class ContextManagementService {
 
         case 'summary':
           result = await this.summaryStrategy.execute(currentMessages)
-          if (result.subkind === 'summary_success' || result.subkind === 'summary_fallback_local') {
+          if (result.workflowDigest && result.trimmed) {
             summaryGenerated = true
           }
           break
@@ -1408,6 +1423,7 @@ export class ContextManagementService {
       }
 
       strategyResults.push(result)
+      if (result.workflowDigest) workflowDigest = result.workflowDigest
       currentMessages = result.messages
       console.log('[ContextManagementService] Strategy trace:', JSON.stringify({
         strategyName,
@@ -1442,6 +1458,7 @@ export class ContextManagementService {
       finalCount: currentMessages.length,
       strategyResults,
       summaryGenerated,
+      workflowDigest,
     }
   }
 

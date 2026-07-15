@@ -27,7 +27,7 @@ import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
 import { renderFinalPrompt } from './renderFinalPrompt.ts'
-import type { RequestAssembly } from '../RequestAssembly.ts'
+import { selectProviderMessagesForAssembly, type RequestAssembly } from '../RequestAssembly.ts'
 import type { PromptRefreshMode } from '../promptBudgetPolicy.ts'
 
 /**
@@ -281,6 +281,7 @@ function hasManagedToolContractMarker(value: string | null | undefined): boolean
   }
 
   return value.includes('catalog_fingerprint:')
+    || value.includes('Tool Contract Header')
     || value.includes('<|CHAT2API|tool_calls>')
     || value.includes('<|CHAT2API|invoke')
     || value.includes('<tool_calls>')
@@ -308,20 +309,22 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
   const summaryPrompts: string[] = []
   const conversationParts: string[] = []
   const activeSkillCheckpointPrompts: string[] = []
-  const lastUserText = extractLastUserText(request.messages)
+  const providerMessages = selectProviderMessagesForAssembly(assembly) as QwenMessage[]
+  const lastUserText = extractLastUserText(providerMessages)
   const explicitSummaryText = assembly.summaryText?.trim() || null
   const promptRefreshMode = request.promptRefreshMode
 
-  // tool_ready forces delta mode even without a provider session.
-  // All other modes use the existing hasProviderSession logic.
-  const useDeltaMessages = promptRefreshMode === 'tool_ready' || Boolean(request.sessionId)
-  let conversationMessages = selectQwenDeltaMessages(assembly.messages as QwenMessage[], useDeltaMessages)
+  // Only use delta mode when the provider already tracks the conversation server-side.
+  // tool_ready without a provider session must send the full context so the model
+  // sees earlier instructions, not just the latest assistant/tool delta.
+  const useDeltaMessages = Boolean(request.sessionId)
+  let conversationMessages = selectQwenDeltaMessages(providerMessages, useDeltaMessages)
 
   // Apply mode-based conversation filtering on top of delta selection
   conversationMessages = filterConversationForMode(conversationMessages, promptRefreshMode)
 
   const MAX_TOOL_RESULT_LENGTH = 2000
-  for (const msg of assembly.messages) {
+  for (const msg of providerMessages) {
     if (msg.role === 'system') {
       const content = extractTextContent(msg.content as any)
       const trimmedContent = content.trim()
@@ -379,10 +382,12 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
   const effectiveSummaryText = explicitSummaryText || (summaryPrompts.length > 0 ? summaryPrompts.join('\n\n') : null)
 
   // Mode-based section inclusion:
-  // - digest: drop tool contract (no active tools needed)
-  // - minimal: drop tool contract and summary
+  // - digest: fresh compact session receives the bounded digest plus re-derived current contract
+  // - minimal: stable provider session omits summary replay but MUST keep tool contract
+  //            because Qwen uses managed XML protocol — tools are embedded in the prompt,
+  //            not natively supported by the provider API.
   // - full/repair/tool_ready/undefined: keep all sections
-  const includeToolContract = promptRefreshMode !== 'digest' && promptRefreshMode !== 'minimal'
+  const includeToolContract = true
   const includeSummary = promptRefreshMode !== 'minimal'
 
   const finalContent = renderFinalPrompt({
@@ -395,7 +400,7 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
   const renderedToolContract = includeToolContract ? (assembly.toolManifest?.renderedPrompt ?? null) : null
   traceQwenRequestAssembly({
     model: actualModel,
-    messageCount: assembly.messages.length,
+    messageCount: providerMessages.length,
     systemMessageCount: baseSystemPrompts.length + summaryPrompts.length,
     conversationPartCount: conversationParts.length,
     hasManagedToolContract: hasManagedToolContractMarker(renderedToolContract)
@@ -449,13 +454,7 @@ function filterConversationForMode(
 
   if (mode === 'minimal') {
     const nonSystem = messages.filter((m) => m.role !== 'system')
-    const lastUserIdx = findLastIndexOfRole(nonSystem, 'user')
-    const lastAssistantIdx = findLastIndexOfRole(nonSystem, 'assistant')
-    const indices: number[] = []
-    if (lastUserIdx >= 0) indices.push(lastUserIdx)
-    if (lastAssistantIdx >= 0 && lastAssistantIdx !== lastUserIdx) indices.push(lastAssistantIdx)
-    indices.sort((a, b) => a - b)
-    return indices.map((i) => nonSystem[i])
+    return nonSystem.slice(-4)
   }
 
   return messages

@@ -18,7 +18,7 @@ function createRequest(messages: ChatCompletionRequest['messages'], extras: Reco
   }
 }
 
-function createContext(): ProxyContext {
+function createContext(overrides: Partial<ProxyContext> = {}): ProxyContext {
   return {
     requestId: 'req-1',
     providerId: 'qwen',
@@ -28,6 +28,7 @@ function createContext(): ProxyContext {
     startTime: 1,
     isStream: false,
     clientIP: '127.0.0.1',
+    ...overrides,
   }
 }
 
@@ -819,6 +820,29 @@ test('explicit header identity is still assigned to both session dimensions for 
   assert.equal(context.providerSessionEpoch, 'main')
   assert.equal(context.toolCatalogSessionKey, context.providerConversationSessionKey)
   assert.match(context.toolCatalogSessionKey ?? '', /^openai-chat:[a-f0-9]{24}$/)
+})
+
+test('applyOpenAISessionIdentity preserves runtime-set server_summary boundary', () => {
+  const context = applyOpenAISessionIdentity(
+    createContext({ sessionBoundaryReason: 'server_summary' }),
+    createRequest([
+      { role: 'user', content: 'Continue after compaction.' },
+      { role: 'assistant', content: 'Task state preserved.' },
+    ]),
+  )
+  assert.equal(context.sessionBoundaryReason, 'server_summary',
+    'must preserve runtime-set server_summary instead of overwriting to normal')
+})
+
+test('applyOpenAISessionIdentity preserves runtime-set summary_generator boundary', () => {
+  const context = applyOpenAISessionIdentity(
+    createContext({ sessionBoundaryReason: 'summary_generator' }),
+    createRequest([
+      { role: 'user', content: 'Summarize the conversation.' },
+    ]),
+  )
+  assert.equal(context.sessionBoundaryReason, 'summary_generator',
+    'must preserve runtime-set summary_generator instead of overwriting to normal')
 })
 
 test('chat route helper forwards grouped tool workflow as tool_child while keeping the parent tool catalog key stable', async () => {

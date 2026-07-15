@@ -1,0 +1,396 @@
+<#
+.SYNOPSIS
+  从 dev.log 提取会话时间线，高信噪比汇总
+
+.DESCRIPTION
+  只抓取两类信息：
+    A. 每个请求的 JSON trace 行（一条包含全部边信息）
+    B. 关键事件（summary 成败、错误、session 清理）
+
+  输出：
+    1. 终端时间线表格（一 session 一行）
+    2. 自动问题检测
+    3. JSON 报告
+
+.PARAMETER LogPath
+  dev.log 路径，默认 ./dev.log
+
+.EXAMPLE
+  .\scripts\extract-session-log.ps1
+  .\scripts\extract-session-log.ps1 -LogPath dev-qwen.log
+#>
+
+param(
+  [string]$LogPath = (Join-Path (Get-Location) "dev.log"),
+  [string]$OutputDir = (Join-Path (Get-Location) "session-reports"),
+  [switch]$JsonOnly
+)
+
+$ErrorActionPreference = 'Stop'
+if (-not (Test-Path $LogPath)) {
+  Write-Host "[ERROR] $LogPath not found" -ForegroundColor Red
+  exit 1
+}
+
+New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+
+# ============================================================
+# Phase 1: 提取所有结构化 trace 行 + 关键事件
+# ============================================================
+
+$RE_TRACE    = '\[Forwarder\] Runtime pilot request trace:\s*(\{.+\})$'
+$RE_TOOL     = '\[Forwarder\] Tool transform trace:\s*(\{.+\})$'
+$RE_SUMM_OK  = '\[SummaryGenerator\] Summary generated successfully, length:\s*(\d+)'
+$RE_SUMM_REJ = '\[SummaryGenerator\] Rejected summary input quality:.*"reason":"([^"]+)"'
+$RE_SUMM_FAIL= '\[SummaryGenerator\] Failed to generate summary'
+$RE_CTX      = '\[Forwarder\] Context management applied:\s*(\d+)\s*->\s*(\d+)'
+$RE_COMPACT  = '\[ContextEconomy\] compatibility_summary_extraction.*"summaryChars":(\d+)'
+$RE_MALFORM  = '\[Forwarder\] Malformed tool output detected'
+$RE_FALLBACK = '\[Forwarder\] dedicated_provider_fallback'
+$RE_QWEN_SES = '\[Qwen\] Session info:.*sessionId:\s*''([^'']+)''.*reqId:\s*''([^'']+)'''
+$RE_GLM_CONV = '\[GLM\] Sending chat request'
+$RE_DEL      = '(Session deleted|Conversation deleted).*:\s*(\S+)'
+$RE_ERR      = '\[(Qwen|GLM|DeepSeek|Kimi|Forwarder)\]\s+(Failed|Error):?\s*(.+)'
+
+$records = @()
+$lineNum = 0
+Get-Content $LogPath -Encoding UTF8 | ForEach-Object {
+  $lineNum++
+  $line = $_
+
+  if ($line -match $RE_TRACE) {
+    try { $data = $matches[1] | ConvertFrom-Json } catch { $data = $null }
+    $records += [PSCustomObject]@{
+      line       = $lineNum
+      kind       = 'request'
+      provider   = if ($data) { $data.providerId } else { '' }
+      boundary   = if ($data) { $data.sessionBoundaryReason } else { '?' }
+      toolKey    = if ($data) { $data.toolSessionKeyPresent } else { $false }
+      isChild    = if ($data) { $data.providerConversationSessionKeyIsChild } else { $false }
+      refresh    = if ($data) { $data.promptRefreshMode } else { '' }
+      raw        = $data
+    }
+    return
+  }
+
+  if ($line -match $RE_TOOL) {
+    try { $data = $matches[1] | ConvertFrom-Json } catch { $data = $null }
+    $records += [PSCustomObject]@{
+      line       = $lineNum
+      kind       = 'tool_transform'
+      planMode   = if ($data) { $data.planMode } else { '' }
+      injected   = if ($data) { $data.injected } else { $false }
+      catalogSrc = if ($data) { $data.catalogSource } else { '' }
+    }
+    return
+  }
+
+  if ($line -match $RE_SUMM_OK) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'summary_ok'; length = [int]$matches[1] }
+    return
+  }
+  if ($line -match $RE_SUMM_REJ) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'summary_rejected'; reason = $matches[1] }
+    return
+  }
+  if ($line -match $RE_SUMM_FAIL) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'summary_failed' }
+    return
+  }
+
+  if ($line -match $RE_CTX) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'context'; before = [int]$matches[1]; after = [int]$matches[2] }
+    return
+  }
+  if ($line -match $RE_COMPACT) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'compact_extract'; chars = [int]$matches[1] }
+    return
+  }
+  if ($line -match $RE_MALFORM) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'malformed_retry' }
+    return
+  }
+  if ($line -match $RE_FALLBACK) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'dedicated_fallback' }
+    return
+  }
+
+  if ($line -match $RE_QWEN_SES) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'provider_session'; sessionId = $matches[1]; reqId = $matches[2] }
+    return
+  }
+  if ($line -match $RE_GLM_CONV) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'glm_chat_send' }
+    return
+  }
+
+  if ($line -match $RE_DEL) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'session_deleted'; id = $matches[2] }
+    return
+  }
+
+  if ($line -match $RE_ERR) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'error'; provider = $matches[1]; msg = $matches[3].Substring(0, [Math]::Min(140, $matches[3].Length)) }
+    return
+  }
+}
+
+Write-Host ("[+] Extracted {0} signal records from {1} lines ({2:N1}% hit rate)" -f
+  $records.Count, $lineNum, ($records.Count / [Math]::Max(1, $lineNum) * 100)) -ForegroundColor Green
+
+if ($records.Count -eq 0) {
+  Write-Host "[-] No signals found." -ForegroundColor Yellow
+  exit 0
+}
+
+# ============================================================
+# Phase 2: 构建时间线 —— 按 request 切分 session，事件就近归属
+# ============================================================
+
+$sessions = @()
+$currentId = 0
+$pending = @()  # events waiting for next request
+
+foreach ($r in $records) {
+  if ($r.kind -eq 'request') {
+    $currentId++
+    $sessions += [PSCustomObject]@{
+      id            = $currentId
+      line          = $r.line
+      provider      = $r.provider
+      boundary      = $r.boundary
+      toolKey       = $r.toolKey
+      isChild       = $r.isChild
+      refresh       = $r.refresh
+      provSessionId = ''
+      provReqId     = ''
+      toolPlan      = ''
+      toolCatalog   = ''
+      summaryOk     = 0
+      summaryRej    = ''
+      summaryFail   = $false
+      ctxBefore     = 0
+      ctxAfter      = 0
+      compactChars  = 0
+      malformed     = $false
+      fallback      = $false
+      errors        = @()
+      deleted       = @()
+      eventLines    = @()
+    }
+    $pending = @()
+  }
+  elseif ($r.kind -eq 'provider_session' -and $sessions.Count -gt 0) {
+    $sessions[-1].provSessionId = $r.sessionId
+    $sessions[-1].provReqId = $r.reqId
+    $sessions[-1].eventLines += $r.line
+  }
+  elseif ($r.kind -eq 'tool_transform' -and $sessions.Count -gt 0) {
+    $sessions[-1].toolPlan = $r.planMode
+    $sessions[-1].toolCatalog = $r.catalogSrc
+    $sessions[-1].eventLines += $r.line
+  }
+  elseif ($r.kind -match 'summary_' -and $sessions.Count -gt 0) {
+    switch ($r.kind) {
+      'summary_ok'       { $sessions[-1].summaryOk = $r.length }
+      'summary_rejected' { $sessions[-1].summaryRej = $r.reason }
+      'summary_failed'   { $sessions[-1].summaryFail = $true }
+    }
+    $sessions[-1].eventLines += $r.line
+  }
+  elseif ($r.kind -eq 'context' -and $sessions.Count -gt 0) {
+    $sessions[-1].ctxBefore = $r.before
+    $sessions[-1].ctxAfter = $r.after
+    $sessions[-1].eventLines += $r.line
+  }
+  elseif ($r.kind -eq 'compact_extract' -and $sessions.Count -gt 0) {
+    $sessions[-1].compactChars = $r.chars
+    $sessions[-1].eventLines += $r.line
+  }
+  elseif ($r.kind -eq 'malformed_retry' -and $sessions.Count -gt 0) {
+    $sessions[-1].malformed = $true
+    $sessions[-1].eventLines += $r.line
+  }
+  elseif ($r.kind -eq 'dedicated_fallback' -and $sessions.Count -gt 0) {
+    $sessions[-1].fallback = $true
+    $sessions[-1].eventLines += $r.line
+  }
+  elseif ($r.kind -eq 'error' -and $sessions.Count -gt 0) {
+    $sessions[-1].errors += $r
+    $sessions[-1].eventLines += $r.line
+  }
+  elseif ($r.kind -eq 'session_deleted') {
+    # attach to most recent session that had provider session
+    foreach ($s in ($sessions | Sort-Object id -Descending)) {
+      if ($s.provSessionId) { $s.deleted += $r.id; $s.eventLines += $r.line; break }
+    }
+  }
+  elseif ($r.kind -eq 'glm_chat_send' -and $sessions.Count -gt 0) {
+    $sessions[-1].eventLines += $r.line
+  }
+}
+
+if ($sessions.Count -eq 0) { Write-Host "[-] No request traces found." -ForegroundColor Yellow; exit 0 }
+
+# ============================================================
+# Phase 3: 分类 + 终端输出
+# ============================================================
+
+function Classify($s) {
+  if ($s.boundary -eq 'tool_child')     { return 'tool_child', '@', 'Magenta' }
+  if ($s.boundary -eq 'subagent_child') { return 'subagent', '@', 'Magenta' }
+  if ($s.boundary -eq 'client_compact') { return 'compact', '~', 'Yellow' }
+  if ($s.boundary -eq 'server_summary') { return 'srv_summary', 'S', 'DarkYellow' }
+  if ($s.toolKey)                       { return 'tool', '*', 'Cyan' }
+  return 'main', '#', 'Green'
+}
+
+# --- 时间线表格 ---
+$header = "{0,3} {1,1} {2,-11} {3,-10} {4,-8} {5,-12} {6,-25} {7}" -f
+  'ID', '', 'TYPE', 'PROVIDER', 'REFRESH', 'PLAN/CATALOG', 'PROVIDER_SESSION', 'EVENTS'
+Write-Host "`n$header" -ForegroundColor White
+Write-Host ('-' * 120) -ForegroundColor DarkGray
+
+foreach ($s in $sessions) {
+  $class, $icon, $color = Classify $s
+
+  $refreshStr = if ($s.refresh -and $s.refresh -ne 'none') { $s.refresh } else { '-' }
+  $planStr = if ($s.toolPlan) { "$($s.toolPlan)/$($s.toolCatalog)" } else { '-' }
+  $provStr = if ($s.provSessionId) {
+    $s.provSessionId.Substring(0, [Math]::Min(24, $s.provSessionId.Length))
+  } else { '-' }
+
+  # Events compact format
+  $evtParts = @()
+  if ($s.summaryOk -gt 0)    { $evtParts += "summ=${s.summaryOk}ch" }
+  if ($s.summaryRej)         {
+    $short = $s.summaryRej -replace 'no_text_content|empty_messages|tool_only_history|insufficient_content', 'no_text'
+    $evtParts += "REJ:$short"
+  }
+  if ($s.summaryFail)        { $evtParts += 'summ:FAIL' }
+  if ($s.ctxBefore -gt 0)    { $evtParts += "ctx:$($s.ctxBefore)->$($s.ctxAfter)" }
+  if ($s.compactChars -gt 0) { $evtParts += "compact:${s.compactChars}ch" }
+  if ($s.malformed)          { $evtParts += 'MALFORMED' }
+  if ($s.fallback)           { $evtParts += 'FALLBACK' }
+  if ($s.deleted.Count -gt 0){ $evtParts += "del:$($s.deleted -join ',')" }
+  if ($s.errors.Count -gt 0) { $evtParts += "ERRx$($s.errors.Count)" }
+  $evtStr = $evtParts -join ' '
+
+  $line = "{0,3} {1,1} {2,-11} {3,-10} {4,-8} {5,-12} {6,-25} {7}" -f `
+    $s.id, $icon, $class, $s.provider, $refreshStr, $planStr, $provStr, $evtStr
+
+  if ($s.errors.Count -gt 0 -or $s.summaryRej -or $s.fallback -or $s.malformed) {
+    Write-Host $line -ForegroundColor $color -BackgroundColor DarkRed
+  } else {
+    Write-Host $line -ForegroundColor $color
+  }
+}
+
+# --- 错误详情（只在有错误时展开） ---
+$allErrors = $sessions | Where-Object { $_.errors.Count -gt 0 }
+if ($allErrors) {
+  Write-Host "`n=== Errors ===" -ForegroundColor Red
+  foreach ($s in $allErrors) {
+    foreach ($e in $s.errors) {
+      Write-Host "  #$($s.id) L$($e.line): [$($e.provider)] $($e.msg)" -ForegroundColor Red
+    }
+  }
+}
+
+# ============================================================
+# Phase 4: 自动诊断
+# ============================================================
+
+Write-Host "`n=== Diagnostics ===" -ForegroundColor Cyan
+$issues = @()
+
+# Summary rejected 意味着什么
+foreach ($s in ($sessions | Where-Object { $_.summaryRej })) {
+  $issues += "#$($s.id) L$($s.line): summary REJECTED reason='$($s.summaryRej)' — model would see empty/invalid summary in compact"
+}
+
+# compact 后是否新建了 provider session？
+for ($i = 0; $i -lt $sessions.Count - 1; $i++) {
+  if ($sessions[$i].boundary -in @('client_compact', 'server_summary') -and
+      $sessions[$i+1].provSessionId -and $sessions[$i].provSessionId -and
+      $sessions[$i+1].provSessionId -eq $sessions[$i].provSessionId) {
+    $issues += "#$($sessions[$i].id)->#$($sessions[$i+1].id): compact but provider session unchanged ($($sessions[$i].provSessionId)) — context may be stale"
+  }
+}
+
+# tool session 的 tool plan 是否异常
+foreach ($s in ($sessions | Where-Object { $_.toolKey -and $_.toolPlan -eq '' })) {
+  $issues += "#$($s.id) L$($s.line): tool session but no tool_transform trace — injection may have failed"
+}
+
+# dedicated fallback = 架构回退
+foreach ($s in ($sessions | Where-Object { $_.fallback })) {
+  $issues += "#$($s.id) L$($s.line): used dedicated_fallback — provider runtime was bypassed"
+}
+
+# context management 未触发 summary 引导
+foreach ($s in ($sessions | Where-Object { $_.ctxBefore -gt 0 -and $_.summaryOk -eq 0 -and $_.summaryRej -eq '' -and -not $_.summaryFail })) {
+  $issues += "#$($s.id) L$($s.line): context reduced $($s.ctxBefore)->$($s.ctxAfter) but NO summary trace — truncation without compaction?"
+}
+
+# 缺 session 清理
+$toolChildSessions = $sessions | Where-Object { $_.boundary -eq 'tool_child' -and $_.provSessionId }
+foreach ($s in $toolChildSessions) {
+  if ($s.deleted.Count -eq 0) {
+    $issues += "#$($s.id) L$($s.line): tool_child session $($s.provSessionId) not cleaned up"
+  }
+}
+
+if ($issues.Count -eq 0) {
+  Write-Host "  No issues detected." -ForegroundColor Green
+} else {
+  foreach ($i in $issues) {
+    Write-Host "  $i" -ForegroundColor Yellow
+  }
+}
+
+# ============================================================
+# Phase 5: JSON 报告
+# ============================================================
+
+if (-not $JsonOnly) {
+  $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $report = [PSCustomObject]@{
+    generated   = (Get-Date).ToString('o')
+    source      = $LogPath
+    totalLines  = $lineNum
+    signalCount = $records.Count
+    sessionCount= $sessions.Count
+    issues      = $issues
+    sessions    = @($sessions | ForEach-Object {
+      [PSCustomObject]@{
+        id        = $_.id
+        line      = $_.line
+        type      = (Classify $_)[0]
+        provider  = $_.provider
+        boundary  = $_.boundary
+        toolKey   = $_.toolKey
+        isChild   = $_.isChild
+        refresh   = $_.refresh
+        provSessionId = $_.provSessionId
+        provReqId = $_.provReqId
+        toolPlan  = $_.toolPlan
+        toolCatalog = $_.toolCatalog
+        summaryOk = $_.summaryOk
+        summaryRej = $_.summaryRej
+        summaryFail = $_.summaryFail
+        ctxBefore = $_.ctxBefore
+        ctxAfter  = $_.ctxAfter
+        compactChars = $_.compactChars
+        malformed = $_.malformed
+        fallback  = $_.fallback
+        errorCount = $_.errors.Count
+        deleted   = $_.deleted
+        eventLines = $_.eventLines
+      }
+    })
+  }
+  $path = Join-Path $OutputDir "session-report-$ts.json"
+  $report | ConvertTo-Json -Depth 5 | Out-File $path -Encoding UTF8
+  Write-Host "`n[+] Report: $path" -ForegroundColor Green
+}

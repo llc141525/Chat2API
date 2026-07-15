@@ -613,10 +613,10 @@ test('Mimo model names and conversation flow match Xiaomi AI Studio web requests
 
   assert.match(forwardMimoSource, /model:\s*actualModel/)
   assert.doesNotMatch(forwardMimoSource, /model:\s*request\.model/)
-  assert.match(forwardMimoSource, /const \{ assembly, transformed \} = this\.prepareRequest\(request, provider\)/)
+  assert.match(forwardMimoSource, /const \{ assembly, transformed \} = this\.prepareRequest\(request, provider/)
   assert.match(forwardMimoSource, /messages:\s*transformedRequest\.messages/)
   assert.match(forwardMimoSource, /new MimoStreamHandler\(actualModel, conversationId, 'separate', transformed\.plan\)/)
-  assert.match(forwardMimoSource, /this\.inspectManagedNonStreamOutput\(parsedResult, transformed/)
+  assert.match(forwardMimoSource, /this\.inspectManagedNonStreamOutput\(parsedResult, transformed, startTime\)/)
 
   const mimoAdapterSource = readFileSync(
     join(root, 'src/main/proxy/adapters/mimo.ts'),

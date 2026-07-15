@@ -648,7 +648,7 @@ test('Kimi runtime plugin parses grpc-web stream frames into provider events', a
   assert.deepEqual(events.at(-1), { type: 'done', finishReason: 'stop' })
 })
 
-test('RequestForwarder uses runtime only when explicit pilot gate is enabled', async () => {
+test('RequestForwarder uses registered runtime plugins by default and dedicated paths only as emergency fallback', async () => {
   const tempDir = mkdtempSync(join(tmpdir(), 'chat2api-runtime-main-path-'))
   const outfile = join(tempDir, 'forwarder-bundle.cjs')
 
@@ -702,25 +702,32 @@ test('RequestForwarder uses runtime only when explicit pilot gate is enabled', a
     const context = { requestId: 'req-1', providerId: 'qwen', accountId: 'acc-1', model: 'Qwen3-Max', actualModel: 'Qwen3-Max', startTime: 1, isStream: false, toolCatalogSessionKey: 'tool-key', providerConversationSessionKey: 'provider-key', sessionBoundaryReason: 'normal' }
 
     const off = new RequestForwarder()
-    off.providerRuntime = { forward: async () => { throw new Error('runtime should not be used while gate is off') } }
-    off.providerForwarders = [{ name: 'fake-qwen', matches: () => true, forward: async () => ({ success: true, status: 200, body: { path: 'dedicated' }, latency: 1 }) }]
-    delete process.env.CHAT2API_PROVIDER_RUNTIME_PILOT
+    off.providerRuntime = { forward: async () => ({ success: true, status: 200, body: { path: 'runtime-default' }, latency: 1 }) }
+    off.providerForwarders = [{ name: 'fake-qwen', matches: () => true, forward: async () => { throw new Error('dedicated should not be used by default') } }]
+    delete process.env.CHAT2API_DEDICATED_PROVIDER_FALLBACK
     const offResult = await off.forwardChatCompletion(request, account, provider, 'Qwen3-Max', context)
-    assert.equal(offResult.body?.path, 'dedicated')
+    assert.equal(offResult.body?.path, 'runtime-default')
 
-    const on = new RequestForwarder()
+    const fallback = new RequestForwarder()
+    fallback.providerRuntime = { forward: async () => { throw new Error('runtime should be bypassed by emergency fallback') } }
+    fallback.providerForwarders = [{ name: 'fake-qwen', matches: () => true, forward: async () => ({ success: true, status: 200, body: { path: 'dedicated-emergency' }, latency: 1 }) }]
+    process.env.CHAT2API_DEDICATED_PROVIDER_FALLBACK = 'qwen'
+    const fallbackResult = await fallback.forwardChatCompletion(request, account, provider, 'Qwen3-Max', context)
+    assert.equal(fallbackResult.body?.path, 'dedicated-emergency')
+    delete process.env.CHAT2API_DEDICATED_PROVIDER_FALLBACK
+
+    const assemblyCheck = new RequestForwarder()
     let runtimeInput: any
     let transformToolSessionKey: any
-    const originalTransform = on.transformRequestForPromptToolUse
-    on.transformRequestForPromptToolUse = function(requestArg: any, providerArg: any, toolSessionKeyArg: any) {
+    const originalTransform = assemblyCheck.transformRequestForPromptToolUse
+    assemblyCheck.transformRequestForPromptToolUse = function(requestArg: any, providerArg: any, toolSessionKeyArg: any) {
       transformToolSessionKey = toolSessionKeyArg
       return originalTransform.call(this, requestArg, providerArg, toolSessionKeyArg)
     }
-    on.providerRuntime = { forward: async (input: any) => { runtimeInput = input; return { success: true, status: 200, body: { path: 'runtime', promptRefreshMode: input.promptRefreshMode }, latency: 1 } } }
-    on.providerForwarders = [{ name: 'fake-qwen', matches: () => true, forward: async () => { throw new Error('dedicated should not be used while gate is on') } }]
-    process.env.CHAT2API_PROVIDER_RUNTIME_PILOT = '1'
-    const onResult = await on.forwardChatCompletion(request, account, provider, 'Qwen3-Max', context)
-    assert.equal(onResult.body?.path, 'runtime')
+    assemblyCheck.providerRuntime = { forward: async (input: any) => { runtimeInput = input; return { success: true, status: 200, body: { path: 'runtime', promptRefreshMode: input.promptRefreshMode }, latency: 1 } } }
+    assemblyCheck.providerForwarders = [{ name: 'fake-qwen', matches: () => true, forward: async () => { throw new Error('dedicated should not be used while gate is on') } }]
+    const assemblyResult = await assemblyCheck.forwardChatCompletion(request, account, provider, 'Qwen3-Max', context)
+    assert.equal(assemblyResult.body?.path, 'runtime')
     assert.ok(runtimeInput?.assembly)
     assert.ok(runtimeInput?.conversationStateKey)
     assert.ok(runtimeInput?.toolSessionKey)
@@ -729,54 +736,40 @@ test('RequestForwarder uses runtime only when explicit pilot gate is enabled', a
 
     const glm = new RequestForwarder()
     glm.providerRuntime = { forward: async () => ({ success: true, status: 200, body: { path: 'glm-runtime' }, latency: 1 }) }
-    glm.providerForwarders = [{ name: 'fake-glm', matches: () => true, forward: async () => { throw new Error('glm dedicated should not be used while gate is on') } }]
+    glm.providerForwarders = [{ name: 'fake-glm', matches: () => true, forward: async () => { throw new Error('glm dedicated should not be used') } }]
     const glmProvider = { ...provider, id: 'glm', name: 'GLM' }
     const glmResult = await glm.forwardChatCompletion(request, account, glmProvider, 'GLM-5.2', { ...context, providerId: 'glm', actualModel: 'GLM-5.2' })
     assert.equal(glmResult.body?.path, 'glm-runtime')
 
-    const kimiWithDefaultGate = new RequestForwarder()
-    kimiWithDefaultGate.providerRuntime = { forward: async () => { throw new Error('kimi runtime should require explicit provider opt-in') } }
-    kimiWithDefaultGate.providerForwarders = [{ name: 'fake-kimi', matches: () => true, forward: async () => ({ success: true, status: 200, body: { path: 'kimi-dedicated' }, latency: 1 }) }]
+    const kimi = new RequestForwarder()
+    kimi.providerRuntime = { forward: async () => ({ success: true, status: 200, body: { path: 'kimi-runtime' }, latency: 1 }) }
+    kimi.providerForwarders = [{ name: 'fake-kimi', matches: () => true, forward: async () => { throw new Error('kimi dedicated should not be used') } }]
     const kimiProvider = { ...provider, id: 'kimi', name: 'Kimi' }
     const kimiAccount = { ...account, providerId: 'kimi', name: 'Kimi Account' }
     const kimiContext = { ...context, providerId: 'kimi', model: 'Kimi-K2.6', actualModel: 'Kimi-K2.6' }
-    const kimiDefaultResult = await kimiWithDefaultGate.forwardChatCompletion(
+    const kimiResult = await kimi.forwardChatCompletion(
       { ...request, model: 'Kimi-K2.6' },
       kimiAccount,
       kimiProvider,
       'Kimi-K2.6',
       kimiContext,
     )
-    assert.equal(kimiDefaultResult.body?.path, 'kimi-dedicated')
+    assert.equal(kimiResult.body?.path, 'kimi-runtime')
 
-    const kimiWithExplicitGate = new RequestForwarder()
-    kimiWithExplicitGate.providerRuntime = { forward: async () => ({ success: true, status: 200, body: { path: 'kimi-runtime' }, latency: 1 }) }
-    kimiWithExplicitGate.providerForwarders = [{ name: 'fake-kimi', matches: () => true, forward: async () => { throw new Error('kimi dedicated should not be used while provider is opted in') } }]
-    process.env.CHAT2API_PROVIDER_RUNTIME_PILOT = 'kimi'
-    const kimiRuntimeResult = await kimiWithExplicitGate.forwardChatCompletion(
-      { ...request, model: 'Kimi-K2.6' },
-      kimiAccount,
-      kimiProvider,
-      'Kimi-K2.6',
-      kimiContext,
-    )
-    assert.equal(kimiRuntimeResult.body?.path, 'kimi-runtime')
-
-    const mimoWithAllGate = new RequestForwarder()
-    mimoWithAllGate.providerRuntime = { forward: async () => ({ success: true, status: 200, body: { path: 'mimo-runtime' }, latency: 1 }) }
-    mimoWithAllGate.providerForwarders = [{ name: 'fake-mimo', matches: () => true, forward: async () => { throw new Error('mimo dedicated should not be used while all plugins are opted in') } }]
+    const mimo = new RequestForwarder()
+    mimo.providerRuntime = { forward: async () => ({ success: true, status: 200, body: { path: 'mimo-runtime' }, latency: 1 }) }
+    mimo.providerForwarders = [{ name: 'fake-mimo', matches: () => true, forward: async () => { throw new Error('mimo dedicated should not be used') } }]
     const mimoProvider = { ...provider, id: 'mimo', name: 'Mimo' }
-    process.env.CHAT2API_PROVIDER_RUNTIME_PILOT = 'all'
-    const mimoRuntimeResult = await mimoWithAllGate.forwardChatCompletion(
+    const mimoResult = await mimo.forwardChatCompletion(
       { ...request, model: 'MiMo-V2.5' },
       { ...account, providerId: 'mimo', name: 'Mimo Account' },
       mimoProvider,
       'MiMo-V2.5',
       { ...context, providerId: 'mimo', model: 'MiMo-V2.5', actualModel: 'MiMo-V2.5' },
     )
-    assert.equal(mimoRuntimeResult.body?.path, 'mimo-runtime')
+    assert.equal(mimoResult.body?.path, 'mimo-runtime')
   } finally {
-    delete process.env.CHAT2API_PROVIDER_RUNTIME_PILOT
+    delete process.env.CHAT2API_DEDICATED_PROVIDER_FALLBACK
     rmSync(tempDir, { recursive: true, force: true })
   }
 })
@@ -880,23 +873,22 @@ test('RequestForwarder passes context compaction summary/handoff and full tool m
       },
     }
     forwarder.providerForwarders = [{ name: 'fake-qwen', matches: () => true, forward: async () => ({ success: true, status: 200, body: { path: 'dedicated' }, latency: 1 }) }]
-    process.env.CHAT2API_PROVIDER_RUNTIME_PILOT = '1'
 
     const result = await forwarder.forwardChatCompletion(request, account, provider, 'Qwen3-Max', context)
 
     assert.equal(result.success, true)
-    assert.equal(runtimeInput?.assembly?.summaryText, [
-      '[Prior conversation summary — non-authoritative narrative. Tool catalog and MCP capabilities are re-injected below by the runtime and take precedence over anything summarized here.]',
-      'Bounded summary for the compacted turn.',
-    ].join('\n'))
+    assert.match(runtimeInput?.assembly?.summaryText ?? '', /Workflow state digest v1/)
+    assert.match(runtimeInput?.assembly?.summaryText ?? '', /Bounded summary for the compacted turn/)
+    assert.equal(runtimeInput?.assembly?.workflowDigest?.source, 'external_summary')
+    assert.doesNotMatch(runtimeInput?.assembly?.summaryText ?? '', /## Available Tools|You are opencode/)
     assert.equal(runtimeInput?.assembly?.metadata?.contextManagementApplied, true)
     assert.deepEqual(runtimeInput?.assembly?.metadata?.strategiesExecuted, ['summary'])
     assert.equal(typeof runtimeInput?.assembly?.toolManifest?.catalogFingerprint, 'string')
     assert.deepEqual([...runtimeInput?.assembly?.toolManifest?.allowedToolNames].sort(), ['bash', 'read'])
     assert.equal(runtimeInput?.assembly?.toolManifest?.tools?.length, 2)
     assert.equal(runtimeInput?.context?.sessionBoundaryReason, 'server_summary')
+    assert.equal(runtimeInput?.promptRefreshMode, 'digest')
   } finally {
-    delete process.env.CHAT2API_PROVIDER_RUNTIME_PILOT
     rmSync(tempDir, { recursive: true, force: true })
   }
 })
@@ -972,6 +964,19 @@ test('RequestForwarder summary generator skips provider request when sanitized h
     ])
 
     assert.equal(emptySummary, '')
+    assert.equal(providerCallCount, 0)
+
+    const placeholderSummary = await generator([
+      { role: 'assistant', content: '[tool calls summarized for workflow continuity] read(filePath="a.ts")' },
+      { role: 'tool', tool_call_id: 'call_1', content: '[tool result summarized call_1] result received' },
+    ])
+    assert.equal(placeholderSummary, '')
+    assert.equal(providerCallCount, 0)
+
+    const skillDocSummary = await generator([
+      { role: 'user', content: '# superpowers\nSkill workflow documentation. SUBAGENT-STOP' },
+    ])
+    assert.equal(skillDocSummary, '')
     assert.equal(providerCallCount, 0)
 
     const realSummary = await generator([

@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  Chat2API enables zero-cost access to leading AI models by leveraging official web UIs. It supports providers such as DeepSeek, GLM, Kimi, MiniMax, Qwen, and Z.ai, and seamlessly integrates with tools like openlcaw, Cline, and Roo-Code — making any OpenAI-compatible client work out of the box.
+  Chat2API enables zero-cost access to leading AI models by leveraging official web UIs. It supports providers such as DeepSeek, GLM, Kimi, MiniMax, Perplexity, Qwen, and Z.ai, and seamlessly integrates with tools like OpenCode, Cline, and Roo-Code — making any OpenAI-compatible client work out of the box. This fork adds managed XML tool-calling, OpenCode session continuity, deterministic agent-capability probes, and a full regression test suite not present in the upstream xiaoY233/Chat2API repository.
 </p>
 
 ![Product Preview](docs/screenshots/preview.png)

@@ -21,7 +21,7 @@ const PLUGIN_CLASSES: Record<string, string> = {
   minimax: 'MiniMaxProviderPlugin',
   mimo: 'MimoProviderPlugin',
   perplexity: 'PerplexityProviderPlugin',
-  qwenai: 'QwenAiProviderPlugin',
+  'qwen-ai': 'QwenAiProviderPlugin',
   zai: 'ZaiProviderPlugin',
 }
 
@@ -95,6 +95,11 @@ test('registry imports in Node and exposes Qwen plus GLM plugins', async () => {
   assert.ok(ids.includes('glm'), 'registry must expose glm plugin')
   assert.equal(registry.getPluginForProviderSync({ id: 'qwen' })?.id, 'qwen')
   assert.equal(registry.getPluginForProviderSync({ id: 'glm' })?.id, 'glm')
+})
+
+test('registry resolves the hyphenated qwen-ai provider id', async () => {
+  const registry = await import('../../src/main/proxy/plugins/registry.ts')
+  assert.equal((await registry.getPluginForProvider({ id: 'qwen-ai' }))?.id, 'qwen-ai')
 })
 
 test('GLM plugin exposes stream parsing for the web SSE endpoint', () => {

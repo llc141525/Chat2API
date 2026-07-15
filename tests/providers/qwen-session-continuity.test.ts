@@ -211,8 +211,9 @@ test('provider conversation state helpers live outside forwarder and are used by
   assert.match(forwarderSource, /const convState = getProviderConversationState\(/)
   assert.match(forwarderSource, /renderChildSessionHandoffStateMessage\(convState\.childSessionHandoff\)/)
   assert.match(forwarderSource, /childSessionHandoff: undefined/)
-  assert.match(forwarderSource, /sessionId: convState\?\.qwenSessionId/)
-  assert.match(forwarderSource, /parentReqId: convState\?\.qwenParentReqId/)
+  assert.match(forwarderSource, /sessionBoundaryPlan\.expectedProviderSessionIdReuse/)
+  assert.match(forwarderSource, /request\.sessionId \?\? convState\?\.qwenSessionId/)
+  assert.match(forwarderSource, /request\.parentReqId \?\? convState\?\.qwenParentReqId/)
   assert.match(forwarderSource, /const parentHandoff = buildChildSessionHandoff\(\{/)
   assert.match(forwarderSource, /const finalAssistantResponse = handler\.getFinalAssistantResponseForHandoff\(\)/)
   assert.match(forwarderSource, /writeSessionState\(\{[\s\S]*qwenSessionId: sid,[\s\S]*qwenParentReqId: parentReqId \|\| '0'/)
@@ -1128,7 +1129,7 @@ test('prompt budget diagnostics report tool_ready for active qwen tool follow-up
       hasManagedToolCapableTurn: false,
     })),
   }
-  assert.equal(boundary.decision.promptRefreshMode, 'full')
+  assert.equal(boundary.decision.promptRefreshMode, 'digest')
   assert.ok(boundary.decision.reasons.includes('session_boundary_client_compact'))
 })
 
@@ -1378,7 +1379,6 @@ test('server-summary active qwen tool continuation stays tool_ready when identit
     'server_summary_active_tool_continuation',
     'current_tool_result_present',
     'previous_assistant_tool_calls_present',
-    'managed_tool_turn_present',
   ])
 })
 
@@ -1427,7 +1427,6 @@ test('server-summary active qwen tool continuation stays tool_ready on a fresh s
     'server_summary_active_tool_continuation',
     'current_tool_result_present',
     'previous_assistant_tool_calls_present',
-    'managed_tool_turn_present',
   ])
 })
 
@@ -1463,7 +1462,7 @@ test('server-summary active qwen tool continuation still upgrades to full when s
   assert.deepEqual(decision.reasons, ['skill_fingerprint_changed'])
 })
 
-test('server-summary fresh qwen turn without an active tool tail still stays full', () => {
+test('server-summary fresh qwen turn without an active tool tail uses digest', () => {
   const decision = decidePromptBudgetPolicy(buildPromptBudgetPolicyInput({
     requestMessages: [{ role: 'user' as const, content: 'continue' }],
     sessionBoundaryReason: 'server_summary',
@@ -1477,12 +1476,11 @@ test('server-summary fresh qwen turn without an active tool tail still stays ful
     hasManagedToolCapableTurn: false,
   }))
 
-  assert.equal(decision.promptRefreshMode, 'full')
-  assert.ok(decision.reasons.includes('fresh_provider_session'))
+  assert.equal(decision.promptRefreshMode, 'digest')
   assert.ok(decision.reasons.includes('session_boundary_server_summary'))
 })
 
-test('server-summary fresh qwen turn with tools available but no assistant tool tail still stays full', () => {
+test('server-summary fresh qwen turn with tools available but no assistant tool tail uses digest', () => {
   const decision = decidePromptBudgetPolicy(buildPromptBudgetPolicyInput({
     requestMessages: [{ role: 'user' as const, content: 'continue with available tools' }],
     sessionBoundaryReason: 'server_summary',
@@ -1496,8 +1494,7 @@ test('server-summary fresh qwen turn with tools available but no assistant tool 
     hasManagedToolCapableTurn: true,
   }))
 
-  assert.equal(decision.promptRefreshMode, 'full')
-  assert.ok(decision.reasons.includes('fresh_provider_session'))
+  assert.equal(decision.promptRefreshMode, 'digest')
   assert.ok(decision.reasons.includes('session_boundary_server_summary'))
   assert.equal(decision.reasons.includes('server_summary_active_tool_continuation'), false)
 })
