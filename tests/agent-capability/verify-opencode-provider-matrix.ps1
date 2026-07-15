@@ -41,6 +41,9 @@ function Get-Classification([string]$OutputText) {
     if ($OutputText -match 'auth|token|unauthorized|forbidden|401|403|登录') {
         return "auth_expired"
     }
+    if ($OutputText -match 'provider_preflight_failed|rate.?limit|429|too many requests|限流') {
+        return "provider_unavailable"
+    }
     if ($OutputText -match 'model.+unavailable|unknown model|模型.+不可用|not found|404') {
         return "model_unavailable"
     }

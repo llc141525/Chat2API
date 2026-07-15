@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { SummaryStrategy } from '../../src/main/proxy/services/contextManagementService.ts'
+import { ContextManagementService, SummaryStrategy } from '../../src/main/proxy/services/contextManagementService.ts'
 import type { ChatMessage } from '../../src/main/proxy/types.ts'
 
 function msg(role: ChatMessage['role'], content: string): ChatMessage {
@@ -15,6 +15,13 @@ function makeConversation(count = 12): ChatMessage[] {
     messages.push(msg('assistant', `Answer ${i + 1}`))
   }
   return messages
+}
+
+function findSummaryMessage(messages: ChatMessage[]): ChatMessage | undefined {
+  return messages.find(message =>
+    typeof message.content === 'string' &&
+    message.content.includes('[Prior conversation summary')
+  )
 }
 
 // ── Summary failure diagnostics ───────────────────────────────────────────────
@@ -31,17 +38,18 @@ test('SummaryStrategy: subkind is summary_not_needed when messages <= keepRecent
   )
 })
 
-test('SummaryStrategy: subkind is summary_generator_missing when no generator and messages exceed limit', async () => {
+test('SummaryStrategy: local fallback summary is used when no generator and messages exceed limit', async () => {
   const strategy = new SummaryStrategy({ enabled: true, keepRecentMessages: 4 })
   const messages = makeConversation(8)
   const result = await strategy.execute(messages)
 
   assert.equal(result.trimmed, true)
-  assert.equal(result.subkind, 'summary_generator_missing',
-    `Expected summary_generator_missing subkind, got: ${result.subkind}`)
+  assert.equal(result.subkind, 'summary_fallback_local',
+    `Expected summary_fallback_local subkind, got: ${result.subkind}`)
+  assert.ok(findSummaryMessage(result.messages), 'local fallback summary must be inserted')
 })
 
-test('SummaryStrategy: subkind is summary_generator_failed when generator throws', async () => {
+test('SummaryStrategy: local fallback summary is used when generator throws', async () => {
   const failingGenerator = async (_msgs: ChatMessage[]) => {
     throw new Error('LLM API timeout')
   }
@@ -50,19 +58,61 @@ test('SummaryStrategy: subkind is summary_generator_failed when generator throws
   const result = await strategy.execute(messages)
 
   assert.equal(result.trimmed, true)
-  assert.equal(result.subkind, 'summary_generator_failed',
-    `Expected summary_generator_failed subkind, got: ${result.subkind}`)
+  assert.equal(result.subkind, 'summary_fallback_local',
+    `Expected summary_fallback_local subkind, got: ${result.subkind}`)
+  const summary = findSummaryMessage(result.messages)
+  assert.ok(summary, 'local fallback summary must be inserted')
+  assert.match(String(summary!.content), /Local fallback summary/)
 })
 
-test('SummaryStrategy: empty summary output is treated as summary_generator_failed', async () => {
+test('SummaryStrategy: empty summary output uses local fallback summary', async () => {
   const emptyGenerator = async (_msgs: ChatMessage[]) => '   '
   const strategy = new SummaryStrategy({ enabled: true, keepRecentMessages: 4 }, emptyGenerator)
   const messages = makeConversation(8)
   const result = await strategy.execute(messages)
 
   assert.equal(result.trimmed, true)
-  assert.equal(result.subkind, 'summary_generator_failed',
-    `Expected summary_generator_failed for empty summary output, got: ${result.subkind}`)
+  assert.equal(result.subkind, 'summary_fallback_local',
+    `Expected summary_fallback_local for empty summary output, got: ${result.subkind}`)
+  assert.ok(findSummaryMessage(result.messages), 'local fallback summary must be inserted')
+})
+
+test('SummaryStrategy: no-conversation summary output uses local fallback summary', async () => {
+  const noConversationGenerator = async (_msgs: ChatMessage[]) => 'No conversation to summarize.'
+  const strategy = new SummaryStrategy({ enabled: true, keepRecentMessages: 4 }, noConversationGenerator)
+  const messages = makeConversation(8)
+  const result = await strategy.execute(messages)
+
+  assert.equal(result.trimmed, true)
+  assert.equal(result.subkind, 'summary_fallback_local',
+    `Expected summary_fallback_local for no-conversation output, got: ${result.subkind}`)
+  assert.ok(findSummaryMessage(result.messages), 'local fallback summary must be inserted')
+  assert.ok(
+    result.messages.every(message => {
+      const content = typeof message.content === 'string' ? message.content : ''
+      return !content.includes('No conversation to summarize')
+    }),
+    'no-conversation text must not be inserted as a prior conversation summary',
+  )
+})
+
+test('ContextManagementService marks local fallback summary as generated for compact epoch routing', async () => {
+  const noConversationGenerator = async (_msgs: ChatMessage[]) => 'No conversation to summarize.'
+  const service = new ContextManagementService({
+    enabled: true,
+    strategies: {
+      slidingWindow: { enabled: false, maxMessages: 20 },
+      tokenLimit: { enabled: false, maxTokens: 4000 },
+      summary: { enabled: true, keepRecentMessages: 4 },
+    },
+    executionOrder: ['summary'],
+  }, noConversationGenerator)
+
+  const result = await service.process(makeConversation(8))
+
+  assert.equal(result.summaryGenerated, true)
+  assert.equal(result.strategyResults[0]?.subkind, 'summary_fallback_local')
+  assert.ok(findSummaryMessage(result.messages), 'local fallback summary must be present in processed messages')
 })
 
 test('SummaryStrategy: subkind is summary_success when generator returns valid summary', async () => {

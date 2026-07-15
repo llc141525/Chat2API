@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory=$true)]
-    [string]$Model
+    [string]$Model,
+
+    [switch]$SkipProviderPreflight
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +44,101 @@ function Test-ContainsAny([string]$Text, [string[]]$Needles) {
     return $false
 }
 
+function Get-ProviderNameFromModel([string]$ModelName) {
+    $parts = $ModelName.Split("/", 2)
+    if ($parts.Length -lt 2 -or [string]::IsNullOrWhiteSpace($parts[0])) {
+        return ""
+    }
+
+    return $parts[0]
+}
+
+function Get-OpencodeConfigPath() {
+    $candidates = @(
+        (Join-Path $HOME ".config\opencode\opencode.json"),
+        (Join-Path $HOME ".config\opencode\opencode.jsonc"),
+        ".\opencode.json",
+        ".\opencode.jsonc"
+    )
+
+    foreach ($path in $candidates) {
+        if (Test-Path $path) {
+            return (Resolve-Path $path).Path
+        }
+    }
+
+    return ""
+}
+
+function Invoke-ProviderPreflight([string]$ModelName) {
+    $providerName = Get-ProviderNameFromModel $ModelName
+    if ([string]::IsNullOrWhiteSpace($providerName)) {
+        Write-Host "[WARN] Skipping provider preflight because model has no provider prefix: $ModelName"
+        return
+    }
+
+    $configPath = Get-OpencodeConfigPath
+    if ([string]::IsNullOrWhiteSpace($configPath)) {
+        Write-Host "[WARN] Skipping provider preflight because opencode config was not found"
+        return
+    }
+
+    $apiKey = ""
+    try {
+        $config = Get-Content -Raw $configPath | ConvertFrom-Json
+        $providerConfig = $config.provider.$providerName
+        if ($null -eq $providerConfig) {
+            Write-Host "[WARN] Skipping provider preflight because provider '$providerName' is not in $configPath"
+            return
+        }
+
+        $baseUrl = [string]$providerConfig.options.baseURL
+        $apiKey = [string]$providerConfig.options.apiKey
+        if ([string]::IsNullOrWhiteSpace($baseUrl) -or [string]::IsNullOrWhiteSpace($apiKey)) {
+            Write-Host "[WARN] Skipping provider preflight because provider '$providerName' has no baseURL/apiKey"
+            return
+        }
+
+        $body = @{
+            model = $ModelName
+            stream = $false
+            messages = @(@{ role = "user"; content = "Reply exactly OK." })
+        } | ConvertTo-Json -Depth 10
+
+        $uri = $baseUrl.TrimEnd("/") + "/chat/completions"
+        $response = Invoke-RestMethod -Method Post -Uri $uri -Headers @{
+            Authorization = "Bearer $apiKey"
+            "Content-Type" = "application/json"
+        } -Body $body -TimeoutSec 60
+
+        $content = ""
+        if ($response.choices -and $response.choices.Count -gt 0 -and $response.choices[0].message) {
+            $content = [string]$response.choices[0].message.content
+        } else {
+            $content = ($response | ConvertTo-Json -Compress -Depth 20)
+        }
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            Fail "provider_preflight_failed: provider '$providerName' returned an empty health response"
+        }
+        if ($content -match 'Error:|错误|刷新页面|重试|try again|rate.?limit|too many requests|429') {
+            Fail "provider_preflight_failed: provider '$providerName' returned an error health response: $content"
+        }
+
+        Pass "Provider preflight succeeded for $ModelName via provider '$providerName'"
+    } catch {
+        $message = $_.Exception.Message
+        if ($_.ErrorDetails.Message) {
+            $message = $_.ErrorDetails.Message
+        }
+        $safeMessage = if ([string]::IsNullOrWhiteSpace($apiKey)) {
+            $message
+        } else {
+            ($message -replace [regex]::Escape($apiKey), "<redacted>")
+        }
+        Fail "provider_preflight_failed: $safeMessage"
+    }
+}
+
 function Invoke-OpenCodeDebug([string[]]$DebugArgs, [string]$OutputPath) {
     $output = & opencode @DebugArgs 2>&1
     $exit = $LASTEXITCODE
@@ -72,6 +169,7 @@ $agentDebugPath = "$probeDir/opencode-debug-agent.json"
 
 if (-not (Test-Path $inputPath)) { Fail "Input file not found: $inputPath" }
 if (-not (Test-Path $promptPath)) { Fail "Prompt file not found: $promptPath" }
+if (-not $SkipProviderPreflight) { Invoke-ProviderPreflight $Model }
 if (-not (Get-Command opencode -ErrorAction SilentlyContinue)) { Fail "opencode command not found in PATH" }
 
 $skillDebug = Invoke-OpenCodeDebug @("debug", "skill") $skillDebugPath

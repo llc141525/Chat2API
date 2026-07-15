@@ -1,5 +1,9 @@
 import type { ChatMessage } from './types'
 
+export interface PreserveToolExchangePairsOptions {
+  suppressedToolCallIds?: Iterable<string>
+}
+
 export function preserveContextManagedMessageMetadata(
   originalMessages: ChatMessage[],
   processedMessages: ChatMessage[],
@@ -32,19 +36,25 @@ export function preserveContextManagedMessageMetadata(
 export function preserveToolExchangePairs(
   originalMessages: ChatMessage[],
   processedMessages: ChatMessage[],
+  options: PreserveToolExchangePairsOptions = {},
 ): ChatMessage[] {
+  const suppressedToolCallIds = new Set(options.suppressedToolCallIds ?? [])
   const neededToolCallIds = new Set<string>()
 
   for (const message of processedMessages) {
     if (message.role === 'assistant') {
       for (const call of message.tool_calls ?? []) {
-        if (call?.id) {
+        if (call?.id && !suppressedToolCallIds.has(call.id)) {
           neededToolCallIds.add(call.id)
         }
       }
     }
 
-    if (message.role === 'tool' && message.tool_call_id) {
+    if (
+      message.role === 'tool'
+      && message.tool_call_id
+      && !suppressedToolCallIds.has(message.tool_call_id)
+    ) {
       neededToolCallIds.add(message.tool_call_id)
     }
   }
@@ -59,11 +69,23 @@ export function preserveToolExchangePairs(
       return false
     }
 
-    if (message.role === 'assistant') {
-      return (message.tool_calls ?? []).some((call) => call?.id && neededToolCallIds.has(call.id))
+    if (isRepresentedByProcessedToolCallSubset(message, processedMessages)) {
+      return false
     }
 
-    if (message.role === 'tool' && message.tool_call_id) {
+    if (message.role === 'assistant') {
+      return (message.tool_calls ?? []).some(
+        (call) => call?.id
+          && !suppressedToolCallIds.has(call.id)
+          && neededToolCallIds.has(call.id)
+      )
+    }
+
+    if (
+      message.role === 'tool'
+      && message.tool_call_id
+      && !suppressedToolCallIds.has(message.tool_call_id)
+    ) {
       return neededToolCallIds.has(message.tool_call_id)
     }
 
@@ -121,4 +143,43 @@ function messageIdentity(message: ChatMessage): string {
 
 function stableContent(content: ChatMessage['content']): string {
   return typeof content === 'string' ? content : JSON.stringify(content ?? null)
+}
+
+function isRepresentedByProcessedToolCallSubset(
+  originalMessage: ChatMessage,
+  processedMessages: ChatMessage[],
+): boolean {
+  if (originalMessage.role !== 'assistant' || (originalMessage.tool_calls?.length ?? 0) === 0) {
+    return false
+  }
+
+  const originalToolCalls = originalMessage.tool_calls ?? []
+
+  return processedMessages.some((candidate) => {
+    if (candidate.role !== 'assistant' || (candidate.tool_calls?.length ?? 0) === 0) {
+      return false
+    }
+
+    if ((candidate.name ?? null) !== (originalMessage.name ?? null)) {
+      return false
+    }
+
+    if (stableContent(candidate.content) !== stableContent(originalMessage.content)) {
+      return false
+    }
+
+    const candidateToolCalls = candidate.tool_calls ?? []
+    if (candidateToolCalls.length >= originalToolCalls.length) {
+      return false
+    }
+
+    return candidateToolCalls.every((candidateCall) =>
+      originalToolCalls.some((originalCall) =>
+        originalCall.id === candidateCall.id
+          && originalCall.type === candidateCall.type
+          && originalCall.function.name === candidateCall.function.name
+          && originalCall.function.arguments === candidateCall.function.arguments
+      )
+    )
+  })
 }

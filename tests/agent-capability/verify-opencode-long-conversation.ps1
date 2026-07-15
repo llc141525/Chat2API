@@ -12,7 +12,9 @@ param(
 
     [int]$SummaryKeepRecentMessages = 6,
 
-    [int]$WarmupTurns = 6
+    [int]$WarmupTurns = 6,
+
+    [switch]$SkipProviderPreflight
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +41,101 @@ function Test-ContainsAny([string]$Text, [string[]]$Needles) {
         }
     }
     return $false
+}
+
+function Get-ProviderNameFromModel([string]$ModelName) {
+    $parts = $ModelName.Split("/", 2)
+    if ($parts.Length -lt 2 -or [string]::IsNullOrWhiteSpace($parts[0])) {
+        return ""
+    }
+
+    return $parts[0]
+}
+
+function Get-OpencodeConfigPath() {
+    $candidates = @(
+        (Join-Path $HOME ".config\opencode\opencode.json"),
+        (Join-Path $HOME ".config\opencode\opencode.jsonc"),
+        ".\opencode.json",
+        ".\opencode.jsonc"
+    )
+
+    foreach ($path in $candidates) {
+        if (Test-Path $path) {
+            return (Resolve-Path $path).Path
+        }
+    }
+
+    return ""
+}
+
+function Invoke-ProviderPreflight([string]$ModelName) {
+    $providerName = Get-ProviderNameFromModel $ModelName
+    if ([string]::IsNullOrWhiteSpace($providerName)) {
+        Write-Host "[WARN] Skipping provider preflight because model has no provider prefix: $ModelName"
+        return
+    }
+
+    $configPath = Get-OpencodeConfigPath
+    if ([string]::IsNullOrWhiteSpace($configPath)) {
+        Write-Host "[WARN] Skipping provider preflight because opencode config was not found"
+        return
+    }
+
+    $apiKey = ""
+    try {
+        $config = Get-Content -Raw $configPath | ConvertFrom-Json
+        $providerConfig = $config.provider.$providerName
+        if ($null -eq $providerConfig) {
+            Write-Host "[WARN] Skipping provider preflight because provider '$providerName' is not in $configPath"
+            return
+        }
+
+        $baseUrl = [string]$providerConfig.options.baseURL
+        $apiKey = [string]$providerConfig.options.apiKey
+        if ([string]::IsNullOrWhiteSpace($baseUrl) -or [string]::IsNullOrWhiteSpace($apiKey)) {
+            Write-Host "[WARN] Skipping provider preflight because provider '$providerName' has no baseURL/apiKey"
+            return
+        }
+
+        $body = @{
+            model = $ModelName
+            stream = $false
+            messages = @(@{ role = "user"; content = "Reply exactly OK." })
+        } | ConvertTo-Json -Depth 10
+
+        $uri = $baseUrl.TrimEnd("/") + "/chat/completions"
+        $response = Invoke-RestMethod -Method Post -Uri $uri -Headers @{
+            Authorization = "Bearer $apiKey"
+            "Content-Type" = "application/json"
+        } -Body $body -TimeoutSec 60
+
+        $content = ""
+        if ($response.choices -and $response.choices.Count -gt 0 -and $response.choices[0].message) {
+            $content = [string]$response.choices[0].message.content
+        } else {
+            $content = ($response | ConvertTo-Json -Compress -Depth 20)
+        }
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            Fail "provider_preflight_failed: provider '$providerName' returned an empty health response"
+        }
+        if ($content -match 'Error:|错误|刷新页面|重试|try again|rate.?limit|too many requests|429') {
+            Fail "provider_preflight_failed: provider '$providerName' returned an error health response: $content"
+        }
+
+        Pass "Provider preflight succeeded for $ModelName via provider '$providerName'"
+    } catch {
+        $message = $_.Exception.Message
+        if ($_.ErrorDetails.Message) {
+            $message = $_.ErrorDetails.Message
+        }
+        $safeMessage = if ([string]::IsNullOrWhiteSpace($apiKey)) {
+            $message
+        } else {
+            ($message -replace [regex]::Escape($apiKey), "<redacted>")
+        }
+        Fail "provider_preflight_failed: $safeMessage"
+    }
 }
 
 function Read-JsonFile([string]$Path) {
@@ -101,7 +198,8 @@ function Invoke-OpencodeRun {
         [string]$Prompt,
         [string]$ModelName,
         [int]$TimeoutSeconds,
-        [string]$SessionId = ""
+        [string]$SessionId = "",
+        [string]$AgentName = ""
     )
 
     $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -114,11 +212,13 @@ function Invoke-OpencodeRun {
     $args = @(
         "run",
         "--model", $ModelName,
-        "--agent", "long-conversation-probe",
         "--format", "json",
         "--dir", ".",
         "--auto"
     )
+    if (-not [string]::IsNullOrWhiteSpace($AgentName)) {
+        $args += @("--agent", $AgentName)
+    }
     if (-not [string]::IsNullOrWhiteSpace($SessionId)) {
         $args += @("--session", $SessionId)
     }
@@ -279,6 +379,150 @@ store.set('config', config)
     }
 }
 
+function Measure-EconomyMetrics {
+    param([string]$LogText)
+
+    if ([string]::IsNullOrWhiteSpace($LogText)) {
+        return [ordered]@{
+            providerSessionBoundaryReasons = @{}
+            uniqueBoundaryReasonCount = 0
+            promptRefreshModeDistribution = @{}
+            messageCountTrend = @()
+            toolCallSuccessRate = [ordered]@{
+                totalTurns = 0
+                turnsWithTools = 0
+                turnsWithoutTools = 0
+                toolCallRate = 0
+            }
+            websiteSessionRecordDistribution = @{}
+        }
+    }
+
+    $logLines = $LogText -split "`r?`n"
+
+    $boundaryReasonCounts = [ordered]@{}
+    $refreshModeCounts = [ordered]@{}
+    $toolCountTotal = 0
+    $turnsWithTools = 0
+    $messageTrend = @()
+
+    foreach ($line in $logLines) {
+        # Metric 1 & 5: Parse [OpenAISession] Identity diagnostics JSON
+        if ($line -match '\[OpenAISession\] Identity diagnostics:\s*\{.+\}') {
+            $jsonStart = $line.IndexOf('{')
+            if ($jsonStart -ge 0) {
+                try {
+                    $diag = $line.Substring($jsonStart) | ConvertFrom-Json
+                    $reason = [string]$diag.boundaryReason
+                    if (-not [string]::IsNullOrWhiteSpace($reason)) {
+                        if (-not $boundaryReasonCounts.ContainsKey($reason)) {
+                            $boundaryReasonCounts[$reason] = 0
+                        }
+                        $boundaryReasonCounts[$reason]++
+                    }
+                } catch { continue }
+            }
+        }
+
+        # Metric 1, 2 & 5: Parse current provider runtime trace JSON.
+        if ($line -match '\[Forwarder\] Runtime pilot request trace:\s*\{.+\}') {
+            $jsonStart = $line.IndexOf('{')
+            if ($jsonStart -ge 0) {
+                try {
+                    $diag = $line.Substring($jsonStart) | ConvertFrom-Json
+                    $reason = [string]$diag.sessionBoundaryReason
+                    if (-not [string]::IsNullOrWhiteSpace($reason)) {
+                        if (-not $boundaryReasonCounts.ContainsKey($reason)) {
+                            $boundaryReasonCounts[$reason] = 0
+                        }
+                        $boundaryReasonCounts[$reason]++
+                    }
+
+                    $mode = [string]$diag.promptRefreshMode
+                    if (-not [string]::IsNullOrWhiteSpace($mode)) {
+                        if (-not $refreshModeCounts.ContainsKey($mode)) {
+                            $refreshModeCounts[$mode] = 0
+                        }
+                        $refreshModeCounts[$mode]++
+                    }
+
+                    $toolCountTotal++
+                    if ($reason -eq "tool_child") {
+                        $turnsWithTools++
+                    }
+                } catch { continue }
+            }
+        }
+
+        # Metric 2 & 4: Parse [Qwen] Prompt budget diagnostic JSON
+        if ($line -match '\[Qwen\] Prompt budget diagnostic:\s*\{.+\}') {
+            $jsonStart = $line.IndexOf('{')
+            if ($jsonStart -ge 0) {
+                try {
+                    $diag = $line.Substring($jsonStart) | ConvertFrom-Json
+                    $mode = [string]$diag.promptRefreshMode
+                    if (-not [string]::IsNullOrWhiteSpace($mode)) {
+                        if (-not $refreshModeCounts.ContainsKey($mode)) {
+                            $refreshModeCounts[$mode] = 0
+                        }
+                        $refreshModeCounts[$mode]++
+                    }
+                    $toolCount = 0
+                    if ($diag.toolCount -ne $null) {
+                        $toolCount = [int]$diag.toolCount
+                    }
+                    $toolCountTotal++
+                    if ($toolCount -gt 0) {
+                        $turnsWithTools++
+                    }
+                } catch { continue }
+            }
+        }
+
+        # Metric 3: Parse [Forwarder] Context management applied: N -> M messages
+        if ($line -match '\[Forwarder\] Context management applied:\s*(\d+)\s*->\s*(\d+)\s*messages') {
+            $originalCount = [int]$matches[1]
+            $finalCount = [int]$matches[2]
+            $messageTrend += [ordered]@{
+                originalCount = $originalCount
+                finalCount = $finalCount
+                reduction = $originalCount - $finalCount
+            }
+        }
+    }
+
+    return [ordered]@{
+        providerSessionBoundaryReasons = $boundaryReasonCounts
+        uniqueBoundaryReasonCount = $boundaryReasonCounts.Count
+        promptRefreshModeDistribution = $refreshModeCounts
+        messageCountTrend = $messageTrend
+        toolCallSuccessRate = [ordered]@{
+            totalTurns = $toolCountTotal
+            turnsWithTools = $turnsWithTools
+            turnsWithoutTools = $toolCountTotal - $turnsWithTools
+            toolCallRate = if ($toolCountTotal -gt 0) { [math]::Round(($turnsWithTools / $toolCountTotal) * 100, 1) } else { 0 }
+        }
+        websiteSessionRecordDistribution = $boundaryReasonCounts
+    }
+}
+
+function Report-EconomyMetrics {
+    param([string]$LogText, [string]$OutputDir)
+
+    $metrics = Measure-EconomyMetrics -LogText $LogText
+    $outputPath = Join-Path $OutputDir "economy-metrics.json"
+    Write-JsonFile $outputPath $metrics
+
+    Write-Host "[ECONOMY] Economy metrics written to $outputPath"
+    Write-Host "[ECONOMY] Unique boundary reasons: $($metrics.uniqueBoundaryReasonCount)"
+    Write-Host "[ECONOMY] Prompt refresh modes: $(($metrics.promptRefreshModeDistribution | ConvertTo-Json -Compress))"
+    Write-Host "[ECONOMY] Context management events: $($metrics.messageCountTrend.Count) compressions recorded"
+    Write-Host "[ECONOMY] Tool call turns: $($metrics.toolCallSuccessRate.totalTurns) total, $($metrics.toolCallSuccessRate.turnsWithTools) with tools ($($metrics.toolCallSuccessRate.toolCallRate)%)"
+    Write-Host "[ECONOMY] Session record distribution: $(($metrics.websiteSessionRecordDistribution | ConvertTo-Json -Compress))"
+
+    return $metrics
+}
+
 Write-Host "============================================"
 Write-Host " Chat2API Long Conversation Compaction Probe"
 Write-Host " Model: $Model"
@@ -305,6 +549,7 @@ $storeDir = Join-Path $HOME ".chat2api"
 if (-not (Test-Path $promptPath)) { Fail "Prompt file not found: $promptPath" }
 if (-not (Test-Path $LogPath)) { Fail "Log file not found: $LogPath" }
 if (-not (Test-Path $storeDir)) { Fail "Config store directory not found: $storeDir" }
+if (-not $SkipProviderPreflight) { Invoke-ProviderPreflight $Model }
 if (-not (Get-Command opencode -ErrorAction SilentlyContinue)) { Fail "opencode command not found in PATH" }
 
 $originalContextState = Read-ContextManagementState $storeDir
@@ -382,7 +627,7 @@ try {
     }
     Pass "dev.log proves compaction before final tool probe (summary=$warmupSummaryEvidence sliding=$warmupSlidingEvidence)"
 
-    $runResult = Invoke-OpencodeRun -Executable $opencodeExecutable -Prompt $prompt -ModelName $Model -TimeoutSeconds $TimeoutSeconds -SessionId $sessionId
+    $runResult = Invoke-OpencodeRun -Executable $opencodeExecutable -Prompt $prompt -ModelName $Model -TimeoutSeconds $TimeoutSeconds -SessionId $sessionId -AgentName "long-conversation-probe"
     [System.IO.File]::WriteAllText($finalEventsPath, [string]$runResult.Stdout, [System.Text.UTF8Encoding]::new($false))
     Add-EventTextToFile $eventsPath ([string]$runResult.Stdout)
     [System.IO.File]::WriteAllText($stderrPath, [string]$runResult.Stderr, [System.Text.UTF8Encoding]::new($false))
@@ -584,10 +829,17 @@ try {
     if ($newLogText.IndexOf("[Forwarder] Context management applied:", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
         Fail "Forwarder did not report context-management application in appended dev.log output"
     }
-    if ($newLogText.IndexOf('"hasManagedToolContract":true', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-        Fail "Qwen request assembly trace did not show managed tool contract after compaction"
+    $hasManagedToolContractEvidence =
+        $newLogText.IndexOf('"hasManagedToolContract":true', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $newLogText.IndexOf('"planMode":"managed"', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $newLogText.IndexOf("[High-priority tool action constraint]", [StringComparison]::OrdinalIgnoreCase) -ge 0
+    if (-not $hasManagedToolContractEvidence) {
+        Fail "Provider runtime logs did not show managed tool contract evidence after compaction"
     }
     Pass "dev.log proves compaction occurred before real tool execution (summary=$summaryEvidence sliding=$slidingEvidence)"
+
+    Report-EconomyMetrics -LogText $newLogText -OutputDir $probeDir
+    Pass "Economy metrics captured"
 
     Write-Host "CAPABILITY_PROBE_PASS"
     Write-Host "LONG_CONVERSATION_PROBE_PASS"

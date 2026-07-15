@@ -1,6 +1,6 @@
 import { net } from 'electron'
 import { Readable } from 'stream'
-import { Account, Provider } from '../store/types'
+import { Account, Provider } from '../../store/types.ts'
 
 const PERPLEXITY_URL = 'https://www.perplexity.ai'
 const QUERY_ENDPOINT = `${PERPLEXITY_URL}/rest/sse/perplexity_ask`

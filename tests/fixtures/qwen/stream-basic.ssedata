@@ -1,0 +1,8 @@
+event:message
+data:{"communication":{"sessionid":"sess-fixture-basic-001","reqid":"req-fixture-basic-001"},"data":{"messages":[{"mime_type":"text/plain","content":"Hello from fixture","status":"progressing"}]}}
+
+event:message
+data:{"data":{"messages":[{"mime_type":"text/plain","content":"Hello from fixture with more detail","status":"progressing"}]}}
+
+event:complete
+data:{"data":{"messages":[{"mime_type":"multi_load/iframe","content":"Hello from fixture with more detail","status":"complete"}]}}

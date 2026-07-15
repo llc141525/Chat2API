@@ -57,6 +57,16 @@ export function validateToolCallStructure(input: ToolCallValidatorInput): ToolVa
       })
     }
 
+    const unknown = unknownParameters(call, tool)
+    if (unknown.length > 0) {
+      return invalid({
+        kind: 'schema_validation_failed',
+        selectedProtocol,
+        detail: `Unknown parameter ${unknown.join(', ')}`,
+        toolName,
+      })
+    }
+
     const missing = missingRequiredParameters(call, tool)
     if (missing.length > 0) {
       return invalid({
@@ -115,6 +125,18 @@ function missingRequiredParameters(
   const present = new Set(call.rawParameters.map((parameter) => parameter.rawName))
 
   return required.filter((name) => !present.has(name))
+}
+
+function unknownParameters(
+  call: ExtractedCallStructure,
+  tool: NormalizedToolDefinition,
+): string[] {
+  const props = tool.parameters?.properties as Record<string, unknown> | undefined
+  if (!props) return []
+
+  return call.rawParameters
+    .map((parameter) => parameter.rawName)
+    .filter((name) => !Object.prototype.hasOwnProperty.call(props, name))
 }
 
 function emptyComplexParameters(

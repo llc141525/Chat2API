@@ -788,14 +788,32 @@ export const DEFAULT_DEEPSEEK_MODEL_MAPPINGS: Record<string, ModelMapping> = {
   },
 }
 
+export const DEFAULT_GLM_MODEL_MAPPINGS: Record<string, ModelMapping> = {
+  'GLM-5.2': {
+    requestModel: 'GLM-5.2',
+    actualModel: 'glm-5.2',
+    preferredProviderId: 'glm',
+  },
+  'GLM-5.1': {
+    requestModel: 'GLM-5.1',
+    actualModel: 'glm-5.1',
+    preferredProviderId: 'glm',
+  },
+}
+
+export const DEFAULT_PROVIDER_MODEL_MAPPINGS: Record<string, ModelMapping> = {
+  ...DEFAULT_DEEPSEEK_MODEL_MAPPINGS,
+  ...DEFAULT_GLM_MODEL_MAPPINGS,
+}
+
 export function createDefaultModelMappings(): Record<string, ModelMapping> {
   return Object.fromEntries(
-    Object.entries(DEFAULT_DEEPSEEK_MODEL_MAPPINGS).map(([key, mapping]) => [key, { ...mapping }]),
+    Object.entries(DEFAULT_PROVIDER_MODEL_MAPPINGS).map(([key, mapping]) => [key, { ...mapping }]),
   )
 }
 
 export function isDefaultModelMapping(requestModel: string): boolean {
-  return requestModel in DEFAULT_DEEPSEEK_MODEL_MAPPINGS
+  return requestModel in DEFAULT_PROVIDER_MODEL_MAPPINGS
 }
 
 export function normalizeModelMappingsWithDefaults(

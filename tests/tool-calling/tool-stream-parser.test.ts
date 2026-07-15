@@ -60,6 +60,44 @@ const todowriteTool = {
   source: 'openai' as const,
 }
 
+const taskTool = {
+  name: 'task',
+  parameters: {
+    type: 'object',
+    properties: {
+      description: { type: 'string' },
+      prompt: { type: 'string' },
+    },
+    required: ['description', 'prompt'],
+  },
+  source: 'openai' as const,
+}
+
+const readTool = {
+  name: 'read',
+  parameters: {
+    type: 'object',
+    properties: {
+      filePath: { type: 'string' },
+    },
+    required: ['filePath'],
+  },
+  source: 'openai' as const,
+}
+
+const globTool = {
+  name: 'glob',
+  parameters: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      pattern: { type: 'string' },
+    },
+    required: ['path', 'pattern'],
+  },
+  source: 'openai' as const,
+}
+
 function plan(protocol: ToolCallingPlan['protocol'] = 'managed_xml'): ToolCallingPlan {
   return {
     mode: 'managed',
@@ -167,6 +205,58 @@ function qwenTodowritePlan(): ToolCallingPlan {
       ...base.diagnostics,
       providerId: 'qwen',
       toolCount: 1,
+    },
+  }
+}
+
+function qwenTaskPlan(): ToolCallingPlan {
+  const base = plan('managed_xml')
+  return {
+    ...base,
+    providerId: 'qwen',
+    tools: [taskTool],
+    allowedToolNames: new Set(['task']),
+    catalogSnapshot: {
+      ...base.catalogSnapshot!,
+      tools: [taskTool],
+      allowedToolNames: ['task'],
+    },
+    contract: {
+      ...base.contract,
+      providerId: 'qwen',
+      tools: [taskTool],
+      allowedToolNames: new Set(['task']),
+    },
+    diagnostics: {
+      ...base.diagnostics,
+      providerId: 'qwen',
+      toolCount: 1,
+    },
+  }
+}
+
+function qwenFilesystemPlan(): ToolCallingPlan {
+  const base = plan('managed_xml')
+  return {
+    ...base,
+    providerId: 'qwen',
+    tools: [readTool, globTool],
+    allowedToolNames: new Set(['read', 'glob']),
+    catalogSnapshot: {
+      ...base.catalogSnapshot!,
+      tools: [readTool, globTool],
+      allowedToolNames: ['read', 'glob'],
+    },
+    contract: {
+      ...base.contract,
+      providerId: 'qwen',
+      tools: [readTool, globTool],
+      allowedToolNames: new Set(['read', 'glob']),
+    },
+    diagnostics: {
+      ...base.diagnostics,
+      providerId: 'qwen',
+      toolCount: 2,
     },
   }
 }
@@ -440,6 +530,108 @@ test('Qwen stream repairs todowrite bare object sequence for array parameter', (
   assert.deepEqual(JSON.parse(toolCall.function.arguments), { todos: completeTodos })
   assert.equal(parser.hasEmittedToolCall(), true)
   assert.equal(parser.getObservation().suppressedMalformedToolOutput, false)
+})
+
+test('Qwen stream repairs task tool call with malformed parameter opener', () => {
+  const parser = new ToolStreamParser(qwenTaskPlan())
+  const chunks = parser.push(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="task">'
+    + '<|CHAT2API|parameter name="description"><![CDATA[Explore Chat2Api UI codebase]]></|CHAT2API|parameter>'
+    + '<parameter=prompt><![CDATA[Thoroughly explore the UI files and summarize findings.]]></parameter>'
+    + '</|CHAT2API|invoke></|CHAT2API|tool_calls>',
+    baseChunk,
+  )
+
+  const toolCall = chunks.at(-1)?.choices[0].delta.tool_calls[0]
+  assert.equal(toolCall.function.name, 'task')
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), {
+    description: 'Explore Chat2Api UI codebase',
+    prompt: 'Thoroughly explore the UI files and summarize findings.',
+  })
+  assert.equal(parser.hasEmittedToolCall(), true)
+  assert.equal(parser.getObservation().suppressedMalformedToolOutput, false)
+})
+
+test('Qwen malformed parameter opener does not repair unknown parameters', () => {
+  const parser = new ToolStreamParser(qwenTaskPlan())
+  const chunks = parser.push(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="task">'
+    + '<|CHAT2API|parameter name="description"><![CDATA[Explore Chat2Api UI codebase]]></|CHAT2API|parameter>'
+    + '<parameter=notPrompt><![CDATA[Do not accept this as prompt.]]></parameter>'
+    + '</|CHAT2API|invoke></|CHAT2API|tool_calls>',
+    baseChunk,
+  )
+
+  assert.equal(chunks.some((chunk) => chunk.choices[0].delta.tool_calls), false)
+  assert.equal(parser.hasEmittedToolCall(), false)
+  assert.equal(parser.getObservation().suppressedMalformedToolOutput, true)
+})
+
+test('Qwen stream repairs multiple read invokes closed as functions into separate tool calls', () => {
+  const parser = new ToolStreamParser(qwenFilesystemPlan())
+  const first = parser.push(
+    '<|CHAT2API|tool_calls>'
+    + '<|CHAT2API|invoke name="read"><|CHAT2API|parameter name="filePath">\nE:/Chat2Api/src/renderer/src/App.tsx\n</parameter></function>\n'
+    + '<|CHAT2API|invoke name="read"><|CHAT2API|parameter name="filePath">\nE:/Chat2Api/src/renderer/src/pages/Dashboard.tsx\n</parameter></function>\n'
+    + '<|CHAT2API|invoke name="read"><|CHAT2API|parameter name="filePath">\nE:/Chat2Api/package.json\n</parameter></function>',
+    baseChunk,
+  )
+  assert.deepEqual(first, [])
+
+  const repaired = parser.flush(baseChunk)
+  const toolCalls = repaired.map((chunk) => chunk.choices[0].delta.tool_calls[0])
+
+  assert.equal(toolCalls.length, 3)
+  assert.deepEqual(toolCalls.map((call) => call.function.name), ['read', 'read', 'read'])
+  assert.deepEqual(toolCalls.map((call) => JSON.parse(call.function.arguments)), [
+    { filePath: 'E:/Chat2Api/src/renderer/src/App.tsx' },
+    { filePath: 'E:/Chat2Api/src/renderer/src/pages/Dashboard.tsx' },
+    { filePath: 'E:/Chat2Api/package.json' },
+  ])
+  assert.equal(Array.isArray(JSON.parse(toolCalls[0].function.arguments).filePath), false)
+  assert.equal(parser.hasEmittedToolCall(), true)
+})
+
+test('Qwen stream repairs glob invoke with malformed path opener and function close', () => {
+  const parser = new ToolStreamParser(qwenFilesystemPlan())
+  const first = parser.push(
+    '<|CHAT2API|tool_calls>'
+    + '<|CHAT2API|invoke name="glob"><parameter=path><![CDATA[E:/Chat2Api/src/renderer/src]]></parameter>'
+    + '<|CHAT2API|parameter name="pattern"><![CDATA[**/*.tsx]]></|CHAT2API|parameter></function>',
+    baseChunk,
+  )
+  assert.deepEqual(first, [])
+
+  const repaired = parser.flush(baseChunk)
+  const toolCall = repaired.at(-1)?.choices[0].delta.tool_calls[0]
+
+  assert.equal(toolCall.function.name, 'glob')
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), {
+    path: 'E:/Chat2Api/src/renderer/src',
+    pattern: '**/*.tsx',
+  })
+  assert.equal(parser.hasEmittedToolCall(), true)
+})
+
+test('Qwen function-close repair rejects unknown parameters and missing required parameters', () => {
+  const unknownParser = new ToolStreamParser(qwenFilesystemPlan())
+  unknownParser.push(
+    '<|CHAT2API|tool_calls>'
+    + '<|CHAT2API|invoke name="read"><|CHAT2API|parameter name="filePath">E:/Chat2Api/package.json</parameter>'
+    + '<parameter=extra>ignored</parameter></function>',
+    baseChunk,
+  )
+  assert.deepEqual(unknownParser.flush(baseChunk), [])
+  assert.equal(unknownParser.hasEmittedToolCall(), false)
+
+  const missingParser = new ToolStreamParser(qwenFilesystemPlan())
+  missingParser.push(
+    '<|CHAT2API|tool_calls>'
+    + '<|CHAT2API|invoke name="glob"><parameter=path><![CDATA[E:/Chat2Api/src/renderer/src]]></parameter></function>',
+    baseChunk,
+  )
+  assert.deepEqual(missingParser.flush(baseChunk), [])
+  assert.equal(missingParser.hasEmittedToolCall(), false)
 })
 
 test('generated call IDs stay stable between emitted chunks and final state', () => {

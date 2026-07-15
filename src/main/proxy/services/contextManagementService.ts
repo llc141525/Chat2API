@@ -10,6 +10,7 @@ import type { ChatMessage } from '../types'
 import { preserveToolExchangePairs } from '../contextMessageMetadata.ts'
 import { hasGeneralToolPromptSignature } from '../constants/signatures.ts'
 import { detectSummaryContamination } from './summarySanitizer.ts'
+import { buildWorkflowLedgerHandoffMessage } from './workflowLedger.ts'
 
 /**
  * Sliding Window Strategy Configuration
@@ -55,10 +56,12 @@ export interface ContextManagementConfig {
 export type StrategySubkind =
   | 'not_applicable'
   | 'summary_success'
+  | 'summary_fallback_local'
   | 'summary_generator_missing'
   | 'summary_generator_failed'
   | 'summary_not_needed'
   | 'summary_contaminated'
+  | 'summary_skipped_active_tool_workflow'
 
 /**
  * Strategy Execution Result
@@ -81,6 +84,62 @@ export interface ContextProcessResult {
   finalCount: number
   strategyResults: StrategyResult[]
   summaryGenerated?: boolean
+}
+
+function isUnusableSummary(summary: string): boolean {
+  const normalized = summary.trim().toLowerCase()
+  if (normalized.length === 0) return true
+
+  const compact = normalized.replace(/\s+/g, ' ')
+  return [
+    'no conversation to summarize',
+    'there is no conversation to summarize',
+    'nothing to summarize',
+    'no content to summarize',
+    '没有可总结的对话',
+    '没有需要总结的对话',
+    '无对话可总结',
+    '没有内容可总结',
+  ].some(phrase => compact === phrase || compact === `${phrase}.` || compact === `${phrase}。`)
+}
+
+function getTextContent(content: ChatMessage['content']): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+
+  return content
+    .filter(part => part?.type === 'text' && typeof part.text === 'string')
+    .map(part => part.text)
+    .join('\n')
+}
+
+function normalizeSummarySnippet(text: string, maxLength = 220): string {
+  const normalized = text
+    .replace(/\s+/g, ' ')
+    .replace(/<\|CHAT2API\|[\s\S]*?<\/\|CHAT2API\|tool_calls>/g, '[managed tool call omitted]')
+    .trim()
+
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, maxLength - 1)}…`
+}
+
+function buildLocalFallbackSummary(messages: ChatMessage[]): string {
+  const entries = messages
+    .map((message, index) => {
+      const snippet = normalizeSummarySnippet(getTextContent(message.content))
+      if (!snippet) return null
+      return `${index + 1}. ${message.role.toUpperCase()}: ${snippet}`
+    })
+    .filter((entry): entry is string => entry !== null)
+    .slice(0, 12)
+
+  const omitted = Math.max(0, messages.length - entries.length)
+  return [
+    '[Local fallback summary: external summary generation failed or returned unusable output.]',
+    `Compressed message count: ${messages.length}.`,
+    ...entries,
+    ...(omitted > 0 ? [`... ${omitted} additional older message(s) omitted.`] : []),
+  ].join('\n')
 }
 
 /**
@@ -189,17 +248,53 @@ function isSettledAssistantReply(message: ChatMessage): boolean {
 }
 
 const MAX_ACTIVE_TOOL_WORKFLOW_MESSAGES = 6
+const MAX_PINNED_SKILL_INSTRUCTION_EXCHANGES = 1
+
+interface MessageSelection {
+  retainedMessages: ChatMessage[]
+  excludedMessages: ChatMessage[]
+  droppedMessages: ChatMessage[]
+  suppressedToolCallIds: Set<string>
+  replacements: Map<ChatMessage, ChatMessage>
+}
+
+function countAssistantToolMessages(messages: ChatMessage[]): number {
+  return messages.filter(
+    message => message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0
+  ).length
+}
+
+function countToolResultMessages(messages: ChatMessage[]): number {
+  return messages.filter(
+    message => message.role === 'tool' && typeof message.tool_call_id === 'string'
+  ).length
+}
+
+function logContextManagementDiagnostic(label: string, payload: Record<string, boolean | number | string>): void {
+  console.log(`[ContextManagementService] ${label}:`, JSON.stringify(payload))
+}
 
 function collectPinnedInstructionToolMessages(messages: ChatMessage[]): ChatMessage[] {
   const pinnedToolCallIds = new Set<string>()
 
-  for (const message of messages) {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const message = messages[messageIndex]
     if (message.role !== 'assistant') continue
 
-    for (const call of message.tool_calls ?? []) {
-      if (call?.id && call.function?.name === 'skill') {
-        pinnedToolCallIds.add(call.id)
+    for (let callIndex = (message.tool_calls?.length ?? 0) - 1; callIndex >= 0; callIndex--) {
+      const call = message.tool_calls?.[callIndex]
+      if (!call?.id || call.function?.name !== 'skill') {
+        continue
       }
+
+      pinnedToolCallIds.add(call.id)
+      if (pinnedToolCallIds.size >= MAX_PINNED_SKILL_INSTRUCTION_EXCHANGES) {
+        break
+      }
+    }
+
+    if (pinnedToolCallIds.size >= MAX_PINNED_SKILL_INSTRUCTION_EXCHANGES) {
+      break
     }
   }
 
@@ -218,7 +313,202 @@ function collectPinnedInstructionToolMessages(messages: ChatMessage[]): ChatMess
   })
 }
 
-function collectActiveToolWorkflowMessages(messages: ChatMessage[]): ChatMessage[] {
+function cloneAssistantWithSelectedToolCalls(
+  message: ChatMessage,
+  selectedToolCallIds: Set<string>
+): ChatMessage {
+  const originalToolCalls = message.tool_calls ?? []
+  const selectedToolCalls = originalToolCalls.filter(
+    call => call?.id && selectedToolCallIds.has(call.id)
+  )
+
+  if (selectedToolCalls.length === originalToolCalls.length) {
+    return message
+  }
+
+  return {
+    ...message,
+    tool_calls: selectedToolCalls,
+  }
+}
+
+function getAssistantToolCallIds(message: ChatMessage): string[] {
+  if (message.role !== 'assistant') {
+    return []
+  }
+
+  return (message.tool_calls ?? [])
+    .map(call => call?.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0)
+}
+
+function isCompletedToolExchangeGroup(group: ChatMessage[]): boolean {
+  const assistant = group.find(
+    message => message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0
+  )
+  if (!assistant) {
+    return false
+  }
+
+  const toolCallIds = new Set(
+    (assistant.tool_calls ?? [])
+      .map(call => call?.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+  )
+
+  if (toolCallIds.size === 0) {
+    return false
+  }
+
+  const matchedToolResultIds = new Set(
+    group
+      .filter(message => message.role === 'tool' && typeof message.tool_call_id === 'string')
+      .map(message => message.tool_call_id)
+      .filter((toolCallId): toolCallId is string => typeof toolCallId === 'string' && toolCallId.length > 0)
+  )
+
+  return [...toolCallIds].every(toolCallId => matchedToolResultIds.has(toolCallId))
+}
+
+function isPartialToolExchangeGroup(group: ChatMessage[]): boolean {
+  const assistant = group.find(
+    message => message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0
+  )
+  if (!assistant) {
+    return false
+  }
+
+  const toolCallIds = new Set(
+    (assistant.tool_calls ?? [])
+      .map(call => call?.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+  )
+
+  if (toolCallIds.size === 0) {
+    return false
+  }
+
+  const matchedToolResultIds = new Set(
+    group
+      .filter(message => message.role === 'tool' && typeof message.tool_call_id === 'string')
+      .map(message => message.tool_call_id)
+      .filter((toolCallId): toolCallId is string => typeof toolCallId === 'string' && toolCallId.length > 0)
+  )
+
+  return [...toolCallIds].some(toolCallId => !matchedToolResultIds.has(toolCallId))
+}
+
+function isSkillInstructionExchangeGroup(group: ChatMessage[]): boolean {
+  return group.some(
+    message => message.role === 'assistant'
+      && (message.tool_calls ?? []).some(call => call.function?.name === 'skill')
+  )
+}
+
+function buildCompletedToolExchangeHandoffMessage(
+  groups: ChatMessage[][],
+  options?: {
+    latestSkillInstructionPinned?: boolean
+    retainedGroups?: ChatMessage[][]
+  }
+): ChatMessage {
+  return buildWorkflowLedgerHandoffMessage({
+    groups,
+    latestSkillInstructionPinned: options?.latestSkillInstructionPinned,
+    retainedGroups: options?.retainedGroups,
+  })
+}
+
+function buildBoundedActiveToolGroupSelection(
+  group: ChatMessage[],
+  budget: number
+): MessageSelection {
+  if (group.length === 0 || budget <= 0) {
+    return {
+      retainedMessages: [],
+      excludedMessages: group,
+      droppedMessages: [],
+      suppressedToolCallIds: new Set(),
+      replacements: new Map(),
+    }
+  }
+
+  const assistant = group.find(
+    message => message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0
+  )
+
+  if (!assistant) {
+    return {
+      retainedMessages: group.slice(-budget),
+      excludedMessages: group,
+      droppedMessages: [],
+      suppressedToolCallIds: new Set(),
+      replacements: new Map(),
+    }
+  }
+
+  if (group.length <= budget) {
+    return {
+      retainedMessages: group,
+      excludedMessages: group,
+      droppedMessages: [],
+      suppressedToolCallIds: new Set(),
+      replacements: new Map(),
+    }
+  }
+
+  const toolResults = group.filter(
+    (message) => message.role === 'tool' && typeof message.tool_call_id === 'string'
+  )
+
+  if (budget === 1) {
+    const lastToolCallId = assistant.tool_calls?.at(-1)?.id
+    const replacements = new Map<ChatMessage, ChatMessage>()
+
+    if (lastToolCallId) {
+      replacements.set(
+        assistant,
+        cloneAssistantWithSelectedToolCalls(assistant, new Set([lastToolCallId]))
+      )
+    }
+
+    return {
+      retainedMessages: [assistant],
+      excludedMessages: group,
+      droppedMessages: [],
+      suppressedToolCallIds: new Set(
+        getAssistantToolCallIds(assistant).filter(toolCallId => toolCallId !== lastToolCallId)
+      ),
+      replacements,
+    }
+  }
+
+  const selectedToolResults = toolResults.slice(-(budget - 1))
+  const selectedToolCallIds = new Set(
+    selectedToolResults
+      .map(message => message.tool_call_id)
+      .filter((toolCallId): toolCallId is string => typeof toolCallId === 'string' && toolCallId.length > 0)
+  )
+
+  const assistantReplacement = cloneAssistantWithSelectedToolCalls(assistant, selectedToolCallIds)
+  const replacements = new Map<ChatMessage, ChatMessage>()
+
+  if (assistantReplacement !== assistant) {
+    replacements.set(assistant, assistantReplacement)
+  }
+
+  return {
+    retainedMessages: [assistant, ...selectedToolResults],
+    excludedMessages: group,
+    droppedMessages: [],
+    suppressedToolCallIds: new Set(
+      getAssistantToolCallIds(assistant).filter(toolCallId => !selectedToolCallIds.has(toolCallId))
+    ),
+    replacements,
+  }
+}
+
+function collectActiveToolWorkflowMessages(messages: ChatMessage[]): MessageSelection {
   const lastSettledAssistantIndex = [...messages]
     .map((message, index) => ({ message, index }))
     .reverse()
@@ -229,10 +519,156 @@ function collectActiveToolWorkflowMessages(messages: ChatMessage[]): ChatMessage
   const hasActiveToolWorkflow = suffix.some(isToolWorkflowMessage)
 
   if (!hasActiveToolWorkflow) {
-    return []
+    return {
+      retainedMessages: [],
+      excludedMessages: [],
+      droppedMessages: [],
+      suppressedToolCallIds: new Set(),
+      replacements: new Map(),
+    }
   }
 
-  return suffix.slice(-MAX_ACTIVE_TOOL_WORKFLOW_MESSAGES)
+  const groups = groupTrimableMessages(suffix).filter(
+    group => group.some(isToolWorkflowMessage)
+  )
+
+  if (groups.length === 0) {
+    return {
+      retainedMessages: [],
+      excludedMessages: [],
+      droppedMessages: [],
+      suppressedToolCallIds: new Set(),
+      replacements: new Map(),
+    }
+  }
+
+  const excludedMessages = groups.flat()
+  const droppedMessages: ChatMessage[] = []
+  const suppressedToolCallIds = new Set<string>()
+  const retainedGroups: ChatMessage[][] = []
+  const replacements = new Map<ChatMessage, ChatMessage>()
+  const retainedGroupIndexes = new Set<number>()
+  const latestSkillInstructionGroupIndex = [...groups]
+    .map((group, index) => ({ group, index }))
+    .reverse()
+    .find(({ group }) => isSkillInstructionExchangeGroup(group))
+    ?.index
+  let usedCount = 0
+  const shouldCollapseCompletedHistory = groups.length > 2
+  const postPinnedPartialGroupIndexes = latestSkillInstructionGroupIndex === undefined
+    ? []
+    : groups
+      .map((group, index) => ({ group, index }))
+      .filter(({ index, group }) =>
+        index > latestSkillInstructionGroupIndex && isPartialToolExchangeGroup(group)
+      )
+      .map(({ index }) => index)
+      .reverse()
+  const shouldRetainOnlyPartialPostSkillGroups =
+    latestSkillInstructionGroupIndex !== undefined
+  const iterationIndexes = shouldRetainOnlyPartialPostSkillGroups
+    ? postPinnedPartialGroupIndexes
+    : shouldCollapseCompletedHistory
+      ? [groups.length - 1]
+    : Array.from({ length: groups.length }, (_, offset) => groups.length - 1 - offset)
+
+  if (
+    latestSkillInstructionGroupIndex !== undefined
+    && !retainedGroupIndexes.has(latestSkillInstructionGroupIndex)
+  ) {
+    const latestSkillInstructionGroup = groups[latestSkillInstructionGroupIndex]
+    retainedGroups.unshift(latestSkillInstructionGroup)
+    retainedGroupIndexes.add(latestSkillInstructionGroupIndex)
+    usedCount += latestSkillInstructionGroup.length
+  }
+
+  for (const index of iterationIndexes) {
+    if (retainedGroupIndexes.has(index)) {
+      continue
+    }
+
+    const group = groups[index]
+    const remainingBudget = MAX_ACTIVE_TOOL_WORKFLOW_MESSAGES - usedCount
+
+    if (remainingBudget <= 0) {
+      break
+    }
+
+    if (group.length <= remainingBudget) {
+      retainedGroups.unshift(group)
+      retainedGroupIndexes.add(index)
+      usedCount += group.length
+      continue
+    }
+
+    if (retainedGroups.length === 0) {
+      const selection = buildBoundedActiveToolGroupSelection(group, remainingBudget)
+      retainedGroups.unshift(selection.retainedMessages)
+      retainedGroupIndexes.add(index)
+      for (const [original, replacement] of selection.replacements.entries()) {
+        replacements.set(original, replacement)
+      }
+      for (const toolCallId of selection.suppressedToolCallIds) {
+        suppressedToolCallIds.add(toolCallId)
+      }
+    }
+    break
+  }
+
+  const summarizedGroups = groups.filter(
+    (group, index) =>
+      !retainedGroupIndexes.has(index)
+      && isCompletedToolExchangeGroup(group)
+      && (
+        latestSkillInstructionGroupIndex === undefined
+        || index > latestSkillInstructionGroupIndex
+        || !isSkillInstructionExchangeGroup(group)
+      )
+  )
+  const handoffAnchor = summarizedGroups[0]?.find(
+    message => message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0
+  )
+
+  if (handoffAnchor) {
+    retainedGroups.unshift([handoffAnchor])
+    replacements.set(handoffAnchor, buildCompletedToolExchangeHandoffMessage(
+      summarizedGroups,
+      {
+        latestSkillInstructionPinned: latestSkillInstructionGroupIndex !== undefined,
+        retainedGroups,
+      }
+    ))
+    for (const group of summarizedGroups) {
+      for (const message of group) {
+        if (message.role === 'assistant') {
+          for (const toolCallId of getAssistantToolCallIds(message)) {
+            suppressedToolCallIds.add(toolCallId)
+          }
+        }
+        if (message !== handoffAnchor) {
+          droppedMessages.push(message)
+        }
+      }
+    }
+  }
+
+  logContextManagementDiagnostic('Active tool workflow selection', {
+    suffixLength: suffix.length,
+    toolWorkflowGroupCount: groups.length,
+    retainedGroupCount: retainedGroups.length,
+    summarizedGroupCount: summarizedGroups.length,
+    handoffApplied: Boolean(handoffAnchor),
+    replacementCount: replacements.size,
+    latestSkillInstructionGroupPinned: latestSkillInstructionGroupIndex !== undefined,
+  })
+
+  return {
+    retainedMessages: retainedGroups.flat(),
+    excludedMessages,
+    droppedMessages,
+    suppressedToolCallIds,
+    replacements,
+  }
 }
 
 function preserveOriginalOrder(
@@ -241,6 +677,92 @@ function preserveOriginalOrder(
 ): ChatMessage[] {
   const keptSet = new Set<ChatMessage>(keptMessages)
   return messages.filter(message => keptSet.has(message))
+}
+
+function applyMessageReplacements(
+  messages: ChatMessage[],
+  replacements: Map<ChatMessage, ChatMessage>
+): ChatMessage[] {
+  if (replacements.size === 0) {
+    return messages
+  }
+
+  return messages.map(message => replacements.get(message) ?? message)
+}
+
+function applyDroppedMessages(
+  messages: ChatMessage[],
+  droppedMessages: ChatMessage[]
+): ChatMessage[] {
+  if (droppedMessages.length === 0) {
+    return messages
+  }
+
+  const droppedSet = new Set<ChatMessage>(droppedMessages)
+  return messages.filter(message => !droppedSet.has(message))
+}
+
+function groupTrimableMessages(messages: ChatMessage[]): ChatMessage[][] {
+  const groups: ChatMessage[][] = []
+
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
+
+    if (message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0) {
+      const toolCallIds = new Set(
+        (message.tool_calls ?? [])
+          .map(call => call?.id)
+          .filter((id): id is string => typeof id === 'string' && id.length > 0)
+      )
+      const group = [message]
+      let lookahead = index + 1
+
+      while (lookahead < messages.length) {
+        const candidate = messages[lookahead]
+        if (
+          candidate.role === 'tool'
+          && typeof candidate.tool_call_id === 'string'
+          && toolCallIds.has(candidate.tool_call_id)
+        ) {
+          group.push(candidate)
+          lookahead++
+          continue
+        }
+
+        break
+      }
+
+      groups.push(group)
+      index = lookahead - 1
+      continue
+    }
+
+    groups.push([message])
+  }
+
+  return groups
+}
+
+function takeRecentTrimableMessages(messages: ChatMessage[], maxCount: number): ChatMessage[] {
+  if (maxCount <= 0 || messages.length === 0) {
+    return []
+  }
+
+  const groups = groupTrimableMessages(messages)
+  const selectedGroups: ChatMessage[][] = []
+  let usedCount = 0
+
+  for (let index = groups.length - 1; index >= 0; index--) {
+    const group = groups[index]
+    if (usedCount + group.length > maxCount) {
+      break
+    }
+
+    selectedGroups.unshift(group)
+    usedCount += group.length
+  }
+
+  return selectedGroups.flat()
 }
 
 function insertSummaryBeforeRecentMessages(
@@ -299,26 +821,35 @@ export class SlidingWindowStrategy {
       }
     }
 
-    const activeToolWorkflowMessages = collectActiveToolWorkflowMessages(messages)
+    const activeToolWorkflowSelection = collectActiveToolWorkflowMessages(messages)
     const pinnedInstructionToolMessages = collectPinnedInstructionToolMessages(messages)
     const protectedMessages = messages.filter(
       msg => msg.role === 'system'
         || containsToolDefinitions(msg)
-        || activeToolWorkflowMessages.includes(msg)
+        || activeToolWorkflowSelection.retainedMessages.includes(msg)
         || pinnedInstructionToolMessages.includes(msg)
     )
     const trimableMessages = messages.filter(
       msg => msg.role !== 'system'
         && !containsToolDefinitions(msg)
-        && !activeToolWorkflowMessages.includes(msg)
+        && !activeToolWorkflowSelection.excludedMessages.includes(msg)
         && !pinnedInstructionToolMessages.includes(msg)
     )
 
     const maxTrimableMessages = this.config.maxMessages - protectedMessages.length
-    const keptTrimableMessages = trimableMessages.slice(-Math.max(0, maxTrimableMessages))
+    const keptTrimableMessages = takeRecentTrimableMessages(
+      trimableMessages,
+      Math.max(0, maxTrimableMessages)
+    )
 
     // Preserve original insertion order — protected messages must not float to array front
-    const result = preserveOriginalOrder(messages, [...protectedMessages, ...keptTrimableMessages])
+    const result = applyDroppedMessages(
+      applyMessageReplacements(
+        preserveOriginalOrder(messages, [...protectedMessages, ...keptTrimableMessages]),
+        activeToolWorkflowSelection.replacements
+      ),
+      activeToolWorkflowSelection.droppedMessages
+    )
 
     console.log(
       `[SlidingWindowStrategy] Trimmed from ${originalCount} to ${result.length} messages ` +
@@ -360,18 +891,18 @@ export class TokenLimitStrategy {
       }
     }
 
-    const activeToolWorkflowMessages = collectActiveToolWorkflowMessages(messages)
+    const activeToolWorkflowSelection = collectActiveToolWorkflowMessages(messages)
     const pinnedInstructionToolMessages = collectPinnedInstructionToolMessages(messages)
     const protectedMessages = messages.filter(
       msg => msg.role === 'system'
         || containsToolDefinitions(msg)
-        || activeToolWorkflowMessages.includes(msg)
+        || activeToolWorkflowSelection.retainedMessages.includes(msg)
         || pinnedInstructionToolMessages.includes(msg)
     )
     const nonProtectedMessages = messages.filter(
       msg => msg.role !== 'system'
         && !containsToolDefinitions(msg)
-        && !activeToolWorkflowMessages.includes(msg)
+        && !activeToolWorkflowSelection.excludedMessages.includes(msg)
         && !pinnedInstructionToolMessages.includes(msg)
     )
 
@@ -415,7 +946,13 @@ export class TokenLimitStrategy {
         }
       }
       
-      const result = [...trimmedProtected, ...keptNonProtected]
+      const result = applyDroppedMessages(
+        applyMessageReplacements(
+          [...trimmedProtected, ...keptNonProtected],
+          activeToolWorkflowSelection.replacements
+        ),
+        activeToolWorkflowSelection.droppedMessages
+      )
       console.log(
         `[TokenLimitStrategy] Protected exceeded limit - kept ${result.length} messages ` +
           `(trimmed protected + ${keptNonProtected.length} non-protected)`
@@ -449,7 +986,13 @@ export class TokenLimitStrategy {
     }
 
     // Preserve original insertion order — filter original array rather than concatenating buckets
-    const result = preserveOriginalOrder(messages, [...protectedMessages, ...keptNonProtectedMessages])
+    const result = applyDroppedMessages(
+      applyMessageReplacements(
+        preserveOriginalOrder(messages, [...protectedMessages, ...keptNonProtectedMessages]),
+        activeToolWorkflowSelection.replacements
+      ),
+      activeToolWorkflowSelection.droppedMessages
+    )
     const totalTokens = protectedTokens + currentTokens
 
     console.log(
@@ -517,50 +1060,91 @@ export class SummaryStrategy {
     }
 
     if (!this.summaryGenerator) {
-      console.warn('[SummaryStrategy] No summary generator provided, falling back to sliding window')
-      const activeToolWorkflowMessages = collectActiveToolWorkflowMessages(messages)
+      console.warn('[SummaryStrategy] No summary generator provided, using local fallback summary')
+      const activeToolWorkflowSelection = collectActiveToolWorkflowMessages(messages)
       const pinnedInstructionToolMessages = collectPinnedInstructionToolMessages(messages)
       const protectedMessages = messages.filter(
         msg => msg.role === 'system'
           || containsToolDefinitions(msg)
-          || activeToolWorkflowMessages.includes(msg)
+          || activeToolWorkflowSelection.retainedMessages.includes(msg)
           || pinnedInstructionToolMessages.includes(msg)
       )
       const trimableMessages = messages.filter(
         msg => msg.role !== 'system'
           && !containsToolDefinitions(msg)
-          && !activeToolWorkflowMessages.includes(msg)
+          && !activeToolWorkflowSelection.excludedMessages.includes(msg)
           && !pinnedInstructionToolMessages.includes(msg)
       )
-      const recentMessages = trimableMessages.slice(-this.config.keepRecentMessages)
-      const fallbackMessages = preserveOriginalOrder(messages, [...protectedMessages, ...recentMessages])
+      const recentMessages = takeRecentTrimableMessages(
+        trimableMessages,
+        this.config.keepRecentMessages
+      )
+      const oldMessages = trimableMessages.slice(0, trimableMessages.length - recentMessages.length)
+      const fallbackSummaryMessage = buildSummaryMessage(buildLocalFallbackSummary(oldMessages))
+      const fallbackMessages = applyDroppedMessages(
+        applyMessageReplacements(
+          insertSummaryBeforeRecentMessages(
+            messages,
+            protectedMessages,
+            recentMessages,
+            fallbackSummaryMessage
+          ),
+          activeToolWorkflowSelection.replacements
+        ),
+        activeToolWorkflowSelection.droppedMessages
+      )
       return {
         messages: fallbackMessages,
         originalCount,
         processedCount: fallbackMessages.length,
         strategyName: 'summary',
         trimmed: true,
-        subkind: 'summary_generator_missing',
+        subkind: 'summary_fallback_local',
       }
     }
 
-    const activeToolWorkflowMessages = collectActiveToolWorkflowMessages(messages)
+    const activeToolWorkflowSelection = collectActiveToolWorkflowMessages(messages)
     const pinnedInstructionToolMessages = collectPinnedInstructionToolMessages(messages)
     const protectedMessages = messages.filter(
       msg => msg.role === 'system'
         || containsToolDefinitions(msg)
-        || activeToolWorkflowMessages.includes(msg)
+        || activeToolWorkflowSelection.retainedMessages.includes(msg)
         || pinnedInstructionToolMessages.includes(msg)
     )
     const trimableMessages = messages.filter(
       msg => msg.role !== 'system'
         && !containsToolDefinitions(msg)
-        && !activeToolWorkflowMessages.includes(msg)
+        && !activeToolWorkflowSelection.excludedMessages.includes(msg)
         && !pinnedInstructionToolMessages.includes(msg)
     )
 
-    const recentMessages = trimableMessages.slice(-this.config.keepRecentMessages)
-    const oldMessages = trimableMessages.slice(0, -this.config.keepRecentMessages)
+    const recentMessages = takeRecentTrimableMessages(
+      trimableMessages,
+      this.config.keepRecentMessages
+    )
+    const oldMessages = trimableMessages.slice(0, trimableMessages.length - recentMessages.length)
+
+    if (activeToolWorkflowSelection.replacements.size > 0) {
+      const fallbackMessages = applyDroppedMessages(
+        applyMessageReplacements(
+          preserveOriginalOrder(messages, [...protectedMessages, ...recentMessages]),
+          activeToolWorkflowSelection.replacements
+        ),
+        activeToolWorkflowSelection.droppedMessages
+      )
+      console.log(
+        `[SummaryStrategy] Skipping external summary generation during active tool workflow; ` +
+          `using structured handoff (${originalCount} -> ${fallbackMessages.length})`
+      )
+      return {
+        messages: fallbackMessages,
+        originalCount,
+        processedCount: fallbackMessages.length,
+        strategyName: 'summary',
+        trimmed: true,
+        subkind: 'summary_skipped_active_tool_workflow',
+      }
+    }
 
     if (oldMessages.length === 0) {
       return {
@@ -583,8 +1167,8 @@ export class SummaryStrategy {
         this.config.summaryPrompt
       )
 
-      if (summary.trim().length === 0) {
-        throw new Error('Summary generator returned empty summary')
+      if (isUnusableSummary(summary)) {
+        throw new Error(`Summary generator returned unusable summary: ${summary.trim()}`)
       }
 
       // INV-005: Guard against the summarizer reproducing tool catalog content.
@@ -593,27 +1177,45 @@ export class SummaryStrategy {
       if (contamination.contaminated) {
         console.warn(
           `[SummaryStrategy] Summary contamination detected (${contamination.signatures.length} signature(s)) — ` +
-            `falling back to sliding-window for this round`,
+            `using local fallback summary for this round`,
           contamination.signatures.map(h => h.signature)
         )
-        const fallbackMessages = preserveOriginalOrder(messages, [...protectedMessages, ...recentMessages])
+        const fallbackSummaryMessage = buildSummaryMessage(buildLocalFallbackSummary(oldMessages))
+        const fallbackMessages = applyDroppedMessages(
+          applyMessageReplacements(
+            insertSummaryBeforeRecentMessages(
+              messages,
+              protectedMessages,
+              recentMessages,
+              fallbackSummaryMessage
+            ),
+            activeToolWorkflowSelection.replacements
+          ),
+          activeToolWorkflowSelection.droppedMessages
+        )
         return {
           messages: fallbackMessages,
           originalCount,
           processedCount: fallbackMessages.length,
           strategyName: 'summary',
           trimmed: true,
-          subkind: 'summary_contaminated',
+          subkind: 'summary_fallback_local',
         }
       }
 
       const summaryMessage: ChatMessage = buildSummaryMessage(summary)
 
-      const result = insertSummaryBeforeRecentMessages(
-        messages,
-        protectedMessages,
-        recentMessages,
-        summaryMessage
+      const result = applyDroppedMessages(
+        applyMessageReplacements(
+          insertSummaryBeforeRecentMessages(
+            messages,
+            protectedMessages,
+            recentMessages,
+            summaryMessage
+          ),
+          activeToolWorkflowSelection.replacements
+        ),
+        activeToolWorkflowSelection.droppedMessages
       )
 
       console.log(
@@ -631,14 +1233,26 @@ export class SummaryStrategy {
       }
     } catch (error) {
       console.error('[SummaryStrategy] Failed to generate summary:', error)
-      const fallbackMessages = preserveOriginalOrder(messages, [...protectedMessages, ...recentMessages])
+      const fallbackSummaryMessage = buildSummaryMessage(buildLocalFallbackSummary(oldMessages))
+      const fallbackMessages = applyDroppedMessages(
+        applyMessageReplacements(
+          insertSummaryBeforeRecentMessages(
+            messages,
+            protectedMessages,
+            recentMessages,
+            fallbackSummaryMessage
+          ),
+          activeToolWorkflowSelection.replacements
+        ),
+        activeToolWorkflowSelection.droppedMessages
+      )
       return {
         messages: fallbackMessages,
         originalCount,
         processedCount: fallbackMessages.length,
         strategyName: 'summary',
         trimmed: true,
-        subkind: 'summary_generator_failed',
+        subkind: 'summary_fallback_local',
       }
     }
   }
@@ -753,7 +1367,7 @@ export class ContextManagementService {
 
         case 'summary':
           result = await this.summaryStrategy.execute(currentMessages)
-          if (result.subkind === 'summary_success') {
+          if (result.subkind === 'summary_success' || result.subkind === 'summary_fallback_local') {
             summaryGenerated = true
           }
           break
@@ -763,7 +1377,30 @@ export class ContextManagementService {
           continue
       }
 
-      const preservedMessages = preserveToolExchangePairs(currentMessages, result.messages)
+      logContextManagementDiagnostic('Preserve tool exchange pairs before', {
+        strategyName,
+        beforePreserveCount: result.messages.length,
+        beforeToolCallCount: countAssistantToolMessages(result.messages),
+        beforeToolResultCount: countToolResultMessages(result.messages),
+      })
+
+      const activeToolWorkflowSelection = collectActiveToolWorkflowMessages(currentMessages)
+      const preservedMessages = preserveToolExchangePairs(
+        currentMessages,
+        result.messages,
+        { suppressedToolCallIds: activeToolWorkflowSelection.suppressedToolCallIds }
+      )
+
+      logContextManagementDiagnostic('Preserve tool exchange pairs after', {
+        strategyName,
+        beforePreserveCount: result.messages.length,
+        afterPreserveCount: preservedMessages.length,
+        beforeToolCallCount: countAssistantToolMessages(result.messages),
+        afterToolCallCount: countAssistantToolMessages(preservedMessages),
+        beforeToolResultCount: countToolResultMessages(result.messages),
+        afterToolResultCount: countToolResultMessages(preservedMessages),
+      })
+
       result = {
         ...result,
         messages: preservedMessages,

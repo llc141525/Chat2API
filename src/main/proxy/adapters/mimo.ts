@@ -6,7 +6,7 @@
 import axios from 'axios'
 import type { AxiosResponse } from 'axios'
 import { PassThrough } from 'stream'
-import type { Account, Provider } from '../../store/types'
+import type { Account, Provider } from '../../store/types.ts'
 import type { ChatMessage } from '../types.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'

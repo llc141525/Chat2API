@@ -1,16 +1,16 @@
 import { PassThrough } from 'stream'
-import { parseToolCallsFromText } from '../utils/toolParser'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
+import { parseToolCallsFromText } from '../utils/toolParser.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import { getToolProtocol } from '../toolCalling/protocols/index.ts'
-import type { ToolCallingPlan } from '../toolCalling/types'
-import { 
-  createToolCallState, 
-  processStreamContent, 
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import {
+  createToolCallState,
+  processStreamContent,
   flushToolCallBuffer,
   createBaseChunk,
-  ToolCallState 
-} from '../utils/streamToolHandler'
-import type { PerplexityAdapter } from './perplexity'
+  ToolCallState
+} from '../utils/streamToolHandler.ts'
+import type { PerplexityAdapter } from './perplexity.ts'
 
 function filterCitations(content: string): string {
   // Filter out citation markers like [1], [perplexity+1], [perplexity-1], etc.

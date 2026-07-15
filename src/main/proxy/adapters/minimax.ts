@@ -15,10 +15,10 @@ import axios, { AxiosResponse } from 'axios'
 import crypto from 'crypto'
 import { createParser, EventSourceMessage } from 'eventsource-parser'
 import FormData from 'form-data'
-import { Account, Provider } from '../../store/types'
+import { Account, Provider } from '../../store/types.ts'
 
-import { parseToolCallsFromText } from '../utils/toolParser'
-import { getProviderToolProfile } from '../toolCalling/providerProfiles'
+import { parseToolCallsFromText } from '../utils/toolParser.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
 import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import {
   createToolCallState,
@@ -26,9 +26,9 @@ import {
   flushToolCallBuffer,
   createBaseChunk,
   ToolCallState
-} from '../utils/streamToolHandler'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
+} from '../utils/streamToolHandler.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const AGENT_BASE_URL = 'https://agent.minimaxi.com'
 

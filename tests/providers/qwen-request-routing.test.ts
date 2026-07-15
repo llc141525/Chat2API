@@ -77,6 +77,8 @@ test('Qwen request body keeps router query as the latest real user message', () 
   assert.match(transformed.toolManifest!.renderedPrompt, /## Available Tools/)
   assert.match(transformed.toolManifest!.renderedPrompt, /<\|CHAT2API\|tool_calls>/)
   assert.match(transformed.toolManifest!.renderedPrompt, /default_api:read_file/)
+  assert.match(transformed.toolManifest!.renderedPrompt, /parameter name="filePath"/)
+  assert.doesNotMatch(transformed.toolManifest!.renderedPrompt, /parameter name="argument"/)
   assert.match(body.messages[0].content, /修复 glm 无法使用工具的问题/)
 })
 
@@ -172,6 +174,9 @@ test('Qwen request body preserves tool contract after low-threshold summary comp
   assert.match(renderedPrompt, /<\|CHAT2API\|tool_calls>/)
   assert.match(renderedPrompt, /Tool `read`: Read a file/)
   assert.match(renderedPrompt, /Tool `bash`: Run a shell command/)
+  assert.match(renderedPrompt, /Tool `read` exact XML:/)
+  assert.match(renderedPrompt, /<\|CHAT2API\|parameter name="filePath"><!\[CDATA\[filePath_value\]\]><\/\|CHAT2API\|parameter>/)
+  assert.doesNotMatch(renderedPrompt, /parameter name="argument"/)
   assert.equal(body.messages[0].meta_data.ori_query, 'turn 3: run a real read tool now')
 })
 

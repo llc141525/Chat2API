@@ -17,6 +17,7 @@ import {
   DEEPSEEK_PRIMARY_MODELS,
   DEFAULT_SESSION_CONFIG,
   DEFAULT_DEEPSEEK_MODEL_MAPPINGS,
+  DEFAULT_GLM_MODEL_MAPPINGS,
   createDefaultModelMappings,
   isDefaultModelMapping,
   normalizeModelMappingsWithDefaults,
@@ -104,7 +105,7 @@ test('DeepSeek persisted model overrides are migrated away from old built-in ali
   assert.match(storeSource, /modelMappings: builtinConfig\.modelMappings/)
 })
 
-test('DeepSeek feature aliases are seeded as global model mappings', () => {
+test('provider-owned aliases are seeded as global model mappings', () => {
   assert.deepEqual(Object.keys(DEFAULT_DEEPSEEK_MODEL_MAPPINGS), [
     'deepseek-v4-flash-think',
     'deepseek-v4-flash-search',
@@ -127,6 +128,17 @@ test('DeepSeek feature aliases are seeded as global model mappings', () => {
   assert.equal(DEFAULT_DEEPSEEK_MODEL_MAPPINGS['deepseek-reasoner'], undefined)
   assert.equal(DEFAULT_DEEPSEEK_MODEL_MAPPINGS['DeepSeek-R1'], undefined)
   assert.equal(DEFAULT_DEEPSEEK_MODEL_MAPPINGS['DeepSeek-R1-Search'], undefined)
+
+  assert.deepEqual(DEFAULT_GLM_MODEL_MAPPINGS['GLM-5.2'], {
+    requestModel: 'GLM-5.2',
+    actualModel: 'glm-5.2',
+    preferredProviderId: 'glm',
+  })
+  assert.deepEqual(DEFAULT_GLM_MODEL_MAPPINGS['GLM-5.1'], {
+    requestModel: 'GLM-5.1',
+    actualModel: 'glm-5.1',
+    preferredProviderId: 'glm',
+  })
 })
 
 test('runtime defaults mirror extracted running instance session settings', () => {
@@ -146,6 +158,7 @@ test('runtime defaults mirror extracted running instance session settings', () =
 
 test('built-in model mappings are restored and cannot be replaced by custom config', () => {
   assert.equal(isDefaultModelMapping('deepseek-v4-flash-search'), true)
+  assert.equal(isDefaultModelMapping('GLM-5.2'), true)
   assert.equal(isDefaultModelMapping('deepseek-chat'), false)
 
   assert.deepEqual(
@@ -154,6 +167,11 @@ test('built-in model mappings are restored and cannot be replaced by custom conf
         requestModel: 'deepseek-v4-flash-search',
         actualModel: 'tampered',
         preferredProviderId: 'custom',
+      },
+      'GLM-5.2': {
+        requestModel: 'GLM-5.2',
+        actualModel: 'tampered',
+        preferredProviderId: 'zai',
       },
       'custom-alias': {
         requestModel: 'custom-alias',
@@ -397,8 +415,8 @@ test('Z.ai stream handler uses managed tool calling parser for GLM-5.1', () => {
   assert.match(forwardZaiSource, /new ZaiStreamHandler\(actualModel, deleteChatCallback, transformed\.plan\)/)
 
   const zaiAdapterSource = readFileSync(join(root, 'src/main/proxy/adapters/zai.ts'), 'utf8')
-  assert.match(zaiAdapterSource, /import \{ ToolStreamParser \} from '\.\.\/toolCalling\/ToolStreamParser'/)
-  assert.match(zaiAdapterSource, /import type \{ ToolCallingPlan \} from '\.\.\/toolCalling\/types'/)
+  assert.match(zaiAdapterSource, /import \{ ToolStreamParser \} from '\.\.\/toolCalling\/ToolStreamParser(\.ts)?'/)
+  assert.match(zaiAdapterSource, /import type \{ ToolCallingPlan \} from '\.\.\/toolCalling\/types(\.ts)?'/)
   assert.match(zaiAdapterSource, /private toolStreamParser\?: ToolStreamParser/)
   assert.match(zaiAdapterSource, /constructor\(model: string, onEnd\?: \(chatId: string\) => void, toolCallingPlan\?: ToolCallingPlan\)/)
   assert.match(zaiAdapterSource, /this\.toolStreamParser = toolCallingPlan\?\.shouldParseResponse \? new ToolStreamParser\(toolCallingPlan\) : undefined/)

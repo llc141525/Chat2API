@@ -226,6 +226,9 @@ export interface ProxyContext {
   clientIP?: string
   toolCatalogSessionKey?: string
   providerConversationSessionKey?: string
+  providerSessionEpoch?: string
+  parentProviderConversationSessionKey?: string
+  sessionBoundaryReason?: 'normal' | 'client_compact' | 'server_summary' | 'summary_generator' | 'tool_child' | 'subagent_child'
   originalMessages?: ChatMessage[]
   summaryContaminated?: boolean
   summaryRetryAttempted?: boolean

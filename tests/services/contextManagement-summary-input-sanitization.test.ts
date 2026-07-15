@@ -133,7 +133,7 @@ test('SummaryStrategy never exposes tool catalog signatures to the generator', a
   }
 })
 
-test('SummaryStrategy falls back to sliding-window when contamination detected in output', async () => {
+test('SummaryStrategy uses local fallback summary when contamination detected in output', async () => {
   // A generator that replicates a tool catalog signature in its summary output
   const contaminatedGenerator = async (_messages: ChatMessage[]): Promise<string> => {
     return [
@@ -152,15 +152,22 @@ test('SummaryStrategy falls back to sliding-window when contamination detected i
   const history = buildContaminatedHistory()
   const result = await strategy.execute(history)
 
-  assert.equal(result.subkind, 'summary_contaminated',
-    `Expected summary_contaminated subkind, got: ${result.subkind}`)
+  assert.equal(result.subkind, 'summary_fallback_local',
+    `Expected summary_fallback_local subkind, got: ${result.subkind}`)
 
-  // Fallback must not include the contaminated summary message
-  const hasSummaryMsg = result.messages.some(
+  // Fallback must not include the contaminated generator output.
+  const summaryMsg = result.messages.find(
     m => typeof m.content === 'string' && m.content.includes('[Prior conversation summary')
   )
-  assert.equal(hasSummaryMsg, false,
-    'contaminated summary must not appear in fallback result')
+  assert.ok(summaryMsg, 'local fallback summary must appear in fallback result')
+  assert.ok(
+    !(summaryMsg!.content as string).includes('## Available Tools'),
+    'contaminated summary output must not appear in fallback result',
+  )
+  assert.ok(
+    (summaryMsg!.content as string).includes('Local fallback summary'),
+    'fallback result should identify local summary source',
+  )
 })
 
 test('SummaryStrategy injects sanitized summary as isolated system narrative', async () => {

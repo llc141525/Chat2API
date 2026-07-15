@@ -27,6 +27,7 @@ import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
+import { selectProviderMessagesForAssembly } from '../RequestAssembly.ts'
 
 const GLM_API_BASE = 'https://chatglm.cn/chatglm'
 const DEFAULT_ASSISTANT_ID = '65940acff94777010aa6b796'
@@ -151,6 +152,24 @@ export function buildGLMPromptMessagesForTest(
   return (adapter as any).messagesToPrompt(managedToolPrompt.messages, refs, managedToolPrompt.toolsPrompt, isMultiTurn)
 }
 
+export function buildGLMAssemblyPromptMessagesForTest(
+  assembly: import('../RequestAssembly.ts').RequestAssembly,
+  refs: any[] = [],
+  isMultiTurn: boolean = false,
+): { role: string; content: any[] }[] {
+  const adapter = Object.create(GLMAdapter.prototype) as GLMAdapter
+  const messages = [...selectProviderMessagesForAssembly(assembly)] as GLMMessage[]
+  let toolsPrompt = assembly.summaryText ?? ''
+
+  if (assembly.toolManifest) {
+    toolsPrompt = toolsPrompt
+      ? `${toolsPrompt}\n\n${assembly.toolManifest.renderedPrompt}`
+      : assembly.toolManifest.renderedPrompt
+  }
+
+  return (adapter as any).messagesToPrompt(messages, refs, toolsPrompt, isMultiTurn)
+}
+
 function shouldLogPromptPreview(messages: GLMMessage[]): boolean {
   return messages.some((message) =>
     typeof message.content === 'string' &&
@@ -201,7 +220,7 @@ export class GLMAdapter {
     return credentials.refresh_token || credentials.token || ''
   }
 
-  private async acquireToken(): Promise<string> {
+  async acquireToken(): Promise<string> {
     const refreshToken = this.getRefreshToken()
     const cached = tokenCache.get(refreshToken)
     if (cached && Date.now() < cached.expiresAt) {
@@ -634,7 +653,7 @@ export class GLMAdapter {
     const sign = generateSign()
 
     // Build messages from assembly (already clean, no embedded tool contracts)
-    const messages = [...assembly.messages] as GLMMessage[]
+    const messages = [...selectProviderMessagesForAssembly(assembly)] as GLMMessage[]
 
     // Build toolsPrompt from assembly: summary goes first, then tool contract (authoritative)
     let toolsPrompt = ''

@@ -1,5 +1,15 @@
 import type { ToolProtocolId, NormalizedToolDefinition } from './types.ts'
 
+export interface ToolActionConstraint {
+  kind: 'first_skill_required' | 'terminal_final_text_required'
+  toolName: 'skill' | null
+  arguments: {
+    name?: string
+    exactText?: string
+  }
+  reason: string
+}
+
 export interface ToolManifest {
   /** Protocol used to render the prompt (managed_xml, managed_bracket, etc.) */
   protocol: ToolProtocolId
@@ -13,6 +23,8 @@ export interface ToolManifest {
   renderedPrompt: string
   /** Contract header version from provider profile */
   contractHeaderVersion: number
+  /** High-priority one-turn tool action constraint, when active */
+  actionConstraint?: ToolActionConstraint | null
 }
 
 export interface CreateToolManifestInput {
@@ -22,6 +34,7 @@ export interface CreateToolManifestInput {
   tools: NormalizedToolDefinition[]
   renderedPrompt: string
   contractHeaderVersion: number
+  actionConstraint?: ToolActionConstraint | null
 }
 
 export function createToolManifest(input: CreateToolManifestInput): ToolManifest {
@@ -32,5 +45,11 @@ export function createToolManifest(input: CreateToolManifestInput): ToolManifest
     tools: input.tools.map(t => ({ ...t })),
     renderedPrompt: input.renderedPrompt,
     contractHeaderVersion: input.contractHeaderVersion,
+    actionConstraint: input.actionConstraint
+      ? {
+          ...input.actionConstraint,
+          arguments: { ...input.actionConstraint.arguments },
+        }
+      : null,
   }
 }

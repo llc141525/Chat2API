@@ -8,17 +8,17 @@
  * Implements Kimi web API protocol with thinking mode and web search support
  */
 
-import axios, { AxiosResponse } from 'axios'
-import { Account, Provider } from '../../store/types'
+import axios, { type AxiosResponse } from 'axios'
+import type { Account, Provider } from '../../store/types.ts'
 import { PassThrough } from 'stream'
 
-import { parseToolCallsFromText } from '../utils/toolParser'
-import { createBaseChunk } from '../utils/streamToolHandler'
-import { createKimiChatPayload, encodeKimiGrpcFrame } from './providerModelOptions'
-import { getProviderToolProfile } from '../toolCalling/providerProfiles'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
+import { parseToolCallsFromText } from '../utils/toolParser.ts'
+import { createBaseChunk } from '../utils/streamToolHandler.ts'
+import { createKimiChatPayload, encodeKimiGrpcFrame } from './providerModelOptions.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import { getToolProtocol } from '../toolCalling/protocols/index.ts'
-import type { ToolCallingPlan } from '../toolCalling/types'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const KIMI_API_BASE = 'https://www.kimi.com'
 

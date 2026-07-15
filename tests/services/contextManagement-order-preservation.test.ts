@@ -138,14 +138,18 @@ test('SlidingWindow: active tool-workflow suffix is preserved intact', () => {
   const strategy = new SlidingWindowStrategy({ enabled: true, maxMessages: 4 })
   const result = strategy.execute(conversation)
 
+  const workflowMessages = result.messages.filter(
+    message => message.role === 'assistant' || message.role === 'tool'
+  )
+
   assert.deepEqual(
-    result.messages.slice(-5).map(message => ({
+    workflowMessages.slice(-4).map(message => ({
       role: message.role,
       toolCallId: message.tool_call_id ?? null,
       toolCalls: (message.tool_calls ?? []).map(call => call.id),
       content: message.content,
     })),
-    conversation.slice(-5).map(message => ({
+    conversation.slice(-4).map(message => ({
       role: message.role,
       toolCallId: message.tool_call_id ?? null,
       toolCalls: (message.tool_calls ?? []).map(call => call.id),
@@ -258,5 +262,94 @@ test('SummaryStrategy: active tool-workflow suffix is never summarized away', as
       toolCalls: (message.tool_calls ?? []).map(call => call.id),
       content: message.content,
     })),
+  )
+})
+
+test('SummaryStrategy: oversized active tool batch keeps only the newest bounded tool subset', async () => {
+  const toolCalls = Array.from({ length: 9 }, (_, index) => ({
+    id: `call_active_${index}`,
+    type: 'function' as const,
+    function: { name: 'read', arguments: `{"filePath":"active-${index}.txt"}` },
+  }))
+
+  const conversation: ChatMessage[] = [
+    systemMsg('You are a helpful assistant.'),
+    msg('user', 'Earlier question'),
+    msg('assistant', 'Earlier answer'),
+    msg('user', 'Run the big batch'),
+    { role: 'assistant', content: null, tool_calls: toolCalls },
+    ...toolCalls.map((call, index) => ({
+      role: 'tool' as const,
+      tool_call_id: call.id,
+      content: `batch result ${index}`,
+    })),
+  ]
+
+  const dummyGenerator = async (messages: ChatMessage[]) =>
+    `Summary of ${messages.length} messages.`
+
+  const strategy = new SummaryStrategy({ enabled: true, keepRecentMessages: 2 }, dummyGenerator)
+  const result = await strategy.execute(conversation)
+
+  const activeAssistant = result.messages.find(
+    message => message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0
+  )
+  const activeToolIds = (activeAssistant?.tool_calls ?? []).map(call => call.id)
+  const activeToolResults = result.messages.filter(
+    message => message.role === 'tool' && typeof message.tool_call_id === 'string'
+  )
+
+  assert.equal(result.subkind, 'summary_skipped_active_tool_workflow')
+  assert.ok(activeAssistant, 'expected active assistant tool call message to survive')
+  assert.ok(activeToolIds.length > 0 && activeToolIds.length < toolCalls.length,
+    `expected bounded active tool subset, got ${activeToolIds.length} ids`)
+  assert.deepEqual(activeToolIds, toolCalls.slice(-activeToolIds.length).map(call => call.id))
+  assert.deepEqual(activeToolResults.map(message => message.tool_call_id), activeToolIds)
+  assert.ok(result.messages.length <= 10, `expected bounded summary output, got ${result.messages.length} messages`)
+})
+
+test('SummaryStrategy: active tool handoff skips external summary generator', async () => {
+  let generatorCalls = 0
+  const toolCalls = Array.from({ length: 8 }, (_, index) => ({
+    id: `call_handoff_${index}`,
+    type: 'function' as const,
+    function: { name: index === 0 ? 'skill' : 'bash', arguments: index === 0 ? '{"name":"long-conversation-probe"}' : `{"command":"step ${index}"}` },
+  }))
+  const conversation: ChatMessage[] = [
+    systemMsg('You are a helpful assistant.'),
+    msg('user', 'Run long workflow'),
+    ...toolCalls.flatMap((call, index) => [
+      {
+        role: 'assistant' as const,
+        content: null,
+        tool_calls: [call],
+      },
+      {
+        role: 'tool' as const,
+        tool_call_id: call.id,
+        content: index === 0
+          ? '<skill_content name="long-conversation-probe">instructions</skill_content>'
+          : `completed step ${index}`,
+      },
+    ]),
+  ]
+
+  const strategy = new SummaryStrategy({ enabled: true, keepRecentMessages: 2 }, async () => {
+    generatorCalls += 1
+    return 'This should not be called during active tool handoff.'
+  })
+  const result = await strategy.execute(conversation)
+
+  assert.equal(generatorCalls, 0)
+  assert.equal(result.subkind, 'summary_skipped_active_tool_workflow')
+  assert.equal(
+    result.messages.some(message =>
+      typeof message.content === 'string'
+      && (
+        message.content.includes('[Completed tool exchange handoff]')
+        || message.content.includes('[Active skill workflow state checkpoint]')
+      )
+    ),
+    true,
   )
 })

@@ -6,21 +6,106 @@
 import Router from '@koa/router'
 import type { Context } from 'koa'
 import { PassThrough } from 'stream'
-import { ChatCompletionRequest, ChatCompletionResponse, ProxyContext } from '../types'
-import { loadBalancer } from '../loadbalancer'
-import { requestForwarder } from '../forwarder'
-import { streamHandler } from '../stream'
-import { proxyStatusManager } from '../status'
-import { modelMapper } from '../modelMapper'
-import { storeManager } from '../../store/store'
+import type { ChatCompletionRequest, ProxyContext } from '../types.ts'
 import { applyOpenAISessionIdentity } from './openaiSession.ts'
-import { 
-  isAnthropicToolFormat,
-  transformResponseToAnthropic,
-  transformChunkToAnthropic
-} from '../utils/toolFormatConverter'
+
+interface ChatRouteDependencies {
+  getConfig: () => { loadBalanceStrategy: string }
+  getPreferredProvider: (model: string) => string | undefined
+  getPreferredAccount: (model: string) => string | undefined
+  selectAccount: (
+    model: string,
+    strategy: string,
+    preferredProviderId?: string,
+    preferredAccountId?: string,
+  ) => {
+    account: any
+    provider: any
+    actualModel: string
+  } | null
+  recordRequestStart: (model: string, providerId: string, accountId: string) => void
+  forwardChatCompletion: (
+    request: ChatCompletionRequest,
+    account: any,
+    provider: any,
+    actualModel: string,
+    context: ProxyContext,
+  ) => Promise<{
+    success: boolean
+    status?: number
+    headers?: Record<string, string>
+    body?: any
+    stream?: NodeJS.ReadableStream
+    skipTransform?: boolean
+    error?: string
+    latency?: number
+    providerSessionId?: string
+    parentMessageId?: string
+  }>
+}
 
 const router = new Router({ prefix: '/v1/chat' })
+
+type ChatRouteSelection = ReturnType<ChatRouteDependencies['selectAccount']>
+
+interface PreparedChatForwardRequest {
+  request: ChatCompletionRequest
+  selection: NonNullable<ChatRouteSelection>
+  context: ProxyContext
+  result: Awaited<ReturnType<ChatRouteDependencies['forwardChatCompletion']>>
+  startTime: number
+  requestId: string
+}
+
+const defaultChatRouteDependencies: ChatRouteDependencies = {
+  getConfig: () => {
+    throw new Error('default getConfig dependency unavailable before runtime initialization')
+  },
+  getPreferredProvider: () => undefined,
+  getPreferredAccount: () => undefined,
+  selectAccount: () => {
+    throw new Error('default selectAccount dependency unavailable before runtime initialization')
+  },
+  recordRequestStart: () => undefined,
+  forwardChatCompletion: async (request, account, provider, actualModel, context) => {
+    const { requestForwarder } = await import('../forwarder.ts')
+    return requestForwarder.forwardChatCompletion(request, account, provider, actualModel, context)
+  },
+}
+
+async function resolveChatRouteDependencies(
+  deps: ChatRouteDependencies,
+): Promise<ChatRouteDependencies> {
+  if (deps !== defaultChatRouteDependencies) {
+    return deps
+  }
+
+  const [
+    { storeManager },
+    { modelMapper },
+    { loadBalancer },
+    { proxyStatusManager },
+  ] = await Promise.all([
+    import('../../store/store.ts'),
+    import('../modelMapper.ts'),
+    import('../loadbalancer.ts'),
+    import('../status.ts'),
+  ])
+
+  return {
+    getConfig: () => storeManager.getConfig(),
+    getPreferredProvider: (model) => modelMapper.getPreferredProvider(model),
+    getPreferredAccount: (model) => modelMapper.getPreferredAccount(model),
+    selectAccount: (model, strategy, preferredProviderId, preferredAccountId) => loadBalancer.selectAccount(
+      model,
+      strategy,
+      preferredProviderId,
+      preferredAccountId,
+    ),
+    recordRequestStart: (model, providerId, accountId) => proxyStatusManager.recordRequestStart(model, providerId, accountId),
+    forwardChatCompletion: defaultChatRouteDependencies.forwardChatCompletion,
+  }
+}
 
 /**
  * Generate Request ID
@@ -114,7 +199,11 @@ function normalizeTokenCount(value: unknown): number {
 /**
  * Handle Chat Completions Request
  */
-router.post('/completions', async (ctx: Context) => {
+export async function prepareAndForwardChatCompletion(
+  ctx: Context,
+  deps: ChatRouteDependencies = defaultChatRouteDependencies,
+): Promise<PreparedChatForwardRequest | null> {
+  const resolvedDeps = await resolveChatRouteDependencies(deps)
   const startTime = Date.now()
   const requestId = generateRequestId()
   const clientIP = getClientIP(ctx)
@@ -188,11 +277,11 @@ router.post('/completions', async (ctx: Context) => {
     console.log('[Chat] Deep research enabled via X-Deep-Research header')
   }
 
-  const config = storeManager.getConfig()
-  const preferredProviderId = modelMapper.getPreferredProvider(request.model)
-  const preferredAccountId = modelMapper.getPreferredAccount(request.model)
+  const config = resolvedDeps.getConfig()
+  const preferredProviderId = resolvedDeps.getPreferredProvider(request.model)
+  const preferredAccountId = resolvedDeps.getPreferredAccount(request.model)
 
-  const selection = loadBalancer.selectAccount(
+  const selection = resolvedDeps.selectAccount(
     request.model,
     config.loadBalanceStrategy,
     preferredProviderId,
@@ -209,7 +298,7 @@ router.post('/completions', async (ctx: Context) => {
         code: 'no_available_account',
       },
     }
-    return
+    return null
   }
 
   const { account, provider, actualModel } = selection
@@ -231,16 +320,54 @@ router.post('/completions', async (ctx: Context) => {
     ctx.headers as Record<string, string | string[] | undefined>,
   )
 
-  proxyStatusManager.recordRequestStart(request.model, provider.id, account.id)
+  resolvedDeps.recordRequestStart(request.model, provider.id, account.id)
 
-  try {
-    const result = await requestForwarder.forwardChatCompletion(
+  const result = await resolvedDeps.forwardChatCompletion(
+    request,
+    account,
+    provider,
+    actualModel,
+    context,
+  )
+
+  return {
+    request,
+    selection,
+    context,
+    result,
+    startTime,
+    requestId,
+  }
+}
+
+export function createChatCompletionsHandler(
+  deps: ChatRouteDependencies = defaultChatRouteDependencies,
+) {
+  return async (ctx: Context) => {
+    const prepared = await prepareAndForwardChatCompletion(ctx, deps)
+    if (!prepared) {
+      return
+    }
+
+    const [
+      { loadBalancer },
+      { proxyStatusManager },
+      { storeManager },
+    ] = await Promise.all([
+      import('../loadbalancer.ts'),
+      import('../status.ts'),
+      import('../../store/store.ts'),
+    ])
+
+    const {
       request,
-      account,
-      provider,
-      actualModel,
-      context
-    )
+      selection: { account, provider, actualModel },
+      result,
+      startTime,
+      requestId,
+    } = prepared
+
+    try {
 
     const latency = Date.now() - startTime
 
@@ -464,6 +591,7 @@ router.post('/completions', async (ctx: Context) => {
         })
       } else {
         // Need to transform the stream
+        const { streamHandler } = await import('../stream.ts')
         const transformStream = streamHandler.createTransformStream(
           actualModel,
           requestId,
@@ -492,6 +620,10 @@ router.post('/completions', async (ctx: Context) => {
 
       if (result.body) {
         // Check if we need to transform to Anthropic format
+        const {
+          isAnthropicToolFormat,
+          transformResponseToAnthropic,
+        } = await import('../utils/toolFormatConverter.ts')
         if (isAnthropicToolFormat(request.tool_format)) {
           ctx.body = transformResponseToAnthropic(result.body)
           console.log('[Chat] Transformed response to Anthropic tool format')
@@ -520,7 +652,7 @@ router.post('/completions', async (ctx: Context) => {
         }
       }
     }
-  } catch (error) {
+    } catch (error) {
     const latency = Date.now() - startTime
     proxyStatusManager.recordRequestFailure(latency)
 
@@ -580,7 +712,10 @@ router.post('/completions', async (ctx: Context) => {
     })
 
     storeManager.recordRequestInStats(false, latency, request.model, provider.id, account.id)
+    }
   }
-})
+}
+
+router.post('/completions', createChatCompletionsHandler())
 
 export default router

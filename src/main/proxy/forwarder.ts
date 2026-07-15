@@ -30,16 +30,86 @@ import {
   SummaryGenerator,
   type ChatMessage as ContextChatMessage,
 } from './services/contextManagementService.ts'
+import { preserveContextManagedMessageMetadata } from './contextMessageMetadata.ts'
 import {
   executeBoundedAvailabilityRetry,
   rebuildMessagesForSummaryContaminationRetry,
 } from './services/contextManagementRetry.ts'
 import { sanitizeMessagesForSummary, detectSummaryContamination } from './services/summarySanitizer.ts'
+import { cleanupChildProviderSession } from './services/childSessionCleanup.ts'
+import { ProviderRuntime } from './services/ProviderRuntime.ts'
+import {
+  buildChildSessionHandoff,
+  buildServerSummaryEpochSource,
+  renderChildSessionHandoffStateMessage,
+  type ChildSessionHandoff,
+  forkProviderConversationContext,
+} from './sessionBoundary.ts'
+import {
+  getConversationState,
+  getProviderConversationState,
+  setConversationState,
+  setProviderConversationState,
+  shouldUseProviderConversationFallback,
+  type ConversationState,
+} from './services/providerConversationState.ts'
 import { inspectNonStreamAssistantOutput } from './toolCalling/outputInspection.ts'
+import {
+  buildPromptBudgetPolicyInput as buildPromptBudgetPolicyInputBase,
+  decidePromptBudgetPolicy,
+  getPromptBudgetSnapshot,
+  recordPromptBudgetSnapshot,
+  type PromptBudgetPolicyDecision,
+  type PromptBudgetPolicyInput,
+  type PromptBudgetPolicySnapshot,
+  type PromptRefreshMode,
+} from './promptBudgetPolicy.ts'
+import type { ContextProcessResult } from './services/contextManagementService.ts'
+
+export {
+  CONVERSATION_STATE_TTL,
+  conversationStateCache,
+  getConversationState,
+  getProviderConversationState,
+  setConversationState,
+  setProviderConversationState,
+  shouldUseProviderConversationFallback,
+  type ConversationState,
+} from './services/providerConversationState.ts'
 
 function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()
 }
+
+function getSummaryTextContent(content: ContextChatMessage['content']): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+
+  return content
+    .filter(part => part?.type === 'text' && typeof part.text === 'string')
+    .map(part => part.text)
+    .join('\n')
+}
+
+function hasSummarizableSummaryInput(messages: ContextChatMessage[]): boolean {
+  return messages.some((message) => {
+    if (message.role === 'system') return false
+    return getSummaryTextContent(message.content).trim().length > 0
+  })
+}
+
+const DEFAULT_PROVIDER_RUNTIME_PILOT_PROVIDERS = new Set(['qwen', 'glm'])
+const REGISTERED_PROVIDER_RUNTIME_PLUGIN_IDS = new Set([
+  'deepseek',
+  'glm',
+  'kimi',
+  'mimo',
+  'minimax',
+  'perplexity',
+  'qwen',
+  'qwenai',
+  'zai',
+])
 
 type DeepSeekEnvelope = {
   code?: number
@@ -75,45 +145,59 @@ function buildDeepSeekProviderErrorMessage(payload: DeepSeekEnvelope | null | un
   return undefined
 }
 
-/**
- * Conversation state cache for multi-turn support
- * Stores conversation/parent-message IDs keyed by tool session key
- */
-export interface ConversationState {
-  parentMessageId?: string
-  conversationId?: string
-  qwenSessionId?: string
-  qwenParentReqId?: string
-  lastUsedAt: number
+export function buildPromptBudgetPolicyInput(input: {
+  request: ChatCompletionRequest
+  context: ProxyContext
+  provider: Provider
+  account: Account
+  actualModel: string
+  toolSessionKey: string
+  providerConversationStateKey: string
+  transformed: ToolCallingTransformResult
+  previousSnapshot?: PromptBudgetPolicySnapshot
+  skillFingerprint?: string
+}): PromptBudgetPolicyInput {
+  return buildPromptBudgetPolicyInputBase({
+    requestMessages: input.request.messages,
+    sessionBoundaryReason: input.context.sessionBoundaryReason,
+    providerId: input.provider.id,
+    accountId: input.account.id,
+    actualModel: input.actualModel,
+    toolSessionKey: input.toolSessionKey,
+    providerConversationSessionKey: input.providerConversationStateKey,
+    toolCatalogFingerprint: input.transformed.plan.catalogSnapshot?.fingerprint,
+    hasActiveTools: input.transformed.plan.tools.length > 0,
+    hasManagedToolCapableTurn: input.transformed.plan.mode === 'managed' || input.transformed.plan.shouldParseResponse,
+    previousSnapshot: input.previousSnapshot,
+    skillFingerprint: input.skillFingerprint,
+  })
 }
 
-export const CONVERSATION_STATE_TTL = 5 * 60 * 1000
-export const conversationStateCache = new Map<string, ConversationState>()
-
-export function getConversationState(key: string): ConversationState | undefined {
-  const state = conversationStateCache.get(key)
-  if (state && Date.now() - state.lastUsedAt < CONVERSATION_STATE_TTL) {
-    return state
-  }
-  conversationStateCache.delete(key)
-  return undefined
-}
-
-export function setConversationState(key: string, update: Partial<ConversationState>): void {
-  const existing = conversationStateCache.get(key)
-  conversationStateCache.set(key, {
-    ...existing,
-    ...update,
-    lastUsedAt: Date.now(),
-  } as ConversationState)
-}
-
-function hasManagedToolHistory(messages?: ChatCompletionRequest['messages']): boolean {
-  if (!messages || messages.length === 0) return false
-  return messages.some((message) => (
-    (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
-    || (message.role === 'tool' && typeof message.tool_call_id === 'string' && message.tool_call_id.length > 0)
-  ))
+export function computeQwenPromptBudgetDiagnostics(input: {
+  request: ChatCompletionRequest
+  context: ProxyContext
+  provider: Provider
+  account: Account
+  actualModel: string
+  toolSessionKey: string
+  providerConversationStateKey: string
+  transformed: ToolCallingTransformResult
+  skillFingerprint?: string
+}): { policyInput: PromptBudgetPolicyInput; decision: PromptBudgetPolicyDecision } {
+  const previousSnapshot = getPromptBudgetSnapshot(input.providerConversationStateKey)
+  const policyInput = buildPromptBudgetPolicyInput({
+    ...input,
+    previousSnapshot,
+  })
+  const decision = decidePromptBudgetPolicy(policyInput)
+  recordPromptBudgetSnapshot(input.providerConversationStateKey, {
+    providerId: input.provider.id,
+    modelId: input.actualModel,
+    accountId: input.account.id,
+    toolCatalogFingerprint: input.transformed.plan.catalogSnapshot?.fingerprint,
+    skillFingerprint: input.skillFingerprint,
+  })
+  return { policyInput, decision }
 }
 
 /**
@@ -124,34 +208,6 @@ function compactMessagesForRetry(messages: ChatCompletionRequest['messages']): C
   const systemMessages = messages.filter((m) => m.role === 'system')
   const nonSystemMessages = messages.filter((m) => m.role !== 'system')
   return [...systemMessages, ...nonSystemMessages.slice(-20)]
-}
-
-export function getProviderConversationState(input: {
-  primaryKey: string
-  fallbackToolSessionKey?: string | null
-  messages?: ChatCompletionRequest['messages']
-}): ConversationState | undefined {
-  const primary = getConversationState(input.primaryKey)
-  if (primary) return primary
-
-  if (!input.fallbackToolSessionKey || !hasManagedToolHistory(input.messages)) {
-    return undefined
-  }
-
-  return getConversationState(input.fallbackToolSessionKey)
-}
-
-export function setProviderConversationState(input: {
-  primaryKey: string
-  update: Partial<ConversationState>
-  fallbackToolSessionKey?: string | null
-  messages?: ChatCompletionRequest['messages']
-}): void {
-  setConversationState(input.primaryKey, input.update)
-  if (!input.fallbackToolSessionKey || !hasManagedToolHistory(input.messages)) {
-    return
-  }
-  setConversationState(input.fallbackToolSessionKey, input.update)
 }
 
 type ProviderForwarder = {
@@ -176,6 +232,8 @@ export class RequestForwarder {
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
   })
+
+  private providerRuntime = new ProviderRuntime()
 
   private readonly providerForwarders: ProviderForwarder[] = [
     {
@@ -237,15 +295,49 @@ export class RequestForwarder {
   /**
    * Prepare request assembly by transforming the request and building the assembly.
    */
-  private prepareRequest(request: ChatCompletionRequest, provider?: Provider): { assembly: RequestAssembly; transformed: ToolCallingTransformResult } {
-    const transformed = this.transformRequestForPromptToolUse(request, provider)
+  private prepareRequest(
+    request: ChatCompletionRequest,
+    provider?: Provider,
+    contextResult?: ContextProcessResult,
+    toolSessionKey?: string | null
+  ): { assembly: RequestAssembly; transformed: ToolCallingTransformResult } {
+    const transformed = this.transformRequestForPromptToolUse(request, provider, toolSessionKey)
     return {
       assembly: buildRequestAssembly({
         messages: request.messages,
         toolManifest: transformed.toolManifest ?? null,
+        contextResult,
       }),
       transformed,
     }
+  }
+
+  private shouldUseProviderRuntimePilot(provider: Provider): boolean {
+    const gate = String(process.env.CHAT2API_PROVIDER_RUNTIME_PILOT ?? '').toLowerCase()
+    if (gate.length === 0 || ['0', 'false', 'no', 'off'].includes(gate)) {
+      return false
+    }
+
+    const providerId = provider.id.toLowerCase()
+    if (['1', 'true', 'yes', 'on'].includes(gate)) {
+      return DEFAULT_PROVIDER_RUNTIME_PILOT_PROVIDERS.has(providerId)
+    }
+    if (gate === 'all' || gate === '*') {
+      return REGISTERED_PROVIDER_RUNTIME_PLUGIN_IDS.has(providerId)
+    }
+
+    const enabledProviderIds = new Set(
+      gate
+        .split(',')
+        .map(part => part.trim())
+        .filter(Boolean)
+    )
+    return enabledProviderIds.has(providerId)
+  }
+
+  private shouldConsumeParentChildSessionHandoff(context: ProxyContext): boolean {
+    const boundary = context.sessionBoundaryReason ?? 'normal'
+    return boundary !== 'tool_child' && boundary !== 'subagent_child'
   }
 
   /**
@@ -546,17 +638,17 @@ export class RequestForwarder {
           console.log(`[SummaryGenerator] Sanitized input: dropped=${droppedCount} stripped=${strippedSignatureCount}`)
         }
 
+        if (!hasSummarizableSummaryInput(sanitizedMessages)) {
+          console.warn(
+            '[SummaryGenerator] Sanitized summary input has no user/assistant/tool history; using local fallback without provider request'
+          )
+          return ''
+        }
+
         const conversationText = sanitizedMessages
           .map(msg => {
             const role = msg.role.toUpperCase()
-            const content = typeof msg.content === 'string'
-              ? msg.content
-              : Array.isArray(msg.content)
-                ? msg.content
-                    .filter(part => part.type === 'text' && part.text)
-                    .map(part => part.text)
-                    .join('\n')
-                : ''
+            const content = getSummaryTextContent(msg.content)
             return `${role}: ${content}`
           })
           .join('\n\n')
@@ -577,12 +669,23 @@ export class RequestForwarder {
           temperature: 0.3,
         }
 
+        const summaryContext = forkProviderConversationContext(context, {
+          reason: 'summary_generator',
+          epochSource: {
+            requestId: context.requestId,
+            providerId: provider.id,
+            accountId: account.id,
+            actualModel,
+            messageCount: messages.length,
+          },
+        })
+
         const result = await this.doForward(
           summaryRequest,
           account,
           provider,
           actualModel,
-          context
+          summaryContext
         )
 
         if (result.success && result.body) {
@@ -637,6 +740,8 @@ export class RequestForwarder {
       let modifiedRequest = compactedForRetry
         ? { ...request, messages: compactMessagesForRetry(request.messages) }
         : request
+      let forwardContext = context
+      let contextProcessResult: ContextProcessResult | undefined
 
       if (config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
         try {
@@ -656,6 +761,7 @@ export class RequestForwarder {
           const processResult = await contextService.process(
             this.toContextMessages(modifiedRequest.messages)
           )
+          contextProcessResult = processResult
           context.summaryContaminated = processResult.strategyResults.some(
             result => result.subkind === 'summary_contaminated'
           )
@@ -680,6 +786,19 @@ export class RequestForwarder {
                 this.toRequestMessages(processResult.messages)
               ),
             }
+
+            if (processResult.summaryGenerated) {
+              forwardContext = forkProviderConversationContext(context, {
+                reason: 'server_summary',
+                epochSource: buildServerSummaryEpochSource({
+                  model: actualModel,
+                  originalMessageCount: processResult.originalCount,
+                  finalMessageCount: processResult.finalCount,
+                  messages: modifiedRequest.messages,
+                  strategyResults: processResult.strategyResults,
+                }),
+              })
+            }
           }
         } catch (error) {
           console.error('[Forwarder] Context management failed:', error)
@@ -687,7 +806,7 @@ export class RequestForwarder {
       }
 
       try {
-        const result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
+        const result = await this.doForward(modifiedRequest, account, provider, actualModel, forwardContext, contextProcessResult)
 
         if (result.success) {
           return result
@@ -725,9 +844,51 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    context: ProxyContext
+    context: ProxyContext,
+    contextResult?: ContextProcessResult
   ): Promise<ForwardResult> {
     const startTime = Date.now()
+
+    if (this.shouldUseProviderRuntimePilot(provider)) {
+      const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
+      const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
+      const { assembly, transformed } = this.prepareRequest(request, provider, contextResult, toolSessionKey)
+      const promptBudgetDiagnostics = provider.id.toLowerCase() === 'qwen'
+        ? computeQwenPromptBudgetDiagnostics({
+            request,
+            context,
+            provider,
+            account,
+            actualModel,
+            toolSessionKey,
+            providerConversationStateKey: conversationStateKey,
+            transformed,
+          })
+        : undefined
+      console.log('[Forwarder] Runtime pilot request trace:', JSON.stringify({
+        providerId: provider.id,
+        sessionBoundaryReason: context.sessionBoundaryReason ?? 'normal',
+        toolSessionKeyPresent: toolSessionKey.length > 0,
+        providerConversationSessionKeyIsChild: !this.shouldConsumeParentChildSessionHandoff(context),
+        parentProviderConversationSessionKeyPresent: typeof context.parentProviderConversationSessionKey === 'string'
+          && context.parentProviderConversationSessionKey.length > 0,
+        promptRefreshMode: promptBudgetDiagnostics?.decision.promptRefreshMode ?? null,
+      }))
+
+      return this.providerRuntime.forward({
+        request,
+        account,
+        provider,
+        actualModel,
+        context,
+        assembly,
+        transformed,
+        promptRefreshMode: promptBudgetDiagnostics?.decision.promptRefreshMode,
+        conversationStateKey,
+        toolSessionKey,
+        startTime,
+      })
+    }
 
     const dedicatedForwarder = this.providerForwarders.find(forwarder => forwarder.matches(provider))
     if (dedicatedForwarder) {
@@ -816,10 +977,12 @@ export class RequestForwarder {
       // Check for existing conversation state (multi-turn)
       const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
       const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
+      const allowProviderStateFallback = shouldUseProviderConversationFallback(context)
       const convState = getProviderConversationState({
         primaryKey: conversationStateKey,
         fallbackToolSessionKey: toolSessionKey,
         messages: request.messages,
+        allowFallback: allowProviderStateFallback,
       })
 
       const adapter = new DeepSeekAdapter(provider, account)
@@ -888,9 +1051,11 @@ export class RequestForwarder {
         const lastMessageId = handler.getLastMessageId()
         if (lastMessageId) {
           setProviderConversationState({
+            context,
             primaryKey: conversationStateKey,
             fallbackToolSessionKey: toolSessionKey,
             messages: request.messages,
+            mirrorToFallback: allowProviderStateFallback,
             update: { parentMessageId: lastMessageId },
           })
         }
@@ -989,10 +1154,12 @@ export class RequestForwarder {
       // Check for existing conversation state (multi-turn)
       const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
       const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      const convState = getProviderConversationState({
-        primaryKey: conversationStateKey,
-        fallbackToolSessionKey: toolSessionKey,
+      const convState = this.providerRuntime.readSessionState({
+        conversationStateKey,
+        toolSessionKey,
+        context,
         messages: request.messages,
+        providerStateShape: 'glm',
       })
 
       const adapter = new GLMAdapter(provider, account)
@@ -1058,14 +1225,16 @@ export class RequestForwarder {
         const transformedStream = await handler.handleStream(response.data, response)
 
         // If delete session after chat is enabled, we need to handle it after stream ends
+        const runtime = this.providerRuntime
         if (shouldDeleteSession()) {
           const originalEnd = transformedStream.end.bind(transformedStream)
           transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
             const convId = handler.getConversationId()
             if (convId) {
-              setProviderConversationState({
-                primaryKey: conversationStateKey,
-                fallbackToolSessionKey: toolSessionKey,
+              runtime.writeSessionState({
+                conversationStateKey,
+                toolSessionKey,
+                context,
                 messages: request.messages,
                 update: { conversationId: convId },
               })
@@ -1081,9 +1250,10 @@ export class RequestForwarder {
           transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
             const convId = handler.getConversationId()
             if (convId) {
-              setProviderConversationState({
-                primaryKey: conversationStateKey,
-                fallbackToolSessionKey: toolSessionKey,
+              runtime.writeSessionState({
+                conversationStateKey,
+                toolSessionKey,
+                context,
                 messages: request.messages,
                 update: { conversationId: convId },
               })
@@ -1263,14 +1433,29 @@ export class RequestForwarder {
     context: ProxyContext
   ): Promise<ForwardResult> {
     try {
-      const { assembly, transformed } = this.prepareRequest(request, provider)
       const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
       const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
-      const convState = getProviderConversationState({
-        primaryKey: conversationStateKey,
-        fallbackToolSessionKey: toolSessionKey,
+      const convState = this.providerRuntime.readSessionState({
+        conversationStateKey,
+        toolSessionKey,
+        context,
         messages: request.messages,
+        providerStateShape: 'qwen',
       })
+      const consumeParentHandoff = this.shouldConsumeParentChildSessionHandoff(context)
+      const requestWithParentHandoff = consumeParentHandoff && convState?.childSessionHandoff
+        ? {
+            ...request,
+            messages: [
+              {
+                role: 'system' as const,
+                content: renderChildSessionHandoffStateMessage(convState.childSessionHandoff),
+              },
+              ...request.messages,
+            ],
+          }
+        : request
+      const { assembly, transformed } = this.prepareRequest(requestWithParentHandoff, provider)
 
       const adapter = new QwenAdapter(provider, account)
       let responseResult: { response: any; sessionId: string; reqId: string }
@@ -1278,34 +1463,52 @@ export class RequestForwarder {
         sessionId: convState?.qwenSessionId,
         parentReqId: convState?.qwenParentReqId,
       }
+      const promptBudgetDiagnostics = computeQwenPromptBudgetDiagnostics({
+        request: requestWithParentHandoff,
+        context,
+        provider,
+        account,
+        actualModel,
+        toolSessionKey,
+        providerConversationStateKey: conversationStateKey,
+        transformed,
+      })
+      console.log('[Qwen] Prompt budget diagnostic:', JSON.stringify({
+        promptRefreshMode: promptBudgetDiagnostics.decision.promptRefreshMode,
+        promptBudgetReasons: promptBudgetDiagnostics.decision.reasons,
+        sessionBoundaryReason: context.sessionBoundaryReason ?? 'normal',
+        catalogFingerprint: transformed.plan.catalogSnapshot?.fingerprint ?? null,
+        toolCount: transformed.plan.tools.length,
+      }))
 
       if (assembly.toolManifest) {
         // New assembly-based path: tool contract comes from manifest, not from messages
         responseResult = await adapter.chatCompletionWithAssembly(assembly, {
           model: actualModel,
-          originalModel: request.model,
-          messages: request.messages as any,
-          stream: request.stream,
-          temperature: request.temperature,
-          enableThinking: !!request.reasoning_effort,
-          enableWebSearch: !!request.web_search,
+          originalModel: requestWithParentHandoff.model,
+          messages: requestWithParentHandoff.messages as any,
+          stream: requestWithParentHandoff.stream,
+          temperature: requestWithParentHandoff.temperature,
+          enableThinking: !!requestWithParentHandoff.reasoning_effort,
+          enableWebSearch: !!requestWithParentHandoff.web_search,
           ...requestOptions,
+          promptRefreshMode: promptBudgetDiagnostics.decision.promptRefreshMode,
         } as any)
       } else {
         // Fallback: old path for requests without tool manifest
         const transformedRequest = {
-          ...request,
+          ...requestWithParentHandoff,
           messages: transformed.messages,
           tools: transformed.tools,
         }
         responseResult = await adapter.chatCompletion({
           model: actualModel,
-          originalModel: request.model,
+          originalModel: requestWithParentHandoff.model,
           messages: transformedRequest.messages as any,
-          stream: request.stream,
-          temperature: request.temperature,
-          enableThinking: !!request.reasoning_effort,
-          enableWebSearch: !!request.web_search,
+          stream: requestWithParentHandoff.stream,
+          temperature: requestWithParentHandoff.temperature,
+          enableThinking: !!requestWithParentHandoff.reasoning_effort,
+          enableWebSearch: !!requestWithParentHandoff.web_search,
           ...requestOptions,
         })
       }
@@ -1324,15 +1527,22 @@ export class RequestForwarder {
         }
       }
 
-      const saveConversationState = (sid?: string, parentReqId?: string) => {
+      const saveConversationState = (
+        sid?: string,
+        parentReqId?: string,
+        parentHandoff?: ChildSessionHandoff,
+      ) => {
         if (!sid) return
-        setProviderConversationState({
-          primaryKey: conversationStateKey,
-          fallbackToolSessionKey: toolSessionKey,
-          messages: request.messages,
+        this.providerRuntime.writeSessionState({
+          conversationStateKey,
+          toolSessionKey,
+          context,
+          messages: requestWithParentHandoff.messages,
+          parentHandoff,
           update: {
             qwenSessionId: sid,
             qwenParentReqId: parentReqId || '0',
+            ...(consumeParentHandoff && convState?.childSessionHandoff ? { childSessionHandoff: undefined } : {}),
           },
         })
       }
@@ -1347,6 +1557,27 @@ export class RequestForwarder {
           }
         : undefined
 
+      // Fire-and-forget cleanup of the child's Qwen web session after the parent
+      // has consumed the handoff — see Node G: Child Session Cleanup Policy
+      const cleanupChildSession = () => {
+        if (consumeParentHandoff && convState?.childSessionHandoff) {
+          const debugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development'
+          const handoffForCleanup = convState.childSessionHandoff.childProviderSessionId
+            ? convState.childSessionHandoff
+            : {
+                ...convState.childSessionHandoff,
+                childProviderSessionId: convState.childProviderSessionId ?? convState.childQwenSessionId,
+              }
+          cleanupChildProviderSession({
+            handoff: handoffForCleanup,
+            debugMode,
+            deleteSession: async (childProviderSessionId: string) => adapter.deleteSession(childProviderSessionId),
+          }).catch((err: unknown) => {
+            console.error('[Qwen] Failed to delete child session:', err)
+          })
+        }
+      }
+
       const handler = new QwenStreamHandler(actualModel, undefined, transformed.plan)
 
       if (request.stream) {
@@ -1355,14 +1586,26 @@ export class RequestForwarder {
         transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
           const finalSessionId = handler.getSessionId() || sessionId
           const finalResponseId = handler.getResponseId() || reqId
+          const finalAssistantResponse = handler.getFinalAssistantResponseForHandoff()
+          const parentHandoff = finalAssistantResponse
+            ? buildChildSessionHandoff({
+                context,
+                requestMessages: requestWithParentHandoff.messages,
+                responseBody: {
+                  choices: [finalAssistantResponse],
+                },
+                childProviderSessionId: finalSessionId,
+              })
+            : undefined
           if (!deleteSessionCallback) {
-            saveConversationState(finalSessionId, finalResponseId)
+            saveConversationState(finalSessionId, finalResponseId, parentHandoff)
           }
           if (deleteSessionCallback && finalSessionId) {
             deleteSessionCallback(finalSessionId).catch(err => {
               console.error('[Qwen] Failed to delete session:', err)
             })
           }
+          cleanupChildSession()
           return originalEnd(chunk, encoding, callback)
         }
 
@@ -1384,12 +1627,19 @@ export class RequestForwarder {
 
       const finalSessionId = handler.getSessionId() || sessionId
       const finalResponseId = handler.getResponseId() || reqId
+      const parentHandoff = buildChildSessionHandoff({
+        context,
+        requestMessages: requestWithParentHandoff.messages,
+        responseBody: result,
+        childProviderSessionId: finalSessionId,
+      })
       if (!deleteSessionCallback) {
-        saveConversationState(finalSessionId, finalResponseId)
+        saveConversationState(finalSessionId, finalResponseId, parentHandoff)
       }
       if (deleteSessionCallback && finalSessionId) {
         await deleteSessionCallback(finalSessionId)
       }
+      cleanupChildSession()
 
       const emptyOutputFailure = this.inspectManagedNonStreamOutput(result, transformed, startTime)
       if (emptyOutputFailure) return emptyOutputFailure

@@ -23,15 +23,19 @@ export const managedXmlProtocol: ToolProtocolAdapter = {
     return `## Available Tools
 You can invoke the following developer tools. Tool names are case-sensitive.
 The tool list in this section is authoritative for the current turn.
+Chat2API is a gateway: emit the managed XML below and the gateway will translate it into the real OpenAI tool call for the client.
+Do not compare this catalog with provider-native website tools, browser tools, or any tools named by the underlying web model UI.
+Provider-native tools are irrelevant for this turn; the tools listed here are the only tool surface you may use.
 Use only the exact tool names listed below. Do not rename, camelCase, translate, shorten, or invent tool names.
 Include ALL required parameters listed in the JSON schema for each tool.
 Do not claim that a listed tool is unavailable. If a listed tool is needed, call it directly.
 
 ${renderToolList(tools)}
 
-When calling tools, respond with only this Chat2API XML block:
+When calling tools, respond with only a Chat2API XML block that uses the exact tool name and the exact parameter names from that tool's JSON schema.
+Never use a generic parameter name like \`argument\`, \`args\`, \`path\`, or \`input\` unless that exact name appears in the tool schema.
 
-<|CHAT2API|tool_calls><|CHAT2API|invoke name="exact_tool_name"><|CHAT2API|parameter name="argument"><![CDATA[value]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>
+${renderManagedXmlExamples(tools)}
 
 Tool results will be provided as Chat2API XML result blocks:
 
@@ -129,6 +133,29 @@ Tool results will be provided as Chat2API XML result blocks:
   },
 }
 
+function renderManagedXmlExamples(tools: Parameters<ToolProtocolAdapter['renderPrompt']>[0]): string {
+  const examples = tools.map((tool) => {
+    const parameters = isRecord(tool.parameters) ? tool.parameters : {}
+    const properties = isRecord(parameters.properties) ? parameters.properties : {}
+    const required = Array.isArray(parameters.required) ? parameters.required.filter((value): value is string => typeof value === 'string') : []
+    const orderedNames = [
+      ...required,
+      ...Object.keys(properties).filter((name) => !required.includes(name)),
+    ]
+    const parameterNames = orderedNames.length > 0 ? orderedNames : ['exact_parameter_name']
+    const parameterBlock = parameterNames
+      .map((name) => `<|CHAT2API|parameter name="${escapeXmlAttribute(name)}"><![CDATA[${name}_value]]></|CHAT2API|parameter>`)
+      .join('')
+    return `Tool \`${tool.name}\` exact XML:\n<|CHAT2API|tool_calls><|CHAT2API|invoke name="${escapeXmlAttribute(tool.name)}">${parameterBlock}</|CHAT2API|invoke></|CHAT2API|tool_calls>`
+  })
+
+  return examples.join('\n\n')
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
 export interface ManagedXmlContractHeaderInput {
   catalogFingerprint: string
   allowedToolNames: string[]
@@ -144,6 +171,9 @@ export function renderManagedXmlContractHeader(input: ManagedXmlContractHeaderIn
     `catalog_fingerprint: ${input.catalogFingerprint}`,
     `allowed_tools: ${input.allowedToolNames.join(', ')}`,
     'The tools listed in this contract are available for this turn because they were provided by the runtime.',
+    'Chat2API is a gateway: emit the managed XML below and the gateway will translate it into the real OpenAI tool call for the client.',
+    'Do not compare this catalog with provider-native website tools, browser tools, or any tools named by the underlying web model UI.',
+    'Provider-native tools are irrelevant for this turn; the allowed_tools list is the only tool surface you may use.',
     'Treat this contract and the Available Tools section as authoritative, even if earlier conversation text mentions different tools.',
     'Do not say that an allowed tool is unavailable. If one of the allowed tools is needed, emit a tool call instead of explanatory text.',
   ].join('\n')

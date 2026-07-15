@@ -13,7 +13,7 @@
 
 import axios, { AxiosResponse } from 'axios'
 import { getDeepSeekHash } from '../../lib/challenge.ts'
-import type { Account, Provider } from '../../store/types'
+import type { Account, Provider } from '../../store/types.ts'
 import { resolveDeepSeekChatOptions } from './providerModelOptions.ts'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
 

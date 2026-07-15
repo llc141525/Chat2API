@@ -5,13 +5,16 @@ import {
   applyOpenAISessionIdentity,
   deriveOpenAISessionIdentity,
 } from '../../src/main/proxy/routes/openaiSession.ts'
+import { prepareAndForwardChatCompletion } from '../../src/main/proxy/routes/chat.ts'
+import { forkProviderConversationContext } from '../../src/main/proxy/sessionBoundary.ts'
 import type { ChatCompletionRequest, ProxyContext } from '../../src/main/proxy/types.ts'
+import type { Context } from 'koa'
 
-function createRequest(messages: ChatCompletionRequest['messages'], extras: Partial<ChatCompletionRequest> = {}): ChatCompletionRequest {
+function createRequest(messages: ChatCompletionRequest['messages'], extras: Record<string, unknown> = {}): ChatCompletionRequest {
   return {
     model: 'Qwen3.7-Max',
     messages,
-    ...extras,
+    ...(extras as Partial<ChatCompletionRequest>),
   }
 }
 
@@ -28,7 +31,23 @@ function createContext(): ProxyContext {
   }
 }
 
-test('same stable history without user derives the same key', () => {
+function createRouteContext(
+  request: ChatCompletionRequest,
+  headers: Record<string, string | string[] | undefined> = {},
+): Context {
+  return {
+    headers,
+    request: {
+      body: request,
+    },
+    ip: '127.0.0.1',
+    set() {
+      // No-op for route helper tests.
+    },
+  } as unknown as Context
+}
+
+test('same stable history without user derives the same tool and provider key for a normal turn', () => {
   const requestA = createRequest([
     { role: 'user', content: 'Remember project Chat2API and nonce alpha.' },
   ])
@@ -51,36 +70,14 @@ test('same stable history without user derives the same key', () => {
 
   assert.equal(identityA.source, 'derived_hash')
   assert.equal(identityB.source, 'derived_hash')
-  assert.equal(identityA.sessionKey, identityB.sessionKey)
+  assert.equal(identityA.sessionBoundaryReason, 'normal')
+  assert.equal(identityB.sessionBoundaryReason, 'normal')
+  assert.equal(identityA.toolCatalogSessionKey, identityB.toolCatalogSessionKey)
+  assert.equal(identityA.providerConversationSessionKey, identityA.toolCatalogSessionKey)
+  assert.equal(identityB.providerConversationSessionKey, identityB.toolCatalogSessionKey)
 })
 
-test('appended OpenAI history without user keeps the same derived key', () => {
-  const firstTurn = createRequest([
-    { role: 'user', content: 'Remember project Chat2API and nonce alpha.' },
-  ])
-  const followUp = createRequest([
-    { role: 'user', content: 'Remember project Chat2API and nonce alpha.' },
-    { role: 'assistant', content: 'Stored.' },
-    { role: 'user', content: 'What did I ask you to remember?' },
-  ])
-
-  const identityA = deriveOpenAISessionIdentity({
-    request: firstTurn,
-    clientIP: '127.0.0.1',
-    providerId: 'qwen',
-  })
-  const identityB = deriveOpenAISessionIdentity({
-    request: followUp,
-    clientIP: '127.0.0.1',
-    providerId: 'qwen',
-  })
-
-  assert.equal(identityA.source, 'derived_hash')
-  assert.equal(identityB.source, 'derived_hash')
-  assert.equal(identityA.sessionKey, identityB.sessionKey)
-})
-
-test('different first prefix derives different key', () => {
+test('different first prefix derives different base session key', () => {
   const identityA = deriveOpenAISessionIdentity({
     request: createRequest([
       { role: 'user', content: 'prefix one' },
@@ -100,10 +97,10 @@ test('different first prefix derives different key', () => {
 
   assert.equal(identityA.source, 'derived_hash')
   assert.equal(identityB.source, 'derived_hash')
-  assert.notEqual(identityA.sessionKey, identityB.sessionKey)
+  assert.notEqual(identityA.toolCatalogSessionKey, identityB.toolCatalogSessionKey)
 })
 
-test('explicit header wins over derived hash', () => {
+test('explicit header wins over derived hash for a normal turn', () => {
   const identity = deriveOpenAISessionIdentity({
     request: createRequest([
       { role: 'user', content: 'prefix one' },
@@ -117,30 +114,699 @@ test('explicit header wins over derived hash', () => {
   })
 
   assert.equal(identity.source, 'header')
-  assert.match(identity.sessionKey, /^openai-chat:[a-f0-9]{24}$/)
-  assert.doesNotMatch(identity.sessionKey, /client-session-123/)
+  assert.equal(identity.sessionBoundaryReason, 'normal')
+  assert.match(identity.toolCatalogSessionKey, /^openai-chat:[a-f0-9]{24}$/)
+  assert.equal(identity.providerConversationSessionKey, identity.toolCatalogSessionKey)
+  assert.doesNotMatch(identity.toolCatalogSessionKey, /client-session-123/)
 })
 
-test('chat route context receives providerConversationSessionKey and toolCatalogSessionKey from derived identity', () => {
-  const request = createRequest([
-    { role: 'user', content: 'Remember nonce beta.' },
-    { role: 'assistant', content: 'Stored.' },
-    { role: 'user', content: 'Recall it.' },
-  ])
-
-  const expected = deriveOpenAISessionIdentity({
-    request,
+test('compact summary with stable header keeps tool key but forks provider key to deterministic compact epoch', () => {
+  const normalIdentity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Remember nonce beta.' },
+      { role: 'assistant', content: 'Stored.' },
+      { role: 'user', content: 'Recall it.' },
+    ]),
+    headers: {
+      'x-session-id': 'stable-client-session',
+    },
     clientIP: '127.0.0.1',
     providerId: 'qwen',
   })
 
-  const context = applyOpenAISessionIdentity(createContext(), request)
+  const compactRequest = createRequest([
+    { role: 'system', content: '[Prior conversation summary] Remember nonce beta and continue carefully.' },
+    { role: 'user', content: 'Recall it after compact.' },
+  ])
 
-  assert.equal(context.toolCatalogSessionKey, expected.sessionKey)
-  assert.equal(context.providerConversationSessionKey, expected.sessionKey)
+  const compactIdentityA = deriveOpenAISessionIdentity({
+    request: compactRequest,
+    headers: {
+      'x-session-id': 'stable-client-session',
+    },
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+  const compactIdentityB = deriveOpenAISessionIdentity({
+    request: compactRequest,
+    headers: {
+      'x-session-id': 'stable-client-session',
+    },
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(compactIdentityA.sessionBoundaryReason, 'client_compact')
+  assert.equal(compactIdentityA.toolCatalogSessionKey, normalIdentity.toolCatalogSessionKey)
+  assert.notEqual(compactIdentityA.providerConversationSessionKey, normalIdentity.providerConversationSessionKey)
+  assert.equal(compactIdentityA.providerConversationSessionKey, compactIdentityB.providerConversationSessionKey)
+  assert.match(compactIdentityA.providerConversationSessionKey, /^openai-chat:[a-f0-9]{24}:compact:[a-f0-9]{24}$/)
+  assert.equal(compactIdentityA.parentProviderConversationSessionKey, normalIdentity.toolCatalogSessionKey)
 })
 
-test('explicit header identity is assigned to both provider and tool session keys', () => {
+test('compact summary can also be detected from metadata session id and summary marker text', () => {
+  const normalIdentity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Track repo task delta.' },
+    ], {
+      metadata: {
+        session_id: 'metadata-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  const compactIdentity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: '/compact conversation summary: track repo task delta.' },
+      { role: 'assistant', content: 'Continue from the summary only.' },
+    ], {
+      metadata: {
+        session_id: 'metadata-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(compactIdentity.source, 'metadata')
+  assert.equal(compactIdentity.toolCatalogSessionKey, normalIdentity.toolCatalogSessionKey)
+  assert.notEqual(compactIdentity.providerConversationSessionKey, normalIdentity.providerConversationSessionKey)
+  assert.equal(compactIdentity.sessionBoundaryReason, 'client_compact')
+})
+
+test('tool workflow start forks provider key but keeps the logical tool catalog key', () => {
+  const normalIdentity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Use tools to inspect the repo.' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  const toolChildA = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Use tools to inspect the repo.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"src/main.ts"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_read_1', content: 'file contents preview' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+  const toolChildB = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Use tools to inspect the repo.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"src/main.ts"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_read_1', content: 'file contents preview' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(toolChildA.sessionBoundaryReason, 'tool_child')
+  assert.equal(toolChildA.toolCatalogSessionKey, normalIdentity.toolCatalogSessionKey)
+  assert.equal(toolChildA.parentProviderConversationSessionKey, normalIdentity.providerConversationSessionKey)
+  assert.notEqual(toolChildA.providerConversationSessionKey, normalIdentity.providerConversationSessionKey)
+  assert.equal(toolChildA.providerConversationSessionKey, toolChildB.providerConversationSessionKey)
+  assert.match(toolChildA.providerConversationSessionKey, /^openai-chat:[a-f0-9]{24}:tool:[a-f0-9]{24}$/)
+})
+
+test('contiguous tool workflow turns reuse the same tool-child provider key across multiple tool results', () => {
+  const firstStep = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Use tools to inspect the repo.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"src/main.ts"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_read_1', content: 'file contents preview' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  const laterStep = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Use tools to inspect the repo.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"src/main.ts"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_read_1', content: 'file contents preview' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_grep_2',
+            type: 'function',
+            function: { name: 'grep', arguments: '{"pattern":"TODO","path":"src"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_grep_2', content: 'TODO found in src/main.ts' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_bash_3',
+            type: 'function',
+            function: { name: 'bash', arguments: '{"command":"npm test"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_bash_3', content: 'tests passed' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(firstStep.sessionBoundaryReason, 'tool_child')
+  assert.equal(laterStep.sessionBoundaryReason, 'tool_child')
+  assert.equal(laterStep.parentProviderConversationSessionKey, firstStep.parentProviderConversationSessionKey)
+  assert.equal(laterStep.providerConversationSessionKey, firstStep.providerConversationSessionKey)
+})
+
+test('OpenCode-style skill tool result marker keeps the workflow in grouped tool-child even when the latest non-system role is not native tool', () => {
+  const firstStep = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Run the long conversation probe.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_skill_live',
+            type: 'function',
+            function: { name: 'skill', arguments: '{"name":"long-conversation-probe"}' },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          '<skill_content name="long-conversation-probe">',
+          '1. Read tests/agent-capability/input.txt exactly once.',
+          '2. Use bash to write .agent-probe/long-step-1.txt.',
+          '</skill_content>',
+        ].join('\n'),
+      },
+    ], {
+      metadata: {
+        session_id: 'tool-session-opencode-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  const laterStep = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Run the long conversation probe.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_skill_live',
+            type: 'function',
+            function: { name: 'skill', arguments: '{"name":"long-conversation-probe"}' },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          '<skill_content name="long-conversation-probe">',
+          '1. Read tests/agent-capability/input.txt exactly once.',
+          '2. Use bash to write .agent-probe/long-step-1.txt.',
+          '</skill_content>',
+        ].join('\n'),
+      },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_input',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"tests/agent-capability/input.txt"}' },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: '{"type":"tool","tool":"read","state":{"status":"completed"},"title":"Read input"}',
+      },
+    ], {
+      metadata: {
+        session_id: 'tool-session-opencode-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(firstStep.sessionBoundaryReason, 'tool_child')
+  assert.equal(laterStep.sessionBoundaryReason, 'tool_child')
+  assert.equal(laterStep.parentProviderConversationSessionKey, firstStep.parentProviderConversationSessionKey)
+  assert.equal(laterStep.providerConversationSessionKey, firstStep.providerConversationSessionKey)
+})
+
+test('active grouped tool workflow wins over compact-style summary markers until the workflow is genuinely settled', () => {
+  const identity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'system', content: '[Prior conversation summary] Continue the probe carefully.' },
+      { role: 'user', content: 'Run the long conversation probe.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"tests/agent-capability/input.txt"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_read_1', content: 'input contents' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-priority-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(identity.sessionBoundaryReason, 'tool_child')
+  assert.match(identity.providerConversationSessionKey, /^openai-chat:[a-f0-9]{24}:tool:[a-f0-9]{24}$/)
+})
+
+test('server-summary fork from a tool-child context keeps the parent chain inspectable and rotates the provider key again', () => {
+  const toolChildIdentity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Use tools to inspect the repo.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"src/main.ts"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_read_1', content: 'file contents preview' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  const toolChildContext = applyOpenAISessionIdentity(createContext(), createRequest([
+    { role: 'user', content: 'Use tools to inspect the repo.' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_read_1',
+          type: 'function',
+          function: { name: 'read', arguments: '{"filePath":"src/main.ts"}' },
+        },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call_read_1', content: 'file contents preview' },
+  ], {
+    metadata: {
+      session_id: 'tool-session-1',
+    },
+  }))
+
+  const summaryFork = forkProviderConversationContext(toolChildContext, {
+    reason: 'server_summary',
+    epochSource: {
+      originalMessageCount: 8,
+      finalMessageCount: 3,
+      summary: '[Prior conversation summary] repo inspection is already complete',
+    },
+  })
+
+  assert.equal(toolChildContext.providerConversationSessionKey, toolChildIdentity.providerConversationSessionKey)
+  assert.equal(summaryFork.toolCatalogSessionKey, toolChildIdentity.toolCatalogSessionKey)
+  assert.equal(summaryFork.parentProviderConversationSessionKey, toolChildIdentity.providerConversationSessionKey)
+  assert.equal(summaryFork.sessionBoundaryReason, 'server_summary')
+  assert.notEqual(summaryFork.providerConversationSessionKey, toolChildIdentity.providerConversationSessionKey)
+  assert.match(
+    summaryFork.providerConversationSessionKey ?? '',
+    /^openai-chat:[a-f0-9]{24}:tool:[a-f0-9]{24}:server_summary:[a-f0-9]{24}$/,
+  )
+})
+
+test('historical tool results do not fork provider key when the latest turn is a new user message', () => {
+  const identity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Use tools to inspect the repo.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"src/main.ts"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_read_1', content: 'file contents preview' },
+      { role: 'assistant', content: 'The file was inspected.' },
+      { role: 'user', content: 'Now continue with a normal follow-up.' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(identity.sessionBoundaryReason, 'normal')
+  assert.equal(identity.providerConversationSessionKey, identity.toolCatalogSessionKey)
+})
+
+test('a settled assistant answer ends the tool workflow and returns to normal provider state', () => {
+  const identity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Use tools to inspect the repo.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"src/main.ts"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_read_1', content: 'file contents preview' },
+      { role: 'assistant', content: 'Inspection complete. The repo looks healthy.' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(identity.sessionBoundaryReason, 'normal')
+  assert.equal(identity.providerConversationSessionKey, identity.toolCatalogSessionKey)
+})
+
+test('different independent tool workflows do not collide', () => {
+  const workflowA = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Inspect src/main.ts.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"src/main.ts"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_read_1', content: 'main file contents' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  const workflowB = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Inspect src/worker.ts instead.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_read_9',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"src/worker.ts"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_read_9', content: 'worker file contents' },
+    ], {
+      metadata: {
+        session_id: 'tool-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(workflowA.sessionBoundaryReason, 'tool_child')
+  assert.equal(workflowB.sessionBoundaryReason, 'tool_child')
+  assert.notEqual(workflowA.providerConversationSessionKey, workflowB.providerConversationSessionKey)
+})
+
+test('subagent metadata forks provider key while preserving the logical tool catalog key', () => {
+  const mainIdentity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Main task for the repo.' },
+    ], {
+      metadata: {
+        session_id: 'main-session-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  const subagentA = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Worker task for one slice.' },
+    ], {
+      metadata: {
+        session_id: 'main-session-1',
+        agent_run_id: 'worker-run-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+  const subagentB = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Worker task for one slice.' },
+    ], {
+      metadata: {
+        session_id: 'main-session-1',
+        agent_run_id: 'worker-run-2',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(subagentA.sessionBoundaryReason, 'subagent_child')
+  assert.equal(subagentA.toolCatalogSessionKey, mainIdentity.toolCatalogSessionKey)
+  assert.notEqual(subagentA.providerConversationSessionKey, mainIdentity.providerConversationSessionKey)
+  assert.notEqual(subagentA.providerConversationSessionKey, subagentB.providerConversationSessionKey)
+  assert.match(subagentA.providerConversationSessionKey, /^openai-chat:[a-f0-9]{24}:subagent:[a-f0-9]{24}$/)
+  assert.equal(subagentA.parentProviderConversationSessionKey, mainIdentity.providerConversationSessionKey)
+})
+
+test('tool result inside a subagent forks from the subagent provider key, not the main provider key', () => {
+  const subagentIdentity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Worker task for one slice.' },
+    ], {
+      metadata: {
+        session_id: 'main-session-1',
+        agent_run_id: 'worker-run-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  const subagentToolChild = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Worker task for one slice.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_worker_read',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"worker.txt"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_worker_read', content: 'worker file contents' },
+    ], {
+      metadata: {
+        session_id: 'main-session-1',
+        agent_run_id: 'worker-run-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(subagentToolChild.sessionBoundaryReason, 'tool_child')
+  assert.equal(subagentToolChild.toolCatalogSessionKey, subagentIdentity.toolCatalogSessionKey)
+  assert.notEqual(subagentToolChild.providerConversationSessionKey, subagentIdentity.providerConversationSessionKey)
+  assert.equal(subagentToolChild.parentProviderConversationSessionKey, subagentIdentity.providerConversationSessionKey)
+  assert.match(
+    subagentToolChild.providerConversationSessionKey,
+    /^openai-chat:[a-f0-9]{24}:subagent:[a-f0-9]{24}:tool:[a-f0-9]{24}$/,
+  )
+})
+
+test('subagent child and subagent tool child provider keys do not collide', () => {
+  const subagentIdentity = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Worker task for one slice.' },
+    ], {
+      metadata: {
+        session_id: 'main-session-1',
+        agent_run_id: 'worker-run-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  const subagentToolChild = deriveOpenAISessionIdentity({
+    request: createRequest([
+      { role: 'user', content: 'Worker task for one slice.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_worker_read',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"worker.txt"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_worker_read', content: 'worker file contents' },
+    ], {
+      metadata: {
+        session_id: 'main-session-1',
+        agent_run_id: 'worker-run-1',
+      },
+    }),
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(subagentIdentity.sessionBoundaryReason, 'subagent_child')
+  assert.equal(subagentToolChild.sessionBoundaryReason, 'tool_child')
+  assert.notEqual(subagentIdentity.providerConversationSessionKey, subagentToolChild.providerConversationSessionKey)
+  assert.equal(subagentToolChild.parentProviderConversationSessionKey, subagentIdentity.providerConversationSessionKey)
+})
+
+test('chat route context assigns split session keys and compact diagnostics', () => {
+  const request = createRequest([
+    { role: 'system', content: '[Prior conversation summary] Repo state loaded.' },
+    { role: 'user', content: 'conversation summary says continue the same task.' },
+  ])
+
+  const expected = deriveOpenAISessionIdentity({
+    request,
+    headers: {
+      'x-session-id': 'compact-session-1',
+    },
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  const context = applyOpenAISessionIdentity(createContext(), request, {
+    'x-session-id': 'compact-session-1',
+  })
+
+  assert.equal(context.toolCatalogSessionKey, expected.toolCatalogSessionKey)
+  assert.equal(context.providerConversationSessionKey, expected.providerConversationSessionKey)
+  assert.equal(context.providerSessionEpoch, expected.providerSessionEpoch)
+  assert.equal(context.parentProviderConversationSessionKey, expected.parentProviderConversationSessionKey)
+  assert.equal(context.sessionBoundaryReason, 'client_compact')
+  assert.notEqual(context.toolCatalogSessionKey, context.providerConversationSessionKey)
+})
+
+test('explicit header identity is still assigned to both session dimensions for ordinary continuation', () => {
   const request = createRequest([
     { role: 'user', content: 'Remember nonce gamma.' },
   ])
@@ -149,6 +815,131 @@ test('explicit header identity is assigned to both provider and tool session key
     'x-session-id': 'stable-client-session',
   })
 
+  assert.equal(context.sessionBoundaryReason, 'normal')
+  assert.equal(context.providerSessionEpoch, 'main')
   assert.equal(context.toolCatalogSessionKey, context.providerConversationSessionKey)
   assert.match(context.toolCatalogSessionKey ?? '', /^openai-chat:[a-f0-9]{24}$/)
+})
+
+test('chat route helper forwards grouped tool workflow as tool_child while keeping the parent tool catalog key stable', async () => {
+  const request = createRequest([
+    { role: 'user', content: 'Use tools to inspect the repo.' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call_read_1',
+          type: 'function',
+          function: { name: 'read', arguments: '{"filePath":"src/main.ts"}' },
+        },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call_read_1', content: 'file contents preview' },
+  ], {
+    metadata: {
+      session_id: 'tool-session-route-1',
+    },
+  })
+
+  let capturedContext: ProxyContext | undefined
+
+  const prepared = await prepareAndForwardChatCompletion(
+    createRouteContext(request),
+    {
+      getConfig: () => ({ loadBalanceStrategy: 'round_robin' }),
+      getPreferredProvider: () => undefined,
+      getPreferredAccount: () => undefined,
+      selectAccount: () => ({
+        account: {
+          id: 'acc-1',
+          name: 'Account 1',
+          requestCount: 0,
+          todayUsed: 0,
+        },
+        provider: {
+          id: 'qwen',
+          name: 'Qwen',
+        },
+        actualModel: 'Qwen3.7-Max',
+      } as any),
+      recordRequestStart: () => undefined,
+      forwardChatCompletion: async (_request, _account, _provider, _actualModel, context) => {
+        capturedContext = context
+        return { success: true, body: { ok: true } }
+      },
+    },
+  )
+
+  assert.ok(prepared)
+  assert.ok(capturedContext)
+
+  const expected = deriveOpenAISessionIdentity({
+    request,
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(capturedContext.sessionBoundaryReason, 'tool_child')
+  assert.equal(capturedContext.toolCatalogSessionKey, expected.toolCatalogSessionKey)
+  assert.equal(capturedContext.parentProviderConversationSessionKey, expected.parentProviderConversationSessionKey)
+  assert.equal(capturedContext.providerConversationSessionKey, expected.providerConversationSessionKey)
+  assert.equal(capturedContext.toolCatalogSessionKey, capturedContext.parentProviderConversationSessionKey)
+  assert.notEqual(capturedContext.toolCatalogSessionKey, capturedContext.providerConversationSessionKey)
+})
+
+test('chat route helper forwards subagent metadata as subagent_child without forking the tool catalog key', async () => {
+  const request = createRequest([
+    { role: 'user', content: 'Worker task for one slice.' },
+  ], {
+    metadata: {
+      session_id: 'main-session-route-1',
+      agent_run_id: 'worker-route-1',
+    },
+  })
+
+  let capturedContext: ProxyContext | undefined
+
+  const prepared = await prepareAndForwardChatCompletion(
+    createRouteContext(request),
+    {
+      getConfig: () => ({ loadBalanceStrategy: 'round_robin' }),
+      getPreferredProvider: () => undefined,
+      getPreferredAccount: () => undefined,
+      selectAccount: () => ({
+        account: {
+          id: 'acc-1',
+          name: 'Account 1',
+          requestCount: 0,
+          todayUsed: 0,
+        },
+        provider: {
+          id: 'qwen',
+          name: 'Qwen',
+        },
+        actualModel: 'Qwen3.7-Max',
+      } as any),
+      recordRequestStart: () => undefined,
+      forwardChatCompletion: async (_request, _account, _provider, _actualModel, context) => {
+        capturedContext = context
+        return { success: true, body: { ok: true } }
+      },
+    },
+  )
+
+  assert.ok(prepared)
+  assert.ok(capturedContext)
+
+  const expected = deriveOpenAISessionIdentity({
+    request,
+    clientIP: '127.0.0.1',
+    providerId: 'qwen',
+  })
+
+  assert.equal(capturedContext.sessionBoundaryReason, 'subagent_child')
+  assert.equal(capturedContext.toolCatalogSessionKey, expected.toolCatalogSessionKey)
+  assert.equal(capturedContext.parentProviderConversationSessionKey, expected.parentProviderConversationSessionKey)
+  assert.equal(capturedContext.providerConversationSessionKey, expected.providerConversationSessionKey)
+  assert.equal(capturedContext.toolCatalogSessionKey, capturedContext.parentProviderConversationSessionKey)
+  assert.notEqual(capturedContext.toolCatalogSessionKey, capturedContext.providerConversationSessionKey)
 })

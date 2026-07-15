@@ -16,8 +16,10 @@ const CHAT2API_END = '</|CHAT2API|tool_calls>'
 const CHAT2API_INVOKE_START = '<|CHAT2API|invoke'
 const INVOKE_OPEN = /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>/g
 const PARAM_OPEN = /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>/g
+const QWEN_MALFORMED_PARAM_OPEN = /<parameter=([A-Za-z0-9_:-]+)\s*>/g
 const INVOKE_CLOSE = '</|CHAT2API|invoke>'
 const PARAM_CLOSE = '</|CHAT2API|parameter>'
+const QWEN_FUNCTION_CLOSE = '</function>'
 const CANONICAL_START = '<tool_calls>'
 const CANONICAL_END = '</tool_calls>'
 const CANONICAL_INVOKE_OPEN = /<invoke\s+name="([^"]+)"\s*>/g
@@ -101,6 +103,43 @@ export const managedXmlStructureAdapter: StructureProtocolAdapter = {
       warnings: extraction.warnings,
     }
   },
+}
+
+export function recoverFinalMalformedManagedXmlStructure(rawOutput: string): ProtocolStructureResult | null {
+  if (hasFencedManagedXml(rawOutput)) return null
+
+  const parseable = stripFencedCodeBlocks(rawOutput)
+  const marker = findFirstMarker(parseable)
+  if (!marker) return null
+
+  const variant = marker.value === CANONICAL_START ? canonicalVariant() : chat2ApiVariant()
+  const start = marker.index
+  const bodyStart = marker.kind === 'container'
+    ? start + variant.containerStart.length
+    : start
+  const containerEnd = marker.kind === 'container'
+    ? parseable.indexOf(variant.containerEnd, bodyStart)
+    : -1
+  const bodyEnd = containerEnd === -1 ? parseable.length : containerEnd
+  const body = parseable.slice(bodyStart, bodyEnd)
+  const warnings = detectForeignMarkers(parseable)
+  if (warnings.length > 0) return null
+
+  const recovered = extractRecoverableCalls(body, bodyStart, variant)
+  if (recovered.calls.length === 0 || !recovered.repaired) return null
+
+  const blockEnd = containerEnd === -1
+    ? Math.max(...recovered.calls.map((call) => call.rawSpan.end))
+    : containerEnd + variant.containerEnd.length
+
+  return {
+    kind: 'container',
+    protocol: PROTOCOL,
+    extractedCalls: recovered.calls,
+    rawMatches: [parseable.slice(start, blockEnd)],
+    cleanContent: parseable.slice(0, start) + parseable.slice(blockEnd),
+    warnings: recovered.warnings,
+  }
 }
 
 function extractStandaloneInvoke(parseable: string, start: number): ProtocolStructureResult {
@@ -219,7 +258,99 @@ function extractParameters(
     })
   }
 
+  const malformedParam = findMalformedParameterOpen(body)
+  if (malformedParam) {
+    warnings.push(warning('malformed_parameter', offset + malformedParam.index, offset + malformedParam.index + malformedParam.raw.length))
+    return { parameters, warnings, failureKind: 'malformed_container' }
+  }
+
   return { parameters, warnings }
+}
+
+function extractRecoverableCalls(
+  inner: string,
+  offset: number,
+  variant: XmlVariant,
+): {
+  calls: ExtractedCallStructure[]
+  warnings: ProtocolContainerWarning[]
+  repaired: boolean
+} {
+  const calls: ExtractedCallStructure[] = []
+  const warnings: ProtocolContainerWarning[] = []
+  let repaired = false
+  let invokeMatch: RegExpExecArray | null
+  variant.invokeOpen.lastIndex = 0
+
+  while ((invokeMatch = variant.invokeOpen.exec(inner)) !== null) {
+    const invokeStart = offset + invokeMatch.index
+    const bodyStart = variant.invokeOpen.lastIndex
+    const close = findRecoverableInvokeClose(inner, bodyStart, variant)
+    if (!close) {
+      warnings.push(warning('missing_invoke_close', invokeStart, offset + inner.length))
+      return { calls, warnings, repaired }
+    }
+
+    if (close.marker !== variant.invokeClose) {
+      repaired = true
+      warnings.push(warning('missing_invoke_close', invokeStart, offset + close.end, close.marker))
+    }
+
+    const body = inner.slice(bodyStart, close.start)
+    const parameterResult = extractRecoverableParameters(body, offset + bodyStart, variant)
+    warnings.push(...parameterResult.warnings)
+    repaired = repaired || parameterResult.repaired
+
+    calls.push({
+      callIndex: calls.length,
+      rawToolName: decodeXmlAttribute(invokeMatch[1]),
+      rawParameters: parameterResult.parameters,
+      rawSpan: { start: invokeStart, end: offset + close.end },
+    })
+
+    variant.invokeOpen.lastIndex = close.end
+  }
+
+  return { calls, warnings, repaired }
+}
+
+function extractRecoverableParameters(
+  body: string,
+  offset: number,
+  variant: XmlVariant,
+): {
+  parameters: ExtractedParameterStructure[]
+  warnings: ProtocolContainerWarning[]
+  repaired: boolean
+} {
+  const parameters: ExtractedParameterStructure[] = []
+  const warnings: ProtocolContainerWarning[] = []
+  const openers = findMalformedParameterCandidates(body, variant)
+  let repaired = false
+
+  for (const opener of openers) {
+    const close = findRecoverableParameterClose(body, opener.payloadStart, variant)
+    if (!close) {
+      warnings.push(warning('missing_parameter_close', offset + opener.index, offset + body.length))
+      continue
+    }
+
+    if (opener.malformed || close.marker !== variant.paramClose) {
+      repaired = true
+      warnings.push(warning('malformed_parameter', offset + opener.index, offset + close.end, opener.raw))
+    }
+
+    const rawBody = body.slice(opener.payloadStart, close.start)
+    const { rawPayload, payloadEncoding } = unwrapPayload(rawBody, { allowUnclosedCdata: true })
+    parameters.push({
+      rawName: decodeXmlAttribute(opener.name),
+      rawPayload,
+      payloadEncoding,
+      rawSpan: { start: offset + opener.index, end: offset + close.end },
+    })
+  }
+
+  return { parameters, warnings, repaired }
 }
 
 function malformed(
@@ -269,11 +400,10 @@ function extractMalformedParameters(
   variant: XmlVariant,
 ): MalformedToolIntent['parameters'] {
   const parameters: MalformedToolIntent['parameters'] = []
-  let match: RegExpExecArray | null
-  variant.paramOpen.lastIndex = 0
+  const matches = findMalformedParameterCandidates(parseable, variant)
 
-  while ((match = variant.paramOpen.exec(parseable)) !== null) {
-    const payloadStart = variant.paramOpen.lastIndex
+  for (const match of matches) {
+    const payloadStart = match.payloadStart
     const close = findAnyClose(parseable, payloadStart)
     const rawBody = close === -1 ? parseable.slice(payloadStart) : parseable.slice(payloadStart, close)
     const { rawPayload, payloadEncoding } = unwrapPayload(rawBody, { allowUnclosedCdata: true })
@@ -282,7 +412,7 @@ function extractMalformedParameters(
     }
 
     parameters.push({
-      name: decodeXmlAttribute(match[1]),
+      name: decodeXmlAttribute(match.name),
       rawPayload,
       payloadEncoding,
     })
@@ -291,8 +421,79 @@ function extractMalformedParameters(
   return parameters
 }
 
+function findMalformedParameterOpen(value: string): { index: number; raw: string } | null {
+  QWEN_MALFORMED_PARAM_OPEN.lastIndex = 0
+  const match = QWEN_MALFORMED_PARAM_OPEN.exec(value)
+  return match
+    ? { index: match.index, raw: match[0] }
+    : null
+}
+
+function findMalformedParameterCandidates(
+  parseable: string,
+  variant: XmlVariant,
+): Array<{ index: number; name: string; payloadStart: number; raw: string; malformed: boolean }> {
+  const candidates: Array<{ index: number; name: string; payloadStart: number; raw: string; malformed: boolean }> = []
+  let match: RegExpExecArray | null
+
+  variant.paramOpen.lastIndex = 0
+  while ((match = variant.paramOpen.exec(parseable)) !== null) {
+    candidates.push({
+      index: match.index,
+      name: match[1],
+      payloadStart: variant.paramOpen.lastIndex,
+      raw: match[0],
+      malformed: false,
+    })
+  }
+
+  QWEN_MALFORMED_PARAM_OPEN.lastIndex = 0
+  while ((match = QWEN_MALFORMED_PARAM_OPEN.exec(parseable)) !== null) {
+    candidates.push({
+      index: match.index,
+      name: match[1],
+      payloadStart: QWEN_MALFORMED_PARAM_OPEN.lastIndex,
+      raw: match[0],
+      malformed: true,
+    })
+  }
+
+  return candidates.sort((left, right) => left.index - right.index)
+}
+
+function findRecoverableInvokeClose(
+  value: string,
+  start: number,
+  variant: XmlVariant,
+): { start: number; end: number; marker: string } | null {
+  return findNearestMarker(value, start, [variant.invokeClose, CANONICAL_INVOKE_CLOSE, QWEN_FUNCTION_CLOSE])
+}
+
+function findRecoverableParameterClose(
+  value: string,
+  start: number,
+  variant: XmlVariant,
+): { start: number; end: number; marker: string } | null {
+  return findNearestMarker(value, start, [variant.paramClose, CANONICAL_PARAM_CLOSE, PARAM_CLOSE])
+}
+
+function findNearestMarker(
+  value: string,
+  start: number,
+  markers: string[],
+): { start: number; end: number; marker: string } | null {
+  const matches = markers
+    .map((marker) => ({ marker, start: value.indexOf(marker, start) }))
+    .filter((match) => match.start !== -1)
+    .sort((left, right) => left.start - right.start)
+  const match = matches[0]
+  return match
+    ? { start: match.start, end: match.start + match.marker.length, marker: match.marker }
+    : null
+}
+
 function findAnyClose(value: string, start: number): number {
-  const closers = [PARAM_CLOSE, INVOKE_CLOSE, CHAT2API_END, '</arg_value>', '</parameter>', '</invoke>', '</tool_call>', '</tool_calls>']
+  const closers = [PARAM_CLOSE, INVOKE_CLOSE, CHAT2API_END, QWEN_FUNCTION_CLOSE, '</arg_value>', '</parameter>', '</invoke>', '</tool_call>', '</tool_calls>']
     .map((marker) => value.indexOf(marker, start))
     .filter((index) => index !== -1)
 

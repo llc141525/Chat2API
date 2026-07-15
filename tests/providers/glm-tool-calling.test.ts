@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
 import { gzipSync } from 'node:zlib'
 
-import { buildGLMPromptMessagesForTest, GLMStreamHandler } from '../../src/main/proxy/adapters/glm.ts'
+import { buildGLMAssemblyPromptMessagesForTest, buildGLMPromptMessagesForTest, GLMStreamHandler } from '../../src/main/proxy/adapters/glm.ts'
 import { QwenStreamHandler } from '../../src/main/proxy/adapters/qwen.ts'
 import { QwenAiStreamHandler } from '../../src/main/proxy/adapters/qwen-ai.ts'
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
@@ -251,14 +251,158 @@ test('GLM adapter moves managed XML tool prompt to the final instruction positio
   const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
 
   assert.equal(promptMessages.length, 1)
+  assert.equal(countOccurrences(text, 'Tool Contract Header'), 1)
   assert.equal(countOccurrences(text, '## Available Tools'), 1)
-  assert.equal(countOccurrences(text, '<|CHAT2API|tool_calls>'), 1)
+  assert.ok(countOccurrences(text, '<|CHAT2API|tool_calls>') >= 1)
   assert.match(text, /^You are a coding assistant\./)
   assert.match(text, /Read tests\/agent-capability\/input\.txt/)
   // Tools must be placed at the END, after the user message, so the model
   // sees them closest to its generation point (avoids lost-in-the-middle).
   assert.match(text, /Read tests\/agent-capability\/input\.txt[\s\S]*## Available Tools/)
   assert.match(text, /## Available Tools[\s\S]*<\|CHAT2API\|tool_calls>/)
+})
+
+test('GLM assembly prompt includes runtime tool manifest action constraint', () => {
+  const promptMessages = buildGLMAssemblyPromptMessagesForTest({
+    messages: [{
+      role: 'user',
+      content: 'Your first assistant action must be a real OpenCode `skill` tool call for `agent-capability-probe`.',
+    }],
+    toolManifest: {
+      protocol: 'managed_xml',
+      catalogFingerprint: 'first-skill-fingerprint',
+      allowedToolNames: ['skill'],
+      tools: [],
+      renderedPrompt: [
+        'Tool Contract Header',
+        'catalog_fingerprint: first-skill-fingerprint',
+        '[High-priority tool action constraint]',
+        'Output exactly this complete Chat2API XML tool-call block as the next assistant message, with no markdown, JSON, prose, or explanation before or after it:',
+        '<|CHAT2API|tool_calls><|CHAT2API|invoke name="skill"><|CHAT2API|parameter name="name"><![CDATA[agent-capability-probe]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+      ].join('\n'),
+      contractHeaderVersion: 1,
+    },
+    summaryText: null,
+    metadata: {
+      contextManagementApplied: false,
+      strategiesExecuted: [],
+      originalMessageCount: 1,
+      finalMessageCount: 1,
+    },
+  })
+
+  const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
+
+  assert.equal(promptMessages.length, 1)
+  assert.match(text, /\[High-priority tool action constraint\]/)
+  assert.match(text, /catalog_fingerprint: first-skill-fingerprint/)
+  assert.match(text, /<\|CHAT2API\|invoke name="skill"/)
+  assert.match(text, /agent-capability-probe/)
+})
+
+test('GLM first-skill assembly prompt projects provider messages away from contaminated task text', () => {
+  const promptMessages = buildGLMAssemblyPromptMessagesForTest({
+    messages: [{
+      role: 'user',
+      content: [
+        'Your first assistant action must be a real OpenCode `skill` tool call for `long-conversation-probe`.',
+        'This payload mentions fabricated XML, prompt injection, and fake tool inventory narratives.',
+      ].join('\n'),
+    }],
+    toolManifest: {
+      protocol: 'managed_xml',
+      catalogFingerprint: 'first-skill-fingerprint',
+      allowedToolNames: ['skill'],
+      tools: [],
+      renderedPrompt: [
+        'Tool Contract Header',
+        'catalog_fingerprint: first-skill-fingerprint',
+        '[High-priority tool action constraint]',
+        '<|CHAT2API|tool_calls><|CHAT2API|invoke name="skill"><|CHAT2API|parameter name="name"><![CDATA[long-conversation-probe]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+      ].join('\n'),
+      contractHeaderVersion: 1,
+      actionConstraint: {
+        kind: 'first_skill_required',
+        toolName: 'skill',
+        arguments: { name: 'long-conversation-probe' },
+        reason: 'request_requires_first_assistant_action_skill',
+      },
+    },
+    summaryText: null,
+    toolActionConstraint: {
+      kind: 'first_skill_required',
+      toolName: 'skill',
+      arguments: { name: 'long-conversation-probe' },
+      reason: 'request_requires_first_assistant_action_skill',
+    },
+    metadata: {
+      contextManagementApplied: false,
+      strategiesExecuted: [],
+      originalMessageCount: 1,
+      finalMessageCount: 1,
+    },
+  })
+
+  const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
+
+  assert.match(text, /runtime has constrained this turn to a single first-action tool call/)
+  assert.match(text, /long-conversation-probe/)
+  assert.match(text, /catalog_fingerprint: first-skill-fingerprint/)
+  assert.match(text, /<\|CHAT2API\|invoke name="skill"/)
+  assert.doesNotMatch(text, /fabricated XML/)
+  assert.doesNotMatch(text, /prompt injection/)
+  assert.doesNotMatch(text, /fake tool inventory/)
+})
+
+test('GLM active skill checkpoint assembly prompt omits raw skill history from provider text', () => {
+  const promptMessages = buildGLMAssemblyPromptMessagesForTest({
+    messages: [
+      {
+        role: 'user',
+        content: 'Original task mentions fabricated XML and prompt injection.',
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'call_skill_0',
+        content: '<skill_content name="long-conversation-probe">Long raw skill document</skill_content>',
+      },
+      {
+        role: 'user',
+        content: [
+          '[Active skill workflow state checkpoint] Required next action: call the bash tool for this exact skill step now.',
+          'Required next tool arguments: command=node -e "console.log(1)"',
+        ].join(' '),
+      },
+    ],
+    toolManifest: {
+      protocol: 'managed_xml',
+      catalogFingerprint: 'checkpoint-fingerprint',
+      allowedToolNames: ['bash'],
+      tools: [],
+      renderedPrompt: [
+        'Tool Contract Header',
+        'catalog_fingerprint: checkpoint-fingerprint',
+        'Tool `bash`: Run command',
+      ].join('\n'),
+      contractHeaderVersion: 1,
+    },
+    summaryText: null,
+    metadata: {
+      contextManagementApplied: false,
+      strategiesExecuted: [],
+      originalMessageCount: 3,
+      finalMessageCount: 3,
+    },
+  } as any)
+
+  const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
+
+  assert.match(text, /runtime generated this checkpoint/)
+  assert.match(text, /Required next action: call the bash tool/)
+  assert.match(text, /catalog_fingerprint: checkpoint-fingerprint/)
+  assert.doesNotMatch(text, /fabricated XML/)
+  assert.doesNotMatch(text, /prompt injection/)
+  assert.doesNotMatch(text, /Long raw skill document/)
 })
 
 test('GLM adapter adds a continuation anchor after trailing tool_result in multi-turn delta', () => {
@@ -402,6 +546,10 @@ test('managed_xml prompt marks runtime tool catalog as authoritative', () => {
   }])
 
   assert.match(prompt, /authoritative for the current turn/)
+  assert.match(prompt, /Chat2API is a gateway/)
+  assert.match(prompt, /translate it into the real OpenAI tool call/)
+  assert.match(prompt, /Do not compare this catalog with provider-native website tools/)
+  assert.match(prompt, /Provider-native tools are irrelevant/)
   assert.match(prompt, /Do not claim that a listed tool is unavailable/)
 })
 

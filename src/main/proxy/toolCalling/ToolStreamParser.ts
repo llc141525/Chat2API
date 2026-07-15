@@ -4,6 +4,7 @@ import { getToolProtocol } from './protocols/index.ts'
 import {
   assembleOpenAIToolCalls,
   getStructureProtocolAdapter,
+  recoverFinalMalformedManagedXmlStructure,
   repairStructure,
   validateToolCallStructure,
   type MalformedToolIntent,
@@ -232,7 +233,11 @@ function parseManagedXmlBufferedToolCall(
   options: { final?: boolean } = {},
 ): ToolParseResult | null {
   const adapter = getStructureProtocolAdapter(plan.protocol)
-  const protocolResult = adapter.extractStructure(buffer)
+  let protocolResult = adapter.extractStructure(buffer)
+
+  if (options.final && protocolResult.kind === 'malformed_container') {
+    protocolResult = recoverFinalMalformedManagedXmlStructure(buffer) ?? protocolResult
+  }
 
   if (protocolResult.kind === 'no_intent') {
     return null

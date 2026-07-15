@@ -28,6 +28,7 @@ import type { ToolCallingPlan } from '../toolCalling/types.ts'
 import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
 import { renderFinalPrompt } from './renderFinalPrompt.ts'
 import type { RequestAssembly } from '../RequestAssembly.ts'
+import type { PromptRefreshMode } from '../promptBudgetPolicy.ts'
 
 /**
  * Check if content contains tool calls (both bracket and XML formats)
@@ -49,7 +50,7 @@ const MODEL_MAP: Record<string, string> = {
   'Qwen3-Coder': 'Qwen3-Coder',
 }
 
-const DEFAULT_HEADERS = {
+export const DEFAULT_HEADERS = {
   Accept: 'application/json, text/event-stream, text/plain, */*',
   'Accept-Language': 'zh-CN,zh;q=0.9',
   'Cache-Control': 'no-cache',
@@ -85,6 +86,7 @@ interface ChatCompletionRequest {
   enableWebSearch?: boolean
   sessionId?: string
   parentReqId?: string
+  promptRefreshMode?: PromptRefreshMode
 }
 
 interface QwenSessionListPage {
@@ -268,8 +270,20 @@ function traceQwenRequestAssembly(input: {
   hasManagedToolContract: boolean
   hasSummaryIsolationHeader: boolean
   finalContentLength: number
+  promptRefreshMode?: PromptRefreshMode
 }): void {
   console.log('[Qwen] Request assembly trace:', JSON.stringify(input))
+}
+
+function hasManagedToolContractMarker(value: string | null | undefined): boolean {
+  if (!value) {
+    return false
+  }
+
+  return value.includes('catalog_fingerprint:')
+    || value.includes('<|CHAT2API|tool_calls>')
+    || value.includes('<|CHAT2API|invoke')
+    || value.includes('<tool_calls>')
 }
 
 export function buildQwenChatRequestBodyForTest(input: QwenChatRequestBodyInput): any {
@@ -293,9 +307,18 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
   const baseSystemPrompts: string[] = []
   const summaryPrompts: string[] = []
   const conversationParts: string[] = []
+  const activeSkillCheckpointPrompts: string[] = []
   const lastUserText = extractLastUserText(request.messages)
   const explicitSummaryText = assembly.summaryText?.trim() || null
-  const conversationMessages = selectQwenDeltaMessages(assembly.messages as QwenMessage[], Boolean(request.sessionId))
+  const promptRefreshMode = request.promptRefreshMode
+
+  // tool_ready forces delta mode even without a provider session.
+  // All other modes use the existing hasProviderSession logic.
+  const useDeltaMessages = promptRefreshMode === 'tool_ready' || Boolean(request.sessionId)
+  let conversationMessages = selectQwenDeltaMessages(assembly.messages as QwenMessage[], useDeltaMessages)
+
+  // Apply mode-based conversation filtering on top of delta selection
+  conversationMessages = filterConversationForMode(conversationMessages, promptRefreshMode)
 
   const MAX_TOOL_RESULT_LENGTH = 2000
   for (const msg of assembly.messages) {
@@ -313,6 +336,9 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
         }
       } else {
         baseSystemPrompts.push(content)
+        if (trimmedContent.includes('[Active skill workflow state checkpoint]')) {
+          activeSkillCheckpointPrompts.push(content)
+        }
       }
       continue
     }
@@ -346,14 +372,37 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
     }
   }
 
+  if (promptRefreshMode === 'tool_ready' && activeSkillCheckpointPrompts.length > 0) {
+    conversationParts.push(activeSkillCheckpointPrompts[activeSkillCheckpointPrompts.length - 1])
+  }
+
   const effectiveSummaryText = explicitSummaryText || (summaryPrompts.length > 0 ? summaryPrompts.join('\n\n') : null)
+
+  // Mode-based section inclusion:
+  // - digest: drop tool contract (no active tools needed)
+  // - minimal: drop tool contract and summary
+  // - full/repair/tool_ready/undefined: keep all sections
+  const includeToolContract = promptRefreshMode !== 'digest' && promptRefreshMode !== 'minimal'
+  const includeSummary = promptRefreshMode !== 'minimal'
 
   const finalContent = renderFinalPrompt({
     systemText: baseSystemPrompts.join('\n\n') || null,
-    summaryText: effectiveSummaryText,
-    toolContractText: assembly.toolManifest?.renderedPrompt ?? null,
+    summaryText: includeSummary ? effectiveSummaryText : null,
+    toolContractText: includeToolContract ? (assembly.toolManifest?.renderedPrompt ?? null) : null,
     conversationText: conversationParts.length > 0 ? `User: ${conversationParts.join('\n\n')}` : '',
     template: 'prefix',
+  })
+  const renderedToolContract = includeToolContract ? (assembly.toolManifest?.renderedPrompt ?? null) : null
+  traceQwenRequestAssembly({
+    model: actualModel,
+    messageCount: assembly.messages.length,
+    systemMessageCount: baseSystemPrompts.length + summaryPrompts.length,
+    conversationPartCount: conversationParts.length,
+    hasManagedToolContract: hasManagedToolContractMarker(renderedToolContract)
+      || hasManagedToolContractMarker(finalContent),
+    hasSummaryIsolationHeader: Boolean(effectiveSummaryText?.includes('[Prior conversation summary')),
+    finalContentLength: finalContent.length,
+    promptRefreshMode,
   })
 
   return {
@@ -387,6 +436,36 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
 
 export function buildQwenAssemblyRequestBodyForTest(input: QwenAssemblyRequestBodyInput): any {
   return buildQwenAssemblyRequestBody(input)
+}
+
+function filterConversationForMode(
+  messages: QwenMessage[],
+  mode?: PromptRefreshMode
+): QwenMessage[] {
+  if (mode === 'digest') {
+    const nonSystem = messages.filter((m) => m.role !== 'system')
+    return nonSystem.slice(-4)
+  }
+
+  if (mode === 'minimal') {
+    const nonSystem = messages.filter((m) => m.role !== 'system')
+    const lastUserIdx = findLastIndexOfRole(nonSystem, 'user')
+    const lastAssistantIdx = findLastIndexOfRole(nonSystem, 'assistant')
+    const indices: number[] = []
+    if (lastUserIdx >= 0) indices.push(lastUserIdx)
+    if (lastAssistantIdx >= 0 && lastAssistantIdx !== lastUserIdx) indices.push(lastAssistantIdx)
+    indices.sort((a, b) => a - b)
+    return indices.map((i) => nonSystem[i])
+  }
+
+  return messages
+}
+
+function findLastIndexOfRole(messages: QwenMessage[], role: string): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === role) return i
+  }
+  return -1
 }
 
 function extractLastUserText(messages: QwenMessage[]): string {
@@ -826,6 +905,21 @@ export class QwenStreamHandler {
   private thinkingContent: string = ''
   private sentThinkingRole: boolean = false
   private finalized = false
+  private finalAssistantResponseForHandoff?: {
+    message: {
+      role: 'assistant'
+      content: string | null
+      tool_calls?: Array<{
+        id: string
+        type: 'function'
+        function: {
+          name: string
+          arguments: string
+        }
+      }>
+    }
+    finish_reason: 'stop' | 'tool_calls'
+  }
 
   constructor(model: string, onEnd?: (sessionId: string) => void, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
@@ -910,8 +1004,25 @@ export class QwenStreamHandler {
           finishReason,
         })
       : { ok: true as const, outcome: finishReason === 'tool_calls' ? 'tool_calls' : 'content' }
+    this.finalAssistantResponseForHandoff = {
+      message: {
+        role: 'assistant',
+        content: finishReason === 'tool_calls' || inspection.outcome === 'malformed_tool_output' ? null : this.content.trim(),
+        ...(finishReason === 'tool_calls'
+          ? {
+              tool_calls: parseToolCallsFromText(this.content, 'default').toolCalls,
+            }
+          : {}),
+      },
+      finish_reason: finishReason,
+    }
 
-    if (!inspection.ok) {
+    if (!inspection.ok && inspection.outcome === 'malformed_tool_output') {
+      console.warn('[Qwen] Suppressed managed stream inspection failure:', JSON.stringify({
+        outcome: inspection.outcome,
+        error: inspection.error,
+      }))
+    } else if (!inspection.ok) {
       transStream.write(
         `data: ${JSON.stringify({
           ...baseChunk,
@@ -1138,11 +1249,10 @@ export class QwenStreamHandler {
               this.hasError = true
               transStream.write(
                 `data: ${JSON.stringify({
-                  id: this.responseId || this.sessionId,
-                  model: this.model,
-                  object: 'chat.completion.chunk',
-                  choices: [{ index: 0, delta: { content: `\n[Error: ${result.error_msg || result.error_code}]` }, finish_reason: 'stop' }],
-                  created: this.created,
+                  error: {
+                    code: String(result.error_code),
+                    message: result.error_msg || String(result.error_code),
+                  },
                 })}\n\n`
               )
               safeEnd('data: [DONE]\n\n')
@@ -1523,6 +1633,26 @@ export class QwenStreamHandler {
 
   getResponseId(): string {
     return this.responseId
+  }
+
+  getFinalAssistantResponseForHandoff():
+    | {
+        message: {
+          role: 'assistant'
+          content: string | null
+          tool_calls?: Array<{
+            id: string
+            type: 'function'
+            function: {
+              name: string
+              arguments: string
+            }
+          }>
+        }
+        finish_reason: 'stop' | 'tool_calls'
+      }
+    | undefined {
+    return this.finalAssistantResponseForHandoff
   }
 }
 

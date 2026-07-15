@@ -8,18 +8,18 @@ import crypto from 'crypto'
 import { PassThrough } from 'stream'
 import { createParser } from 'eventsource-parser'
 import FormData from 'form-data'
-import { Account, Provider } from '../../store/types'
-import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
-import { parseToolCallsFromText } from '../utils/toolParser'
+import { Account, Provider } from '../../store/types.ts'
+import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse.ts'
+import { parseToolCallsFromText } from '../utils/toolParser.ts'
 import {
   createToolCallState,
   processStreamContent,
   flushToolCallBuffer,
   createBaseChunk,
   ToolCallState
-} from '../utils/streamToolHandler'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
+} from '../utils/streamToolHandler.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const ZAI_API_BASE = 'https://chat.z.ai'
 const X_FE_VERSION = 'prod-fe-1.1.68'
