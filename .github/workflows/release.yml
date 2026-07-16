@@ -7,8 +7,20 @@ on:
       - 'v*.*.*-*'
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: gh release create "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --title "Chat2API $TAG_NAME" --generate-notes --verify-tag
+
   release:
     runs-on: ${{ matrix.os }}
+    needs: create-release
     permissions:
       contents: write
       actions: write
@@ -34,7 +46,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
