@@ -140,7 +140,7 @@ export interface ToolCallDiagnostics {
   providerId: string
   model?: string
   actualModel?: string
-  toolSource: 'openai' | 'mcp' | 'none'
+  toolSource: 'openai' | 'mcp' | 'prompt_embedded' | 'none'
   mode: ToolCallingMode
   protocol: ToolProtocolId
   toolCount: number
@@ -196,8 +196,6 @@ export interface ToolCallingPlan {
   availabilityRetryAttempted?: boolean
   contract: ToolTurnContract
   diagnostics: ToolCallDiagnostics
-  /** Snapshot of the tool catalog used to build this plan (Phase 2+). */
-  catalogSnapshot?: { fingerprint: string }
 }
 
 export interface ToolCallingTransformResult {

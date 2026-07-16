@@ -164,6 +164,18 @@ export function createToolCatalogStore(persistence?: CatalogPersistenceStore): T
     }
 
     if (shouldReuseSessionCatalog(existing, nextSnapshot, sessionCatalogPolicy)) {
+      if (!existing) {
+        return {
+          snapshot: nextSnapshot,
+          blocked: false,
+          diagnostics: {
+            source: 'current_request',
+            fingerprint: nextSnapshot.fingerprint,
+            driftKinds,
+            blocked: false,
+          },
+        }
+      }
       const snapshot = freezeSnapshot({
         ...existing,
         source: 'session_catalog',

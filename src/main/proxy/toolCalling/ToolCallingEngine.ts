@@ -171,7 +171,7 @@ function renderProjectedPrompt(
         '[Immediate next output]',
         'Output exactly this Chat2API XML tool call now and nothing else.',
         'Do not output any final completion marker before the required skill tool result and follow-up tool sequence complete.',
-        renderRequiredSkillXml(actionConstraint.arguments.name),
+        renderRequiredSkillXml(actionConstraint.arguments.name ?? ''),
       ]
     : []
   return [
@@ -617,7 +617,7 @@ function renderToolActionConstraint(constraint: ToolActionConstraint): string {
     ].filter(Boolean).join('\n')
   }
 
-  const requiredXml = renderRequiredSkillXml(constraint.arguments.name)
+  const requiredXml = renderRequiredSkillXml(constraint.arguments.name ?? '')
 
   return [
     '[High-priority tool action constraint]',
