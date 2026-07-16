@@ -16,7 +16,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
-        run: gh release create "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --title "Chat2API $TAG_NAME" --generate-notes --verify-tag
+        run: gh release create "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --title "Chat2API $TAG_NAME" --generate-notes --verify-tag --draft
 
   release:
     runs-on: ${{ matrix.os }}
@@ -70,6 +70,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+
+  finalize-release:
+    runs-on: ubuntu-latest
+    needs: release
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
 
       - name: Build and Publish (Linux)
         if: matrix.os == 'ubuntu-latest'
