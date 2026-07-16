@@ -144,7 +144,7 @@ function makeRuntimeInput(overrides: Record<string, unknown> = {}) {
   } as any
 }
 
-function makeFakePlugin(records: { input?: ProviderRuntimeRequest; webRequest?: ProviderWebRequest }): WebProviderPlugin {
+function makeFakePlugin(records: { input?: ProviderRuntimeRequest; webRequest?: ProviderWebRequest }, reuseChildSession = false): WebProviderPlugin {
   return {
     id: 'qwen',
     version: 'test',
@@ -159,6 +159,7 @@ function makeFakePlugin(records: { input?: ProviderRuntimeRequest; webRequest?: 
       preferredManagedProtocol: 'managed_xml',
       sessionIdKind: 'session_id',
       transport: 'provider_chat_api',
+      ...(reuseChildSession ? { reuseProviderSessionForToolChild: true } : {}),
     },
     async buildRequest(input) {
       records.input = input
@@ -187,6 +188,41 @@ function makeFakePlugin(records: { input?: ProviderRuntimeRequest; webRequest?: 
     },
   }
 }
+
+test('ProviderRuntime reuses and mirrors the parent session for providers requiring one child conversation', async () => {
+  conversationStateCache.clear()
+  const records: { input?: ProviderRuntimeRequest; webRequest?: ProviderWebRequest } = {}
+  const plugin = makeFakePlugin(records, true)
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => plugin,
+    transport: async request => ({
+      status: 200,
+      headers: {},
+      data: { sessionId: request.sessionId, reqId: request.reqId },
+    }),
+  })
+  conversationStateCache.set('provider-parent', {
+    providerSessionId: 'parent-session',
+    lastUsedAt: Date.now(),
+  })
+
+  const input = makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      providerConversationSessionKey: 'provider-child',
+      parentProviderConversationSessionKey: 'provider-parent',
+      sessionBoundaryReason: 'tool_child',
+    },
+    conversationStateKey: 'provider-child',
+  })
+  const result = await runtime.forward(input)
+
+  assert.equal(result.success, true)
+  assert.equal(records.input?.sessionBoundaryPlan?.providerSessionAction, 'reuse_parent')
+  assert.equal(records.input?.sessionId, 'parent-session')
+  assert.equal(conversationStateCache.get('provider-child')?.providerSessionId, 'parent-session')
+  assert.equal(conversationStateCache.get('provider-parent')?.providerSessionId, 'parent-session')
+})
 
 test('ProviderRuntime.forward runs plugin build, transport, parseNonStream, and session write', async () => {
   conversationStateCache.clear()

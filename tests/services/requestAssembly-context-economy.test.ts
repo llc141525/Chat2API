@@ -89,6 +89,48 @@ test('provider selection keeps current tool metadata but strips raw historical c
   assert.equal(selected.some(message => message.tool_call_id === 'call_1'), true)
 })
 
+test('provider selection strips historical contract lines from mixed system messages', () => {
+  const assembly = buildRequestAssembly({
+    messages: [{
+      role: 'system',
+      content: [
+        'You are opencode.',
+        'Tool Contract Header',
+        'catalog_fingerprint: old-catalog',
+        '## Available Tools',
+        'Tool `read`: read a file',
+        '<|CHAT2API|tool_calls>historical protocol text<|CHAT2API|tool_calls>',
+        'Keep the role-specific task context.',
+      ].join('\n'),
+    }],
+    toolManifest: null,
+  })
+
+  const text = String(selectProviderMessagesForAssembly(assembly)[0]?.content ?? '')
+  assert.match(text, /Keep the role-specific task context/)
+  assert.doesNotMatch(text, /Tool Contract Header|old-catalog|## Available Tools|Tool `read`/)
+})
+
+test('provider selection strips historical contract from mixed user/tool messages', () => {
+  const assembly = buildRequestAssembly({
+    messages: [{
+      role: 'user',
+      content: [
+        'Continue the task from the latest tool result.',
+        'Tool Contract Header',
+        'catalog_fingerprint: old-catalog',
+        'superpowers:general',
+        '<|CHAT2API|tool_calls>old protocol<|CHAT2API|tool_calls>',
+      ].join('\n'),
+    }],
+    toolManifest: null,
+  })
+
+  const text = String(selectProviderMessagesForAssembly(assembly)[0]?.content ?? '')
+  assert.match(text, /Continue the task from the latest tool result/)
+  assert.doesNotMatch(text, /Tool Contract Header|old-catalog|superpowers|old protocol/)
+})
+
 test('qwen provider body does not replay raw prompt-embedded config through content or ori_query', () => {
   const rawUserPayload = [
     'You are opencode.',

@@ -13,6 +13,7 @@ export function buildSessionBoundaryPlan(input: {
   context: ProxyContext
   priorState?: ConversationState
   request: ChatCompletionRequest
+  reuseProviderSessionForToolChild?: boolean
 }): SessionBoundaryPlan {
   const boundary = input.context.sessionBoundaryReason ?? 'normal'
   const parentProviderSessionKey = input.context.parentProviderConversationSessionKey
@@ -24,10 +25,10 @@ export function buildSessionBoundaryPlan(input: {
   if (boundary === 'tool_child' || boundary === 'subagent_child') {
     return {
       boundary,
-      providerSessionAction: 'start_child',
+      providerSessionAction: input.reuseProviderSessionForToolChild ? 'reuse_parent' : 'start_child',
       ...(parentProviderSessionKey ? { parentProviderSessionKey } : {}),
       ...(childProviderSessionKey ? { childProviderSessionKey } : {}),
-      expectedProviderSessionIdReuse: false,
+      expectedProviderSessionIdReuse: !!input.reuseProviderSessionForToolChild,
     }
   }
 

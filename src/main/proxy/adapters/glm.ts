@@ -156,12 +156,13 @@ export function buildGLMAssemblyPromptMessagesForTest(
   assembly: import('../RequestAssembly.ts').RequestAssembly,
   refs: any[] = [],
   isMultiTurn: boolean = false,
+  includeToolPrompt: boolean = true,
 ): { role: string; content: any[] }[] {
   const adapter = Object.create(GLMAdapter.prototype) as GLMAdapter
   const messages = [...selectProviderMessagesForAssembly(assembly)] as GLMMessage[]
   let toolsPrompt = assembly.summaryText ?? ''
 
-  if (assembly.toolManifest) {
+  if (includeToolPrompt && assembly.toolManifest) {
     toolsPrompt = toolsPrompt
       ? `${toolsPrompt}\n\n${assembly.toolManifest.renderedPrompt}`
       : assembly.toolManifest.renderedPrompt

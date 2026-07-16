@@ -25,6 +25,8 @@ export interface ProviderPluginCapabilities {
   preferredManagedProtocol: 'managed_xml' | 'managed_bracket' | 'native' | 'none'
   sessionIdKind: 'session_id' | 'conversation_id' | 'chat_id' | 'request_id' | 'none'
   transport: 'openai_chat_completions' | 'provider_chat_api' | 'grpc_web_stream' | 'polling_stream' | 'websocket' | 'unknown'
+  /** Some provider conversation APIs must keep tool-child turns in one conversation. */
+  reuseProviderSessionForToolChild?: boolean
 }
 
 // ── Request / response normalization ────────────────────────────────

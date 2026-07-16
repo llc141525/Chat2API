@@ -234,16 +234,26 @@ export const GLMProviderPlugin: WebProviderPlugin = {
     preferredManagedProtocol: 'managed_xml',
     sessionIdKind: 'conversation_id',
     transport: 'provider_chat_api',
+    reuseProviderSessionForToolChild: true,
   },
 
   async buildRequest(input: ProviderRuntimeRequest): Promise<ProviderWebRequest> {
     // Create adapter instance for message conversion utilities and token refresh.
     const adapter = new GLMAdapter(input.provider, input.account)
+    const hasManagedToolHistory = input.assembly.messages.some((message) => (
+      (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
+      || (message.role === 'tool' && typeof message.tool_call_id === 'string' && message.tool_call_id.length > 0)
+    ))
+    const startsManagedConversation = Boolean(
+      input.sessionId && input.assembly.toolManifest && !hasManagedToolHistory,
+    )
+    const effectiveSessionId = startsManagedConversation ? undefined : input.sessionId
 
     const preparedMessages = buildGLMAssemblyPromptMessagesForTest(
       input.assembly,
       [],  // empty refs — file uploads not done here
-      !!input.sessionId,
+      !!effectiveSessionId,
+      !effectiveSessionId || !hasManagedToolHistory,
     )
 
     // Determine assistant ID from model name or use default
@@ -270,7 +280,7 @@ export const GLMProviderPlugin: WebProviderPlugin = {
 
     const reqId = generateId()
     const sign = generateSign()
-    const conversationId = input.sessionId || ''
+    const conversationId = effectiveSessionId || ''
     const token = await adapter.acquireToken()
 
     const body = {

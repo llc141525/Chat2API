@@ -300,6 +300,34 @@ test('GLM assembly prompt includes runtime tool manifest action constraint', () 
   assert.match(text, /agent-capability-probe/)
 })
 
+test('GLM multi-turn assembly omits the already-installed tool contract', () => {
+  const assembly = {
+    messages: [{ role: 'assistant', content: 'previous tool turn' }],
+    toolManifest: {
+      protocol: 'managed_xml',
+      catalogFingerprint: 'same-catalog',
+      allowedToolNames: ['read'],
+      tools: [],
+      renderedPrompt: 'Tool Contract Header\n## Available Tools\n<|CHAT2API|tool_calls>',
+      contractHeaderVersion: 1,
+    },
+    summaryText: '[Workflow state digest — keep this state]',
+    metadata: {
+      contextManagementApplied: false,
+      strategiesExecuted: [],
+      originalMessageCount: 1,
+      finalMessageCount: 1,
+    },
+  } as any
+
+  const text = buildGLMAssemblyPromptMessagesForTest(assembly, [], true, false)[0].content
+    .find((item: any) => item.type === 'text')?.text
+
+  assert.match(text, /Workflow state digest/)
+  assert.doesNotMatch(text, /Tool Contract Header/)
+  assert.doesNotMatch(text, /## Available Tools/)
+})
+
 test('GLM first-skill assembly prompt projects provider messages away from contaminated task text', () => {
   const promptMessages = buildGLMAssemblyPromptMessagesForTest({
     messages: [{

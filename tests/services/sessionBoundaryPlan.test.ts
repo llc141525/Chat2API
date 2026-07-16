@@ -76,4 +76,16 @@ for (const boundary of ['tool_child', 'subagent_child'] as const) {
     assert.equal(plan.providerSessionAction, 'start_child')
     assert.equal(plan.expectedProviderSessionIdReuse, false)
   })
+
+  test(`${boundary} can reuse a provider session for providers that require one conversation`, () => {
+    const plan = buildSessionBoundaryPlan({
+      context: context(boundary),
+      priorState: { providerSessionId: 'glm-parent' },
+      request,
+      reuseProviderSessionForToolChild: true,
+    })
+
+    assert.equal(plan.providerSessionAction, 'reuse_parent')
+    assert.equal(plan.expectedProviderSessionIdReuse, true)
+  })
 }

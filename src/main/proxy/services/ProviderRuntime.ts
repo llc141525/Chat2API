@@ -122,17 +122,28 @@ export class ProviderRuntime {
       }
     }
 
-    const priorState = this.readSessionState({
+    const primaryPriorState = this.readSessionState({
       conversationStateKey: input.conversationStateKey,
       toolSessionKey: input.toolSessionKey,
       context: input.context,
       messages: input.request.messages,
     })
+    const isChildBoundary = input.context.sessionBoundaryReason === 'tool_child'
+      || input.context.sessionBoundaryReason === 'subagent_child'
+    const parentState = isChildBoundary && plugin.capabilities.reuseProviderSessionForToolChild
+      && input.context.parentProviderConversationSessionKey
+      ? getProviderConversationState({
+          primaryKey: input.context.parentProviderConversationSessionKey,
+          allowFallback: false,
+        })
+      : undefined
+    const priorState = primaryPriorState ?? parentState
 
     const sessionBoundaryPlan = buildSessionBoundaryPlan({
       context: input.context,
       priorState,
       request: input.request,
+      reuseProviderSessionForToolChild: plugin.capabilities.reuseProviderSessionForToolChild,
     })
     const requestedSessionId = input.request.sessionId
     const stateSessionId = priorState?.providerSessionId ?? priorState?.conversationId ?? priorState?.parentMessageId
@@ -380,6 +391,20 @@ export class ProviderRuntime {
       messages: input.request.messages,
       update,
     })
+
+    if ((input.context.sessionBoundaryReason === 'tool_child'
+      || input.context.sessionBoundaryReason === 'subagent_child')
+      && result.plugin.capabilities.reuseProviderSessionForToolChild
+      && input.context.parentProviderConversationSessionKey
+      && input.context.parentProviderConversationSessionKey !== input.conversationStateKey) {
+      this.writeSessionState({
+        conversationStateKey: input.context.parentProviderConversationSessionKey,
+        toolSessionKey: input.toolSessionKey,
+        context: input.context,
+        messages: input.request.messages,
+        update,
+      })
+    }
   }
 
   private async *observeStreamEvents(

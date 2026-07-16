@@ -200,14 +200,36 @@ function filterProviderMessageHistory(
 
     const text = extractTextContent(message.content)
     const className = classifyTextPayload(text).className
+    const hasConfigurationMarker = [
+      'You are opencode',
+      'Tool Contract Header',
+      '## Available Tools',
+      '## Tool Call Protocol',
+      'contract_header_version:',
+      'catalog_fingerprint:',
+      'allowed_tools:',
+      'TOOL_WRAP_HINT',
+      'superpowers',
+      'SUBAGENT-STOP',
+    ].some(marker => text.includes(marker))
+    const hasHistoricalContractBlock = [
+      'Tool Contract Header',
+      'catalog_fingerprint:',
+      'allowed_tools:',
+      'superpowers',
+    ].some(marker => text.includes(marker))
     const shouldStrip = (stripRuntimeConfig && className === 'runtime_config')
       || (stripToolContractHistory && className === 'tool_contract')
+      || (message.role === 'system' && hasConfigurationMarker)
+      || (message.role === 'user' && hasHistoricalContractBlock)
 
     if (shouldStrip) {
-      if (message.role !== 'user') continue
-      if (!isLikelyConfigurationPayload(text)) {
-        filtered.push(message)
-        continue
+      if (message.role !== 'user' && message.role !== 'system') continue
+      if (!isLikelyConfigurationPayload(text) && !hasHistoricalContractBlock) {
+        if (message.role === 'user') {
+          filtered.push(message)
+          continue
+        }
       }
       const stripped = stripConfigurationLines(text)
       if (!stripped) continue
@@ -233,22 +255,14 @@ function stripConfigurationLines(text: string): string {
   return text
     .split(/\r?\n/)
     .filter(line => !(
-      line.includes('You are opencode')
-      || line.includes('## Available Tools')
-      || line.includes('## Tool Call Protocol')
-      || line.includes('## Tool Use')
-      || line.includes('## Tools')
-      || line.includes('Tool Contract Header')
-      || line.includes('TOOL USE')
-      || line.includes('Tool Call Formatting')
-      || line.includes('You can invoke the following developer tools')
-      || line.includes('contract_header_version:')
-      || line.includes('catalog_fingerprint:')
-      || line.includes('allowed_tools:')
-      || line.includes('superpowers')
-      || line.includes('SUBAGENT-STOP')
-      || /^\s*Tool `[^`]+`\s*:/i.test(line)
+      /^\s*(?:You are opencode\b|## Available Tools|## Tool Call Protocol|## Tool Use|## Tools|Tool Contract Header|TOOL USE|Tool Call Formatting|You can invoke the following developer tools).*$/i.test(line)
+      || /^\s*(?:contract_header_version|catalog_fingerprint|allowed_tools):\s*/i.test(line)
+      || /^\s*(?:superpowers\b|SUBAGENT-STOP\b).*$/i.test(line)
+      || /^\s*Tool `[^`]+`\s*(?::|$)/i.test(line)
       || /^\s*JSON schema\s*:/i.test(line)
+      || line.includes('<|CHAT2API|tool_calls>')
+      || line.includes('[function_calls]')
+      || line.includes('TOOL_WRAP_HINT')
     ))
     .join('\n')
     .trim()
