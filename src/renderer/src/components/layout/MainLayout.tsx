@@ -4,7 +4,7 @@ import { Header } from './Header'
 
 export function MainLayout() {
   return (
-    <div className="relative isolate flex flex-col h-screen overflow-hidden bg-[var(--bg-primary)]">
+    <div className="relative isolate flex flex-col h-screen overflow-hidden main-layout-bg">
       <div className="bokeh-bg">
         <div className="bokeh-blob bokeh-blob-1" />
         <div className="bokeh-blob bokeh-blob-2" />

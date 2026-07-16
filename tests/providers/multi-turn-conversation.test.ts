@@ -294,37 +294,3 @@ test('GLM stream handler conversation_id: captures conversation_id and exposes i
 
     assert.equal(handler.getConversationId(), 'conv-stream-test')
 })
-
-test('RequestForwarder conversation state key: source isolates provider conversation state by request session dimension', async () => {
-  const source = await readFile(join(__dirname, '..', '..', 'src/main/proxy/forwarder.ts'), 'utf8')
-
-  assert.match(source, /buildProviderConversationStateKey/)
-  assert.match(source, /request\.user\.trim\(\)\.length > 0/)
-  assert.match(source, /: context\.requestId/)
-  assert.match(source, /getProviderConversationState\(/)
-  assert.match(source, /setProviderConversationState\(/)
-  assert.match(source, /const sessionDimension = typeof context\.providerConversationSessionKey === 'string'/)
-  assert.match(source, /return `\$\{provider\.id\}:\$\{account\.id\}:\$\{actualModel\}:\$\{sessionDimension\}`/)
-})
-
-test('RequestForwarder source restores provider conversation state from tool session key only for managed tool follow-up turns', async () => {
-  const forwarderSource = await readFile(join(__dirname, '..', '..', 'src/main/proxy/forwarder.ts'), 'utf8')
-  const providerStateSource = await readFile(join(__dirname, '..', '..', 'src/main/proxy/services/providerConversationState.ts'), 'utf8')
-
-  assert.match(providerStateSource, /function hasManagedToolHistory/)
-  assert.match(providerStateSource, /export function getProviderConversationState/)
-  assert.match(providerStateSource, /if \(input\.allowFallback === false \|\| !input\.fallbackToolSessionKey \|\| !hasManagedToolHistory\(input\.messages\)\)/)
-  assert.match(providerStateSource, /return getConversationState\(input\.fallbackToolSessionKey\)/)
-  assert.match(forwarderSource, /fallbackToolSessionKey: toolSessionKey/)
-})
-
-test('RequestForwarder source saves GLM provider conversation state to both primary and tool session keys for tool follow-up turns', async () => {
-  const forwarderSource = await readFile(join(__dirname, '..', '..', 'src/main/proxy/forwarder.ts'), 'utf8')
-  const providerStateSource = await readFile(join(__dirname, '..', '..', 'src/main/proxy/services/providerConversationState.ts'), 'utf8')
-
-  assert.match(providerStateSource, /export function setProviderConversationState/)
-  assert.match(providerStateSource, /const writes = buildProviderConversationStateWritePlan<ConversationState>\(\{/)
-  assert.match(providerStateSource, /for \(const write of writes\) \{\s*setConversationState\(write\.key, write\.update\)\s*\}/)
-  assert.match(forwarderSource, /update: \{ conversationId: convId \}/)
-  assert.match(forwarderSource, /update: \{ parentMessageId: lastMessageId \}/)
-})

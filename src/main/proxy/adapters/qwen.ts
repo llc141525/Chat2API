@@ -394,6 +394,7 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
     systemText: baseSystemPrompts.join('\n\n') || null,
     summaryText: includeSummary ? effectiveSummaryText : null,
     toolContractText: includeToolContract ? (assembly.toolManifest?.renderedPrompt ?? null) : null,
+    infrastructurePrompt: assembly.infrastructurePrompt ?? null,
     conversationText: conversationParts.length > 0 ? `User: ${conversationParts.join('\n\n')}` : '',
     template: 'prefix',
   })

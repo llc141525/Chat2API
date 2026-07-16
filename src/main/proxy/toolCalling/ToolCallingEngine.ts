@@ -58,6 +58,18 @@ export class ToolCallingEngine {
     }
 
     const toolManifest = this.createToolManifest(plan, request.messages)
+    // Enforce the action constraint at the parser level so the model cannot
+    // bypass a constrained turn by calling the wrong tool. The constraint was
+    // previously only a prompt hint — the parser would accept any valid managed
+    // XML regardless of what the projected catalog showed.
+    if (toolManifest.actionConstraint) {
+      const c = toolManifest.actionConstraint
+      if (c.kind === 'terminal_final_text_required') {
+        plan.allowedToolNames = new Set()
+      } else if (c.toolName) {
+        plan.allowedToolNames = new Set([c.toolName])
+      }
+    }
     return {
       messages: request.messages,
       tools: undefined,
@@ -151,6 +163,8 @@ function renderProjectedPrompt(
 
   const projectedTools = tools.filter((tool) => tool.name === actionConstraint.toolName)
   const projectedPrompt = renderPrompt(protocol, projectedTools, config)
+  const isSkillOrNext = actionConstraint.kind === 'first_skill_required'
+    || actionConstraint.kind === 'next_required_tool'
   const immediateNextOutput = actionConstraint.kind === 'first_skill_required'
     ? [
         '',
@@ -190,13 +204,42 @@ function detectToolActionConstraint(
     .join('\n\n')
 
   if (plan.tools.some(tool => tool.name === 'skill')) {
-    const skillName = extractFirstSkillConstraintName(instructionText)
+    // If a skill is already loaded, use that skill's name regardless of what
+    // the instruction text says. extractFirstSkillConstraintName may match a
+    // different skill name from the agent definition (e.g. capability-probe agent
+    // matches agent-capability-probe while the prompt asks for long-conversation-probe).
+    const skillName = extractLoadedSkillName(messages)
+      ?? extractFirstSkillConstraintName(instructionText)
     if (skillName && !hasCompletedSkillResult(messages, skillName)) {
       return {
         kind: 'first_skill_required',
         toolName: 'skill',
         arguments: { name: skillName },
         reason: 'request_requires_first_assistant_action_skill',
+      }
+    }
+    // Skill is loaded — check if there are pending numbered workflow steps.
+    // If no non-skill tool has been called yet, constrain to the first workflow tool.
+    if (skillName && hasCompletedSkillResult(messages, skillName)) {
+      const nonSkillToolCount = countNonSkillToolCalls(messages)
+      console.log('[ToolCallingEngine] nonSkillToolCount=%d skillResult=%s',
+        nonSkillToolCount, hasCompletedSkillResult(messages, skillName))
+      if (nonSkillToolCount === 0) {
+        // After compaction, assistant tool_call history may be truncated to zero.
+        // Don't force a hardcoded 'read' constraint — the prompt still contains
+        // workflow checkpoint markers with the required next action. The first-turn
+        // optimization (read) was a hint, not a correctness requirement.
+        return null
+      }
+      const nextStep = extractWorkflowNextStep(messages)
+      if (nextStep) {
+        console.log('[ToolCallingEngine] Workflow next step:', JSON.stringify(nextStep))
+        return {
+          kind: 'next_required_tool',
+          toolName: nextStep.toolName,
+          arguments: nextStep.args,
+          reason: 'skill_workflow_next_step_required',
+        }
       }
     }
   }
@@ -252,6 +295,132 @@ function extractFirstSkillConstraintName(text: string): string | undefined {
   return requestedByNameMatch?.[1]
 }
 
+interface WorkflowNextStep {
+  toolName: string
+  args: { filePath?: string; command?: string }
+}
+
+function extractLoadedSkillName(messages: ChatMessage[]): string | undefined {
+  for (const m of messages) {
+    const content = getMessageContent(m)
+    const match = content.match(/<skill_content\s+name="([^"]+)"/)
+    if (match?.[1]) return match[1]
+  }
+  return undefined
+}
+
+function countNonSkillToolCalls(messages: ChatMessage[]): number {
+  let count = 0
+  for (const m of messages) {
+    if (m.role !== 'assistant') continue
+    for (const call of m.tool_calls ?? []) {
+      if (call.function?.name?.toLowerCase() !== 'skill') count++
+    }
+  }
+  return count
+}
+
+const RE_SKILL_STEP = /^\d+\.\s+Use\s+the\s+`(\w+)`\s+tool\s+to\s+(?:read\s+`([^`]+)`|run:?\s*$|run:\s+`([^`]+)`)/im
+
+const RE_CHECKPOINT_NEXT_TOOL = /Required next action:\s+call the\s+`?(\w+)`?\s+tool/i
+
+/**
+ * Scan messages for workflow checkpoint markers placed by context management
+ * during compaction. These explicit markers survive compaction because they
+ * are user-role messages, unlike assistant tool_calls which get truncated.
+ *
+ * Format: "Required next action: call the X tool for this exact skill step now."
+ */
+function extractCheckpointWorkflowNext(messages: ChatMessage[]): WorkflowNextStep | null {
+  for (const message of messages) {
+    if (message.role !== 'user' && message.role !== 'system') continue
+    const text = getMessageContent(message)
+    const toolMatch = text.match(RE_CHECKPOINT_NEXT_TOOL)
+    if (!toolMatch) continue
+    return { toolName: toolMatch[1].toLowerCase(), args: {} }
+  }
+  return null
+}
+
+function extractWorkflowNextStep(messages: ChatMessage[]): WorkflowNextStep | null {
+  // Collect skill instruction steps from skill result messages
+  const steps: Array<{ toolName: string; filePath?: string; command?: string }> = []
+  const skillResultText = messages
+    .filter(m => m.role === 'tool' && m.tool_call_id)
+    .map(getMessageContent)
+    .join('\n')
+  if (!skillResultText.includes('<skill_content')) return null
+
+  const lines = skillResultText.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const match = line.match(RE_SKILL_STEP)
+    if (!match) continue
+    const toolName = (match[1] ?? '').toLowerCase()
+    let filePath = match[2]
+    let command = match[3]
+
+    // If the line ends with 'run:' or 'run:\' and no command was captured on this line,
+    // collect the backtick-quoted command from subsequent lines.
+    if (!command && /\brun:?\s*$/.test(line.trimEnd())) {
+      const collected: string[] = []
+      for (let j = i + 1; j < lines.length; j++) {
+        const cont = lines[j]
+        if (/^\d+\.\s+Use\s+the\s+`/.test(cont)) break
+        const btMatch = cont.match(/`([^`]+)`/)
+        if (btMatch) {
+          collected.push(btMatch[1])
+        } else if (collected.length > 0 && cont.trim() === '') {
+          break
+        } else if (collected.length > 0 && !cont.trimEnd().endsWith('\\')) {
+          break
+        }
+      }
+      if (collected.length > 0) command = collected.join(' ; ')
+    }
+
+    steps.push({ toolName, filePath, command })
+  }
+  if (steps.length === 0) return null
+
+  // Before sequential matching (which is unreliable after compaction):
+  // scan for explicit workflow checkpoint markers from context management.
+  // These survive compaction because they're user-role messages.
+  const checkpointNext = extractCheckpointWorkflowNext(messages)
+  if (checkpointNext) return checkpointNext
+
+  // Collect completed tool calls from assistant messages
+  const completedTools: string[] = []
+  for (const m of messages) {
+    if (m.role !== 'assistant') continue
+    for (const call of m.tool_calls ?? []) {
+      const name = call.function?.name?.toLowerCase()
+      if (name && name !== 'skill') completedTools.push(name)
+    }
+  }
+
+  // Match sequentially: count completed calls per tool and step through instructions
+  const remaining = new Map<string, number>()
+  for (const tool of completedTools) {
+    remaining.set(tool, (remaining.get(tool) ?? 0) + 1)
+  }
+  for (const step of steps) {
+    const key = step.toolName
+    if ((remaining.get(key) ?? 0) > 0) {
+      remaining.set(key, remaining.get(key)! - 1)
+    } else {
+      return {
+        toolName: step.toolName,
+        args: {
+          ...(step.filePath ? { filePath: step.filePath } : {}),
+          ...(step.command ? { command: step.command } : {}),
+        },
+      }
+    }
+  }
+  return null
+}
+
 function extractTerminalFinalTextMarker(text: string): string | undefined {
   const directMatch = text.match(
     /\bfinal\s+assistant\s+text\s+contain(?:s)?\s+[`"']([A-Z0-9][A-Z0-9_.-]*[A-Z0-9])[`"']/i
@@ -290,13 +459,12 @@ function hasCompletedSkillResult(messages: ChatMessage[], skillName: string): bo
   }
 
   return messages.some((message) => {
-    if (message.role !== 'tool') {
-      return false
-    }
     if (message.tool_call_id && skillToolCallIds.has(message.tool_call_id)) {
       return true
     }
-
+    // Check all messages for skill content evidence, not only tool-role messages.
+    // The tool result may be the only surviving evidence after sliding-window trimming
+    // dropped the initiating assistant tool-call message.
     const content = getMessageContent(message)
     return content.includes('<skill_content') && content.includes(skillName)
   })
@@ -430,6 +598,23 @@ function renderToolActionConstraint(constraint: ToolActionConstraint): string {
       'Do not call read, bash, write, skill, or any other tool.',
       'The gateway still preserves the full tool catalog; this prompt shows only the current action surface.',
     ].join('\n')
+  }
+
+  if (constraint.kind === 'next_required_tool') {
+    const toolName = constraint.toolName ?? 'read'
+    const args = constraint.arguments
+    const hint = args.filePath ? `filePath="${args.filePath}"`
+      : args.command ? `command="${args.command}"`
+      : null
+    return [
+      '[High-priority tool action constraint]',
+      'The skill workflow requires an exact next tool call before any other assistant text or final marker.',
+      `Only valid next tool: ${toolName}`,
+      hint ? `Required arguments: ${hint}` : '',
+      'Do not call any other tool before this required step.',
+      'Do not output any final completion marker before the required tool sequence is complete.',
+      'The gateway still preserves the full tool catalog; this prompt shows only the current action surface.',
+    ].filter(Boolean).join('\n')
   }
 
   const requiredXml = renderRequiredSkillXml(constraint.arguments.name)

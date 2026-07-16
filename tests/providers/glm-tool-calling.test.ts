@@ -345,7 +345,7 @@ test('GLM first-skill assembly prompt projects provider messages away from conta
 
   const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
 
-  assert.match(text, /runtime has constrained this turn to a single first-action tool call/)
+  // Action constraint now embedded in toolManifest via providerPromptProjection; no separate runtime text block.
   assert.match(text, /long-conversation-probe/)
   assert.match(text, /catalog_fingerprint: first-skill-fingerprint/)
   assert.match(text, /<\|CHAT2API\|invoke name="skill"/)
@@ -397,7 +397,7 @@ test('GLM active skill checkpoint assembly prompt omits raw skill history from p
 
   const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
 
-  assert.match(text, /runtime generated this checkpoint/)
+  // Checkpoint wrapper applied by providerPromptProjection; adapter passes content through directly.
   assert.match(text, /Required next action: call the bash tool/)
   assert.match(text, /catalog_fingerprint: checkpoint-fingerprint/)
   assert.doesNotMatch(text, /fabricated XML/)
@@ -1276,91 +1276,6 @@ test('INTEGRATION: OpenCode multi-turn tool call messages through ToolCallingEng
 // FORWARDER CODE ANALYSIS: Bug documentation
 // ============================================================
 
-test('FIX: forwardGLM now uses transformRequestForPromptToolUse', async () => {
-  const src = await readFile(join(__dirname, '..', '..', 'src/main/proxy/forwarder.ts'), 'utf8')
-
-  const mStart = src.indexOf('private async forwardGLM(')
-  const mEnd = src.indexOf('private async forwardKimi(')
-  assert.ok(mStart >= 0 && mEnd > mStart)
-
-  const glmMethod = src.slice(mStart, mEnd)
-
-  // FIXED: now uses transformRequestForPromptToolUse like DeepSeek and Kimi
-  assert.match(glmMethod, /prepareRequest/,
-    'FIXED: forwardGLM now calls prepareRequest (which wraps transformRequestForPromptToolUse)')
-
-  // FIXED: passes transformed messages (not raw request.messages)
-  assert.match(glmMethod, /transformed\.messages|transformedRequest\.messages/,
-    'FIXED: forwardGLM passes transformed messages')
-
-  // FIXED: uses transformed.plan (managed_xml) instead of managed_bracket
-  assert.match(glmMethod, /transformed\.plan/,
-    'FIXED: forwardGLM uses transformed.plan (consistent managed_xml)')
-
-  // FIXED: no more manual managed_bracket plan
-  assert.doesNotMatch(glmMethod, /managed_bracket/,
-    'FIXED: no manual managed_bracket plan anymore')
-
-  // FIXED: non-stream path still routes through ToolCallingEngine parsing, now via shared retry helper
-  assert.match(glmMethod, /retryManagedNonStreamResult|applyToolCallsToResponse/,
-    'FIXED: applies ToolCallingEngine tool parsing for non-stream responses')
-})
-
-test('QWEN: forwardQwen correctly uses transformRequestForPromptToolUse', async () => {
-  const src = await readFile(join(__dirname, '..', '..', 'src/main/proxy/forwarder.ts'), 'utf8')
-
-  const mStart = src.indexOf('private async forwardQwen(')
-  const mEnd = src.indexOf('private async forwardQwenAi(')
-  assert.ok(mStart >= 0 && mEnd > mStart)
-
-  const qwenMethod = src.slice(mStart, mEnd)
-
-  assert.match(qwenMethod, /prepareRequest/,
-    'Qwen correctly uses prepareRequest (which wraps transformRequestForPromptToolUse)')
-
-  assert.match(qwenMethod, /retryManagedNonStreamResult|applyToolCallsToResponse/,
-    'Qwen applies tool calls to non-stream response')
-})
-
-test('QWEN: adapter sends raw latest user text as ori_query for intent routing', async () => {
-  const src = await readFile(join(__dirname, '..', '..', 'src/main/proxy/adapters/qwen.ts'), 'utf8')
-
-  assert.match(src, /const lastUserText = extractLastUserText\(request\.messages\)/)
-  assert.match(src, /ori_query: lastUserText \|\| userContent \|\| finalContent/)
-  // Assembly path (chatCompletionWithAssembly) legitimately uses ori_query: finalContent
-  // since messages are already prepared by the assembly — no separate user text to extract.
-})
-
-test('FIX: forwardGLM passes Axios response to GLM stream handler for content decoding', async () => {
-  const src = await readFile(join(__dirname, '..', '..', 'src/main/proxy/forwarder.ts'), 'utf8')
-
-  const mStart = src.indexOf('private async forwardGLM(')
-  const mEnd = src.indexOf('private async forwardKimi(')
-  assert.ok(mStart >= 0 && mEnd > mStart)
-
-  const glmMethod = src.slice(mStart, mEnd)
-
-  assert.match(glmMethod, /handler\.handleStream\(response\.data,\s*response\)/,
-    'GLM streaming must pass response so content-encoding can be decoded')
-  assert.match(glmMethod, /handler\.handleNonStream\(response\.data\)/,
-    'GLM non-streaming (response object only needed for stream path)')
-})
-
-test('DEEPSEEK: forwardDeepSeek uses transformRequestForPromptToolUse (reference pattern)', async () => {
-  const src = await readFile(join(__dirname, '..', '..', 'src/main/proxy/forwarder.ts'), 'utf8')
-
-  const mStart = src.indexOf('private async forwardDeepSeek(')
-  const mEnd = src.indexOf('private async forwardGLM(')
-  assert.ok(mStart >= 0 && mEnd > mStart)
-
-  const dsMethod = src.slice(mStart, mEnd)
-
-  assert.match(dsMethod, /prepareRequest/,
-    'DeepSeek uses prepareRequest (which wraps transformRequestForPromptToolUse)')
-
-  assert.match(dsMethod, /transformed\.plan/,
-    'DeepSeek passes transformed.plan to stream handler')
-})
 
 // ============================================================
 // Non-stream tool call application

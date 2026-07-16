@@ -19,6 +19,8 @@ export interface RenderFinalPromptInput {
   summaryText: string | null
   /** Rendered tool contract prompt from ToolManifest, or null */
   toolContractText: string | null
+  /** Infrastructure prompt (agent definition + skill summary) injected after compaction, or null */
+  infrastructurePrompt?: string | null
   /** Flattened conversation (user/assistant/tool messages) */
   conversationText: string
   /** Where to place tool contract and summary */
@@ -35,6 +37,13 @@ export function renderFinalPrompt(input: RenderFinalPromptInput): string {
   // System text always comes first if present
   if (input.systemText) {
     sections.push(input.systemText)
+  }
+
+  // Infrastructure prompt: agent definition + active skill summary injected after
+  // compaction so the model remembers its role and workflow — these are infrastructure,
+  // not conversation, and must survive compaction.
+  if (input.infrastructurePrompt) {
+    sections.push(input.infrastructurePrompt)
   }
 
   if (input.template === 'prefix') {

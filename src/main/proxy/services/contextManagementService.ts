@@ -131,6 +131,10 @@ function normalizeSummarySnippet(text: string, maxLength = 220): string {
 
 function buildLocalFallbackSummary(messages: ChatMessage[]): string {
   const entries = messages
+    .filter(m => {
+      const content = getTextContent(m.content)
+      return content.length > 0 && !WARMUP_ACK_NOISE_RE.test(content)
+    })
     .map((message, index) => {
       const snippet = normalizeSummarySnippet(getTextContent(message.content))
       if (!snippet) return null
@@ -153,7 +157,7 @@ function buildLocalFallbackSummary(messages: ChatMessage[]): string {
  */
 export const DEFAULT_SLIDING_WINDOW_CONFIG: SlidingWindowConfig = {
   enabled: true,
-  maxMessages: 20,
+  maxMessages: 40,
 }
 
 export const DEFAULT_TOKEN_LIMIT_CONFIG: TokenLimitConfig = {
@@ -770,6 +774,8 @@ function takeRecentTrimableMessages(messages: ChatMessage[], maxCount: number): 
 
   return selectedGroups.flat()
 }
+
+const WARMUP_ACK_NOISE_RE = /\b(WARMUP_ACK_\d+|reply\s+exactly\s+WARMUP|compaction\s+warmup\s+turn|do\s+not\s+use\s+tools)\b/i
 
 function insertSummaryBeforeRecentMessages(
   messages: ChatMessage[],

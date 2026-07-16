@@ -2,7 +2,7 @@
  * ProviderRuntime Service
  * Abstracts session state management for provider adapters.
  * Handles reading/writing conversation state with fallback and mirroring logic.
- * This is Phase 2 of the provider plugin architecture migration.
+ * This is Phase 3 of the provider plugin architecture migration.
  */
 
 import type { ProxyContext, ChatCompletionRequest } from '../types.ts'
@@ -26,14 +26,11 @@ import {
 } from './providerConversationState.ts'
 import axios, { AxiosError, type AxiosInstance, type AxiosResponse } from 'axios'
 
-export type ProviderStateShape = 'qwen' | 'glm' | 'deepseek' | 'generic'
-
 export type ReadSessionStateInput = {
   conversationStateKey: string
   toolSessionKey: string
   context: ProxyContext
   messages?: ChatCompletionRequest['messages']
-  providerStateShape: ProviderStateShape
 }
 
 export type WriteSessionStateInput = {
@@ -74,8 +71,8 @@ export type ProviderRuntimeOptions = {
 
 function getProviderSessionIdFromStateUpdate(update: Partial<ConversationState>): string | undefined {
   const candidates = [
+    update.providerSessionId,
     update.childProviderSessionId,
-    update.qwenSessionId,
     update.conversationId,
   ]
 
@@ -130,7 +127,6 @@ export class ProviderRuntime {
       toolSessionKey: input.toolSessionKey,
       context: input.context,
       messages: input.request.messages,
-      providerStateShape: input.provider.id === 'qwen' ? 'qwen' : input.provider.id === 'glm' ? 'glm' : 'generic',
     })
 
     const sessionBoundaryPlan = buildSessionBoundaryPlan({
@@ -139,12 +135,12 @@ export class ProviderRuntime {
       request: input.request,
     })
     const requestedSessionId = input.request.sessionId
-    const stateSessionId = priorState?.qwenSessionId ?? priorState?.conversationId ?? priorState?.parentMessageId
+    const stateSessionId = priorState?.providerSessionId ?? priorState?.conversationId ?? priorState?.parentMessageId
     const providerSessionId = sessionBoundaryPlan.expectedProviderSessionIdReuse
       ? requestedSessionId ?? stateSessionId
       : undefined
     const providerParentReqId = sessionBoundaryPlan.expectedProviderSessionIdReuse
-      ? input.request.parentReqId ?? priorState?.qwenParentReqId ?? priorState?.parentMessageId
+      ? input.request.parentReqId ?? priorState?.providerParentReqId ?? priorState?.parentMessageId
       : undefined
     const providerSessionIdSource = providerSessionId
       ? requestedSessionId ? 'request' : 'state'
@@ -367,11 +363,10 @@ export class ProviderRuntime {
     },
   ): void {
     const update: Partial<ConversationState> = {
+      providerSessionId: result.sessionId,
+      providerParentReqId: result.reqId || result.webRequest.reqId,
       ...(result.plugin.capabilities.sessionIdKind === 'conversation_id'
         ? { conversationId: result.sessionId }
-        : {}),
-      ...(result.plugin.id === 'qwen'
-        ? { qwenSessionId: result.sessionId, qwenParentReqId: result.reqId || result.webRequest.reqId }
         : {}),
       ...(result.plugin.capabilities.supportsParentMessageId
         ? { parentMessageId: result.reqId || result.webRequest.reqId }

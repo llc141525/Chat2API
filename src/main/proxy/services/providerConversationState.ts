@@ -8,10 +8,14 @@ import {
 export interface ConversationState {
   parentMessageId?: string
   conversationId?: string
+  /** ProviderRuntime generic session tracking — the canonical fields for all providers */
+  providerSessionId?: string
+  providerParentReqId?: string
+  /** Legacy Qwen-specific fields — retained only for backward compat with dedicated forwarders */
   qwenSessionId?: string
   qwenParentReqId?: string
   childSessionHandoff?: ChildSessionHandoff
-  /** Qwen session ID of the child session, stored so the parent can clean it up after consuming the handoff */
+  /** Legacy Qwen-specific child session ID */
   childQwenSessionId?: string
   /** Provider-neutral child session ID for cleanup after parent handoff consumption */
   childProviderSessionId?: string

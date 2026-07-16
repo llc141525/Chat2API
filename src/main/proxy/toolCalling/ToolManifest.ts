@@ -1,11 +1,13 @@
 import type { ToolProtocolId, NormalizedToolDefinition } from './types.ts'
 
 export interface ToolActionConstraint {
-  kind: 'first_skill_required' | 'terminal_final_text_required'
-  toolName: 'skill' | null
+  kind: 'first_skill_required' | 'terminal_final_text_required' | 'next_required_tool'
+  toolName: string | null
   arguments: {
     name?: string
     exactText?: string
+    filePath?: string
+    command?: string
   }
   reason: string
 }

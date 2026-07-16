@@ -8,11 +8,11 @@ param(
 
     [int]$TimeoutSeconds = 240,
 
-    [int]$ContextMaxMessages = 12,
+    [int]$ContextMaxMessages = 10,
 
-    [int]$SummaryKeepRecentMessages = 6,
+    [int]$SummaryKeepRecentMessages = 5,
 
-    [int]$WarmupTurns = 6,
+    [int]$WarmupTurns = 7,
 
     [switch]$SkipProviderPreflight
 )
@@ -312,11 +312,12 @@ function Get-NewLogText([string]$LogPath, [int]$BeforeLineCount) {
 }
 
 function Test-HasSummaryCompactionEvidence([string]$LogText) {
-    return $LogText.IndexOf("[ContextManagementService] Strategy summary trimmed", [StringComparison]::OrdinalIgnoreCase) -ge 0
+    # Log format: [ContextManagementService] Strategy trace: {"strategyName":"summary","trimmed":true,...}
+    return ($LogText -match '"strategyName":"summary".*"trimmed":true')
 }
 
 function Test-HasSlidingCompactionEvidence([string]$LogText) {
-    return $LogText.IndexOf("[ContextManagementService] Strategy slidingWindow trimmed", [StringComparison]::OrdinalIgnoreCase) -ge 0
+    return ($LogText -match '"strategyName":"slidingWindow".*"trimmed":true')
 }
 
 function Read-ContextManagementState([string]$StoreDir) {
@@ -530,7 +531,7 @@ Write-Host " Context: slidingWindow.maxMessages=$ContextMaxMessages summary.keep
 Write-Host " Warmup turns: $WarmupTurns"
 Write-Host "============================================"
 
-$probeDir = ".agent-probe"
+$probeDir = Join-Path (Resolve-Path ".") ".agent-probe"
 if (Test-Path $probeDir) {
     Remove-Item -Recurse -Force $probeDir
 }

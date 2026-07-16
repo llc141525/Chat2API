@@ -29,6 +29,8 @@ export interface RequestAssembly {
   workflowDigest?: WorkflowStateDigest | null
   /** One-turn high-priority tool action constraint, when present */
   toolActionConstraint?: ToolActionConstraint | null
+  /** Infrastructure prompt injected after compaction (agent definition + skill summary), or null */
+  infrastructurePrompt?: string | null
   /** Metadata for diagnostics */
   metadata: AssemblyMetadata
 }
@@ -100,9 +102,14 @@ export function buildRequestAssembly(input: BuildRequestAssemblyInput): RequestA
     && compactMessages.every((message, index) => message === input.messages[index])
     ? input.messages
     : compactMessages
+  // Extract infrastructure from raw messages BEFORE filtering — compaction
+  // strips agent definitions and skill content. Re-inject them so the model
+  // retains its role and multi-step skill workflow across compactions.
+  const infrastructurePrompt = buildInfrastructurePromptFromMessages(input.messages)
 
   return {
     messages: providerMessages,
+    infrastructurePrompt,
     toolManifest: input.toolManifest,
     summaryText: workflowDigest
       ? renderWorkflowDigestForProvider(workflowDigest)
@@ -160,6 +167,16 @@ export function selectProviderMessagesForAssembly(
       'Use only the authoritative managed tool contract below for the next assistant message.',
     ].join('\n'),
   }]
+}
+
+function findLastTextContaining(messages: ChatMessage[], marker: string): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const content = extractTextContent(messages[index].content).trim()
+    if (content.includes(marker)) {
+      return content
+    }
+  }
+  return null
 }
 
 function filterProviderMessageHistory(
@@ -237,12 +254,68 @@ function stripConfigurationLines(text: string): string {
     .trim()
 }
 
-function findLastTextContaining(messages: ChatMessage[], marker: string): string | null {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const content = extractTextContent(messages[index].content).trim()
-    if (content.includes(marker)) {
-      return content
+function buildInfrastructurePromptFromMessages(messages: ChatMessage[]): string | null {
+  const sections: string[] = []
+
+  // Agent definition: first system-role message not containing tool contract markers
+  const agentDef = messages.find(m => {
+    if (m.role !== 'system') return false
+    const text = extractTextContent(m.content).trim()
+    return text.length > 0
+      && !text.includes('## Available Tools')
+      && !text.includes('Tool Contract Header')
+      && !text.includes('[Prior conversation summary')
+      && !text.includes('[Local fallback summary')
+  })
+  if (agentDef) {
+    const text = extractTextContent(agentDef.content).trim()
+    if (text.length > 0) {
+      sections.push(`[Role definition — authoritative for this session]\n${text.slice(0, 2000)}`)
     }
   }
-  return null
+
+  // Active skill summary: numbered steps from the last tool result with <skill_content>
+  const skillMessages = messages.filter(m =>
+    m.role === 'tool' && m.tool_call_id
+    && typeof m.content === 'string'
+    && m.content.includes('<skill_content')
+  )
+  if (skillMessages.length > 0) {
+    const lastSkill = skillMessages[skillMessages.length - 1]
+    const content = typeof lastSkill.content === 'string' ? lastSkill.content : ''
+    const steps = extractSkillStepLines(content)
+    if (steps) {
+      sections.push(`[Active skill workflow — follow these steps in order]\n${steps}`)
+    }
+  }
+
+  return sections.length > 0 ? sections.join('\n\n') : null
+}
+
+function extractSkillStepLines(skillContent: string): string | null {
+  const lines = skillContent.split(/\r?\n/)
+  const steps: string[] = []
+  let inSteps = false
+  let collectingCommand = false
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (/^\d+\.\s+Use\s+the\s+`/.test(line)) {
+      inSteps = true
+      collectingCommand = /\brun:?\s*$/.test(line.trimEnd())
+      steps.push(line.trim())
+    } else if (inSteps && /^\d+\./.test(line) && !collectingCommand) {
+      collectingCommand = /\brun:?\s*$/.test(line.trimEnd())
+      steps.push(line.trim())
+    } else if (collectingCommand && line.trim() && !/^\d+\.\s+Use\s+the\s+`/.test(line)) {
+      const cmdMatch = line.match(/`([^`]+)`/)
+      if (cmdMatch) {
+        steps.push(`  ${cmdMatch[1]}`)
+        collectingCommand = false
+      }
+    } else if (inSteps && line.trim() === '' && steps.length >= 2 && !collectingCommand) {
+      break
+    }
+    if (steps.join('\n').length > 800) break
+  }
+  return steps.length > 0 ? steps.join('\n') : null
 }

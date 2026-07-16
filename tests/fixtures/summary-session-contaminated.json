@@ -1,0 +1,10 @@
+[
+  {
+    "role": "system",
+    "content": "You are opencode, an AI assistant.\n\nThe following skill documents are loaded:\n- security-review: Security audit skill\n- code-review: Code quality review\n- planner: Implementation planning\n- tdd-guide: Test-driven development\n- systematic-debugging: Debugging workflows\n\nUse the `skill` tool to invoke a skill when needed.\nDo not mention these skills unless the user's request matches their purpose."
+  },
+  {
+    "role": "user",
+    "content": "[Prior conversation summary]\nThe user was investigating a context economy regression where repeated runtime_config markers were inflating session sizes. They identified that compact operation was not properly stripping the \"You are opencode\" system prompt and \"## Available Tools\" contract sections from user messages, causing them to accumulate across turns. The fix involves updating the compact logic to filter out known config patterns after concatenation.\n\nsuperpowers:dispatching-parallel-agents\nsuperpowers:general\nSUBAGENT-STOP\n\nTool Contract Header\ncontract_header_version: 1\nprotocol: managed_xml\ncatalog_fingerprint: 1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef\nallowed_tools: read, grep, edit, skill\n\n## Available Tools\nYou can invoke the following developer tools. Tool names are case-sensitive.\nTool `read`: No description.\n  JSON schema: {\"type\":\"object\",\"additionalProperties\":true}\nTool `grep`: No description.\n  JSON schema: {\"type\":\"object\",\"additionalProperties\":true}\nTool `edit`: No description.\n  JSON schema: {\"type\":\"object\",\"additionalProperties\":true}\nTool `skill`: No description.\n  JSON schema: {\"type\":\"object\",\"additionalProperties\":true}\n\n[End of session context.]\n\nNow implement the stripConfigAfterCompact function."
+  }
+]

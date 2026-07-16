@@ -1,0 +1,69 @@
+[
+  {
+    "role": "system",
+    "content": "You are opencode, an AI assistant. You have access to the following tools..."
+  },
+  {
+    "role": "user",
+    "content": "Read the config file and report its contents."
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+          "name": "read",
+          "arguments": "{\"filePath\":\"config.yaml\"}"
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "key: value\nmode: production",
+    "tool_call_id": "call_1"
+  },
+  {
+    "role": "user",
+    "content": "[Workflow state digest v1 — runtime configuration, tool contracts, skill documents, and raw tool payloads omitted.]\nSource: local_fallback\nUser goal: Read the config file and report its contents.\n\nYou are opencode, an AI assistant.\n\nTool Contract Header\ncontract_header_version: 1\nprotocol: managed_xml\ncatalog_fingerprint: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1\nallowed_tools: read, grep, edit, skill\n\nThe tools listed in this contract are available for this turn because they were provided by the runtime.\nChat2API is a gateway: emit the managed XML below and the gateway will translate it into the real OpenAI tool call for the client.\nDo not compare this catalog with provider-native website tools, browser tools, or any tools named by the underlying web model UI.\n\n## Available Tools\nYou can invoke the following developer tools. Tool names are case-sensitive.\nThe tool list in this section is authoritative for the current turn.\nChat2API is a gateway: emit the managed XML below and the gateway will translate it into the real OpenAI tool call for the client.\n\nTool `read`: No description.\n  JSON schema: {\"type\":\"object\",\"additionalProperties\":true}\nTool `grep`: No description.\n  JSON schema: {\"type\":\"object\",\"additionalProperties\":true}\n\nWhen calling tools, respond with only a Chat2API XML block that uses the exact tool name and the exact parameter names from that tool's JSON schema.\n\nNow update the config to enable debug mode."
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_2",
+        "type": "function",
+        "function": {
+          "name": "edit",
+          "arguments": "{\"filePath\":\"config.yaml\",\"old_string\":\"mode: production\",\"new_string\":\"mode: debug\"}"
+        }
+      }
+    ]
+  },
+  {
+    "role": "user",
+    "content": "[Workflow state digest v1 — runtime configuration, tool contracts, skill documents, and raw tool payloads omitted.]\nSource: local_fallback\nUser goal: Enable debug mode in config.\n\nYou are opencode, an AI assistant.\n\nTool Contract Header\ncontract_header_version: 1\nprotocol: managed_xml\ncatalog_fingerprint: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1\nallowed_tools: read, grep, edit, skill\n\nThe tools listed in this contract are available for this turn because they were provided by the runtime.\nChat2API is a gateway: emit the managed XML below and the gateway will translate it into the real OpenAI tool call for the client.\nDo not compare this catalog with provider-native website tools, browser tools, or any tools named by the underlying web model UI.\n\n## Available Tools\nYou can invoke the following developer tools. Tool names are case-sensitive.\nThe tool list in this section is authoritative for the current turn.\nChat2API is a gateway: emit the managed XML below and the gateway will translate it into the real OpenAI tool call for the client.\n\nTool `read`: No description.\n  JSON schema: {\"type\":\"object\",\"additionalProperties\":true}\nTool `edit`: No description.\n  JSON schema: {\"type\":\"object\",\"additionalProperties\":true}\nTool `grep`: No description.\n  JSON schema: {\"type\":\"object\",\"additionalProperties\":true}\n\nWhen calling tools, respond with only a Chat2API XML block that uses the exact tool name and the exact parameter names from that tool's JSON schema.\n\nNow run the tests to verify debug mode works."
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "id": "call_3",
+        "type": "function",
+        "function": {
+          "name": "bash",
+          "arguments": "{\"command\":\"npm test\"}"
+        }
+      }
+    ]
+  },
+  {
+    "role": "system",
+    "content": "superpowers:dispatching-parallel-agents\nsuperpowers:general\nSUBAGENT-STOP\n\nThe subagent session has ended. Returning control to the main agent."
+  }
+]
