@@ -47,7 +47,7 @@ Tool results will be provided as Chat2API XML result blocks:
   },
 
   parse(content: string, context: ToolParseContext) {
-    const parseable = stripFencedCodeBlocks(content)
+    const parseable = normalizePipeClosedTags(stripFencedCodeBlocks(content))
     const allowedNames = toolNames(context.tools)
     const rawMatches: string[] = []
     const invalidToolNames: string[] = []
@@ -131,6 +131,13 @@ Tool results will be provided as Chat2API XML result blocks:
   formatToolResult(result) {
     return `<|CHAT2API|tool_result tool_call_id="${escapeXmlAttribute(result.toolCallId)}"><![CDATA[${result.content}]]></|CHAT2API|tool_result>`
   },
+}
+
+function normalizePipeClosedTags(content: string): string {
+  return content.replace(
+    /(<\/?\|CHAT2API\|(?:tool_calls|invoke|parameter|tool_result)(?:\s[^<>]*)?)\|>/g,
+    '$1>',
+  )
 }
 
 function renderManagedXmlExamples(tools: Parameters<ToolProtocolAdapter['renderPrompt']>[0]): string {

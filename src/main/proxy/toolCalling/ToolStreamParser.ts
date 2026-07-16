@@ -29,6 +29,9 @@ export class ToolStreamParser {
   private buffer = ''
   private isBufferingToolCall = false
   private emittedToolCall = false
+  // Once a response starts a tool block and that block is rejected, the
+  // remaining stream is protocol residue, not user-facing assistant text.
+  private suppressRemainingOutput = false
   private nextToolCallIndex = 0
   private observedAssistantText = ''
   private observation: ToolStreamObservation = {
@@ -51,9 +54,12 @@ export class ToolStreamParser {
 
     this.observation.rawContentLength += content.length
     this.observedAssistantText += content
-    this.buffer += content
+    this.buffer = this.plan.protocol === 'managed_xml'
+      ? normalizePipeClosedManagedXml(`${this.buffer}${content}`)
+      : this.buffer + content
     this.observeAvailabilityDrift()
     const chunks: any[] = []
+    if (this.suppressRemainingOutput) return chunks
     const suppressPlainText = this.emittedToolCall
 
     if (!this.isBufferingToolCall) {
@@ -123,6 +129,7 @@ export class ToolStreamParser {
       )
       this.isBufferingToolCall = false
       this.buffer = ''
+      this.suppressRemainingOutput = true
     }
 
     return chunks
@@ -130,6 +137,12 @@ export class ToolStreamParser {
 
   flush(baseChunk: any): any[] {
     if (!this.buffer) return []
+
+    if (this.suppressRemainingOutput) {
+      this.buffer = ''
+      this.isBufferingToolCall = false
+      return []
+    }
 
     this.observeAvailabilityDrift()
     const parsed = parseBufferedToolCall(this.buffer, this.plan, { final: true })
@@ -225,6 +238,13 @@ function parseBufferedToolCall(
 
   const selected = getToolProtocol(plan.protocol)
   return selected.parse(buffer, { tools: plan.tools, protocol: plan.protocol })
+}
+
+function normalizePipeClosedManagedXml(content: string): string {
+  return content.replace(
+    /(<\/?\|CHAT2API\|(?:tool_calls|invoke|parameter|tool_result)(?:\s[^<>]*)?)\|>/g,
+    '$1>',
+  )
 }
 
 function parseManagedXmlBufferedToolCall(

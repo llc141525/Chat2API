@@ -16,9 +16,6 @@ import { createGunzip, createInflate, createBrotliDecompress } from 'zlib'
 import * as ZstdCodec from 'zstd-codec'
 import { createParser } from 'eventsource-parser'
 import type { Account, Provider } from '../../store/types.ts'
-import { hasToolUse, parseToolUse } from '../promptToolUse.ts'
-import type { ToolCall } from '../promptToolUse.ts'
-
 import { parseToolCallsFromText, type ParsedToolCall } from '../utils/toolParser.ts'
 import { createBaseChunk } from '../utils/streamToolHandler.ts'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
@@ -29,13 +26,6 @@ import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts
 import { renderFinalPrompt } from './renderFinalPrompt.ts'
 import { selectProviderMessagesForAssembly, type RequestAssembly } from '../RequestAssembly.ts'
 import type { PromptRefreshMode } from '../promptBudgetPolicy.ts'
-
-/**
- * Check if content contains tool calls (both bracket and XML formats)
- */
-function hasToolCalls(content: string): boolean {
-  return content.includes('[function_calls]') || hasToolUse(content)
-}
 
 const QWEN_API_BASE = 'https://chat2.qianwen.com'
 const QWEN_CHAT2_API_BASE = 'https://chat2-api.qianwen.com'
@@ -653,175 +643,6 @@ export class QwenAdapter {
     }
 
     return true
-  }
-
-  async chatCompletion(request: ChatCompletionRequest): Promise<{
-    response: AxiosResponse
-    sessionId: string
-    reqId: string
-  }> {
-    const ticket = this.getTicket()
-    if (!ticket) {
-      throw new Error('Qwen ticket not configured, please add ticket in account settings')
-    }
-
-    const reqId = uuid(false)
-    const sessionId = request.sessionId || uuid(false)
-    const parentReqId = request.sessionId ? (request.parentReqId || '0') : undefined
-    
-    let actualModel = this.mapModel(request.model)
-    
-    // Determine if thinking and web search should be enabled
-    // Priority: explicit parameters > model name detection
-    // Use originalModel for feature detection (preserves user's intent before mapping)
-    const modelForDetection = request.originalModel || request.model
-    const modelLower = modelForDetection.toLowerCase()
-    
-    let enableThinking = request.enableThinking ?? false
-    let enableWebSearch = request.enableWebSearch ?? false
-    
-    // Auto-enable based on model name (if not explicitly set)
-    if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
-      enableThinking = true
-      console.log('[Qwen] Thinking mode enabled (from model name)')
-    }
-    if (!enableWebSearch && modelLower.includes('search')) {
-      enableWebSearch = true
-      console.log('[Qwen] Web search enabled (from model name)')
-    }
-
-    // Map thinking mode to model
-    if (enableThinking) {
-      // Use thinking model if available
-      if (actualModel === 'Qwen3-Max') {
-        actualModel = 'Qwen3-Max-Thinking-Preview'
-        console.log('[Qwen] Using thinking model:', actualModel)
-      }
-    }
-    
-    console.log('[Qwen] Session info:', {
-      sessionId,
-      reqId,
-      parentReqId,
-    })
-    console.log('[Qwen] Using model:', actualModel)
-
-    // Tool prompts are injected by ToolCallingEngine in the forwarder.
-
-    const timestamp = Date.now()
-    const nonce = generateNonce()
-
-    const requestBody = buildQwenChatRequestBody({
-      request,
-      actualModel,
-      sessionId,
-      reqId,
-      parentReqId,
-      timestamp,
-      enableThinking,
-      enableWebSearch,
-    })
-
-    const queryString = `biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen&ut=${uuid(false)}&nonce=${nonce}&timestamp=${timestamp}`
-    const url = `${QWEN_API_BASE}/api/v2/chat?${queryString}`
-
-    console.log('[Qwen] Sending request to /api/v2/chat...')
-
-    const response = await this.axiosInstance.post(url, requestBody, {
-      headers: {
-        ...DEFAULT_HEADERS,
-        'Content-Type': 'application/json',
-        Cookie: `tongyi_sso_ticket=${ticket}`,
-      },
-      responseType: 'stream',
-      timeout: 120000,
-      decompress: false,
-    })
-
-    console.log('[Qwen] Response status:', response.status)
-    console.log('[Qwen] Response headers:', JSON.stringify(response.headers, null, 2))
-
-    return { response, sessionId, reqId }
-  }
-
-  async chatCompletionWithAssembly(
-    assembly: import('../RequestAssembly.ts').RequestAssembly,
-    request: ChatCompletionRequest
-  ): Promise<{
-    response: import('axios').AxiosResponse
-    sessionId: string
-    reqId: string
-  }> {
-    const ticket = this.getTicket()
-    if (!ticket) {
-      throw new Error('Qwen ticket not configured, please add ticket in account settings')
-    }
-
-    const reqId = uuid(false)
-    const sessionId = request.sessionId || uuid(false)
-    const parentReqId = request.sessionId ? (request.parentReqId || '0') : undefined
-
-    let actualModel = this.mapModel(request.model)
-
-    const modelForDetection = request.originalModel || request.model
-    const modelLower = modelForDetection.toLowerCase()
-
-    let enableThinking = request.enableThinking ?? false
-    let enableWebSearch = request.enableWebSearch ?? false
-
-    if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
-      enableThinking = true
-      console.log('[Qwen] Thinking mode enabled (from model name)')
-    }
-    if (!enableWebSearch && modelLower.includes('search')) {
-      enableWebSearch = true
-      console.log('[Qwen] Web search enabled (from model name)')
-    }
-
-    if (enableThinking) {
-      if (actualModel === 'Qwen3-Max') {
-        actualModel = 'Qwen3-Max-Thinking-Preview'
-        console.log('[Qwen] Using thinking model:', actualModel)
-      }
-    }
-
-    console.log('[Qwen] Session info:', { sessionId, reqId, parentReqId })
-    console.log('[Qwen] Using model:', actualModel)
-
-    const timestamp = Date.now()
-    const nonce = generateNonce()
-
-    const requestBody = buildQwenAssemblyRequestBody({
-      assembly,
-      request,
-      actualModel,
-      sessionId,
-      reqId,
-      parentReqId,
-      timestamp,
-      enableThinking,
-      enableWebSearch,
-    })
-
-    const queryString = `biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen&ut=${uuid(false)}&nonce=${nonce}&timestamp=${timestamp}`
-    const url = `${QWEN_API_BASE}/api/v2/chat?${queryString}`
-
-    console.log('[Qwen] Sending request via assembly path to /api/v2/chat...')
-
-    const response = await (this as any).axiosInstance.post(url, requestBody, {
-      headers: {
-        ...DEFAULT_HEADERS,
-        'Content-Type': 'application/json',
-        Cookie: `tongyi_sso_ticket=${ticket}`,
-      },
-      responseType: 'stream',
-      timeout: 120000,
-      decompress: false,
-    })
-
-    console.log('[Qwen] Response status:', response.status)
-
-    return { response, sessionId, reqId }
   }
 
   async deleteSession(sessionId: string): Promise<boolean> {

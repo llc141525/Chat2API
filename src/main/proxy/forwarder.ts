@@ -304,14 +304,11 @@ export class RequestForwarder {
     request: ChatCompletionRequest,
     context: ProxyContext
   ): string {
-    // For server_summary boundaries, use the PARENT session key as the
-    // stable dimension. The child key changes per-request (unique epoch
-    // digest), but state must persist across all requests in the same
-    // compaction epoch.
-    const isServerSummary = context.sessionBoundaryReason === 'server_summary'
-    const rawDimension = isServerSummary && typeof context.parentProviderConversationSessionKey === 'string'
-      ? context.parentProviderConversationSessionKey.trim()
-      : typeof context.providerConversationSessionKey === 'string' && context.providerConversationSessionKey.trim().length > 0
+    // A server summary starts a new provider-side context epoch. Keep state
+    // on the epoch key so the first summary request cannot reuse the old
+    // provider conversation, while later requests in the same epoch can
+    // reuse the fresh provider session created by that request.
+    const rawDimension = typeof context.providerConversationSessionKey === 'string' && context.providerConversationSessionKey.trim().length > 0
       ? context.providerConversationSessionKey.trim()
       : typeof request.user === 'string' && request.user.trim().length > 0
       ? request.user.trim()
@@ -460,7 +457,8 @@ export class RequestForwarder {
       let forwardContext = context
       let contextProcessResult: ContextProcessResult | undefined
 
-      if (config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
+      const isSummaryGeneratorRequest = context.sessionBoundaryReason === 'summary_generator'
+      if (!isSummaryGeneratorRequest && config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
         try {
           const summaryGenerator = this.createSummaryGenerator(
             account,

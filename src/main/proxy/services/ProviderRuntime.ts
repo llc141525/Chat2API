@@ -25,6 +25,7 @@ import {
   shouldUseProviderConversationFallback,
 } from './providerConversationState.ts'
 import axios, { AxiosError, type AxiosInstance, type AxiosResponse } from 'axios'
+import { runThroughProviderRequestGate } from './providerRequestGate.ts'
 
 export type ReadSessionStateInput = {
   conversationStateKey: string
@@ -174,7 +175,8 @@ export class ProviderRuntime {
       providerSessionIdSource,
     }))
 
-    const webRequest = await plugin.buildRequest({
+    let webRequest: ProviderWebRequest | undefined
+    const executeRequest = () => plugin.buildRequest({
       provider: input.provider,
       account: input.account,
       model: input.actualModel,
@@ -190,9 +192,19 @@ export class ProviderRuntime {
       parentReqId: providerParentReqId,
       enableThinking: !!input.request.reasoning_effort,
       enableWebSearch: !!input.request.web_search,
+    }).then(request => {
+      webRequest = request
+      return this.transport(request, { runtimeRequest: input, plugin })
     })
 
-    const response = await this.transport(webRequest, { runtimeRequest: input, plugin })
+    const response = plugin.capabilities.requestThrottle
+      ? await runThroughProviderRequestGate(
+        `${input.provider.id}:${input.account.id}`,
+        plugin.capabilities.requestThrottle,
+        executeRequest,
+        result => Number((result as any).status ?? 200),
+      )
+      : await executeRequest()
     const status = Number((response as any).status ?? 200)
     const headers = this.normalizeHeaders((response as any).headers)
     const latency = Date.now() - startTime
@@ -220,9 +232,9 @@ export class ProviderRuntime {
 
       this.writeRuntimeSessionState(input, {
         plugin,
-        webRequest,
-        sessionId: webRequest.sessionId,
-        reqId: webRequest.reqId,
+      webRequest: webRequest!,
+      sessionId: webRequest!.sessionId,
+      reqId: webRequest!.reqId,
       })
 
       return {
@@ -294,9 +306,9 @@ export class ProviderRuntime {
     })
     this.writeRuntimeSessionState(input, {
       plugin,
-      webRequest,
-      sessionId: parsed.sessionId || webRequest.sessionId,
-      reqId: parsed.reqId || webRequest.reqId,
+      webRequest: webRequest!,
+      sessionId: parsed.sessionId || webRequest!.sessionId,
+      reqId: parsed.reqId || webRequest!.reqId,
     })
 
     return {

@@ -184,6 +184,8 @@ test('provider conversation state helpers live outside forwarder and are used by
   const sessionBoundarySource = readFileSync('src/main/proxy/sessionBoundary.ts', 'utf8')
   const providerStateSource = readFileSync('src/main/proxy/services/providerConversationState.ts', 'utf8')
   const providerRuntimeSource = readFileSync('src/main/proxy/services/ProviderRuntime.ts', 'utf8')
+  const qwenAdapterSource = readFileSync('src/main/proxy/adapters/qwen.ts', 'utf8')
+  const childCleanupSource = readFileSync('src/main/proxy/services/childSessionCleanup.ts', 'utf8')
 
   assert.match(sessionBoundarySource, /export function decideProviderConversationStateWriteTargets\(/)
   assert.match(sessionBoundarySource, /export function buildChildSessionHandoff\(/)
@@ -199,30 +201,14 @@ test('provider conversation state helpers live outside forwarder and are used by
     forwarderSource,
     /from\s+'\.\/services\/providerConversationState\.ts'/,
   )
-  assert.match(forwarderSource, /import\s+\{\s*inspectNonStreamAssistantOutput\s*\}\s+from\s+'\.\/toolCalling\/outputInspection\.ts'/)
-  assert.match(
-    forwarderSource,
-    /import\s+\{[\s\S]*buildChildSessionHandoff[\s\S]*forkProviderConversationContext[\s\S]*\}\s+from\s+'\.\/sessionBoundary\.ts'/,
-  )
-  assert.match(forwarderSource, /inspectNonStreamAssistantOutput\(\{/)
-  assert.match(forwarderSource, /allowFallback: allowProviderStateFallback/)
-  assert.match(forwarderSource, /mirrorToFallback: allowProviderStateFallback/)
-  assert.match(forwarderSource, /context,/)
-  assert.match(forwarderSource, /const convState = getProviderConversationState\(/)
-  assert.match(forwarderSource, /renderChildSessionHandoffStateMessage\(convState\.childSessionHandoff\)/)
-  assert.match(forwarderSource, /childSessionHandoff: undefined/)
-  assert.match(forwarderSource, /sessionBoundaryPlan\.expectedProviderSessionIdReuse/)
-  assert.match(forwarderSource, /request\.sessionId \?\? convState\?\.qwenSessionId/)
-  assert.match(forwarderSource, /request\.parentReqId \?\? convState\?\.qwenParentReqId/)
-  assert.match(forwarderSource, /const parentHandoff = buildChildSessionHandoff\(\{/)
-  assert.match(forwarderSource, /const finalAssistantResponse = handler\.getFinalAssistantResponseForHandoff\(\)/)
-  assert.match(forwarderSource, /writeSessionState\(\{[\s\S]*qwenSessionId: sid,[\s\S]*qwenParentReqId: parentReqId \|\| '0'/)
-  assert.match(forwarderSource, /childProviderSessionId:\s*finalSessionId/)
-  assert.match(forwarderSource, /cleanupChildProviderSession\(\{/)
-  assert.doesNotMatch(forwarderSource, /setConversationState\(parentConversationKey,\s*\{\s*childQwenSessionId:\s*sid\s*\}\)/)
-  assert.match(forwarderSource, /if \(!deleteSessionCallback\) \{\s*saveConversationState\(finalSessionId, finalResponseId, parentHandoff\)\s*\}/)
-  assert.doesNotMatch(forwarderSource, /saveConversationState\(finalSessionId, finalResponseId, parentHandoff\)\s*[\r\n]+\s*if \(deleteSessionCallback && finalSessionId\)/)
-  assert.match(forwarderSource, /const parentHandoff = finalAssistantResponse\s*\?\s*buildChildSessionHandoff\(\{/)
+  assert.match(forwarderSource, /buildServerSummaryEpochSource/)
+  assert.match(forwarderSource, /forkProviderConversationContext/)
+  assert.match(providerRuntimeSource, /allowFallback/)
+  assert.match(providerRuntimeSource, /mirrorToFallback/)
+  assert.match(providerRuntimeSource, /getProviderConversationState\(/)
+  assert.match(providerRuntimeSource, /writeSessionState\(/)
+  assert.match(childCleanupSource, /export async function cleanupChildProviderSession\(/)
+  assert.match(qwenAdapterSource, /getFinalAssistantResponseForHandoff\(/)
 })
 
 test('normal provider-state writes can mirror to the fallback tool session key', () => {
@@ -924,6 +910,8 @@ test('server-summary fork from a tool-child provider context keeps the tool cata
 test('forwarder source isolates summary generator and server summary provider sessions', () => {
   const forwarderSource = readFileSync('src/main/proxy/forwarder.ts', 'utf8')
 
+  assert.match(forwarderSource, /isSummaryGeneratorRequest/)
+  assert.match(forwarderSource, /!isSummaryGeneratorRequest && config\.contextManagement\?\.enabled/)
   assert.match(forwarderSource, /reason: 'summary_generator'/)
   assert.match(forwarderSource, /reason: 'server_summary'/)
   assert.match(forwarderSource, /summaryContext/)

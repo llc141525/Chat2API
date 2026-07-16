@@ -18,6 +18,7 @@ import type {
   ProviderDeleteSessionResult,
 } from './types.ts'
 import { GLMAdapter, GLMStreamHandler, buildGLMAssemblyPromptMessagesForTest } from '../adapters/glm.ts'
+import { selectProviderMessagesForAssembly } from '../RequestAssembly.ts'
 import crypto from 'node:crypto'
 import axios from 'axios'
 
@@ -216,6 +217,39 @@ async function* glmStreamToProviderEvents(
   }
 }
 
+async function uploadGLMAssemblyRefs(
+  adapter: GLMAdapter,
+  messages: Array<{ role: string; content: unknown }>,
+): Promise<any[]> {
+  const { fileUrls, imageUrls } = (adapter as any).extractFileUrls(messages)
+  const refs: any[] = []
+
+  for (const fileUrl of fileUrls) {
+    try {
+      const result = await (adapter as any).uploadFile(fileUrl)
+      refs.push({ source_id: result.source_id, file_url: result.file_url || fileUrl })
+    } catch (error) {
+      console.error('[GLM] Failed to upload file from runtime assembly:', error)
+    }
+  }
+
+  for (const imageUrl of imageUrls) {
+    try {
+      const result = await (adapter as any).uploadFile(imageUrl)
+      refs.push({
+        source_id: result.source_id,
+        image_url: result.file_url || imageUrl,
+        width: 0,
+        height: 0,
+      })
+    } catch (error) {
+      console.error('[GLM] Failed to upload image from runtime assembly:', error)
+    }
+  }
+
+  return refs
+}
+
 export const GLMProviderPlugin: WebProviderPlugin = {
   id: 'glm',
   version: '1.0.0',
@@ -235,6 +269,10 @@ export const GLMProviderPlugin: WebProviderPlugin = {
     sessionIdKind: 'conversation_id',
     transport: 'provider_chat_api',
     reuseProviderSessionForToolChild: true,
+    requestThrottle: {
+      minIntervalMs: 2000,
+      rateLimitBackoffMs: 30000,
+    },
   },
 
   async buildRequest(input: ProviderRuntimeRequest): Promise<ProviderWebRequest> {
@@ -249,13 +287,18 @@ export const GLMProviderPlugin: WebProviderPlugin = {
     )
     const effectiveSessionId = startsManagedConversation ? undefined : input.sessionId
 
+    const assemblyMessages = selectProviderMessagesForAssembly(input.assembly, {
+      stripRuntimeConfig: true,
+      stripToolContractHistory: true,
+      dropRuntimeConfig: true,
+    })
+    const refs = effectiveSessionId ? [] : await uploadGLMAssemblyRefs(adapter, assemblyMessages)
     const preparedMessages = buildGLMAssemblyPromptMessagesForTest(
       input.assembly,
-      [],  // empty refs — file uploads not done here
+      refs,
       !!effectiveSessionId,
       !effectiveSessionId || !hasManagedToolHistory,
     )
-
     // Determine assistant ID from model name or use default
     let assistantId = DEFAULT_ASSISTANT_ID
     if (/^[a-z0-9]{24,}$/.test(input.model)) {

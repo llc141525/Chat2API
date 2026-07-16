@@ -248,7 +248,11 @@ test('GLM adapter moves managed XML tool prompt to the final instruction positio
   }
 
   const promptMessages = buildGLMPromptMessagesForTest(messagesWithToolPrompt as any)
-  const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
+  const text = promptMessages
+    .flatMap((message: any) => message.content)
+    .filter((item: any) => item.type === 'text')
+    .map((item: any) => item.text)
+    .join('\n')
 
   assert.equal(promptMessages.length, 1)
   assert.equal(countOccurrences(text, 'Tool Contract Header'), 1)
@@ -431,6 +435,64 @@ test('GLM active skill checkpoint assembly prompt omits raw skill history from p
   assert.doesNotMatch(text, /fabricated XML/)
   assert.doesNotMatch(text, /prompt injection/)
   assert.doesNotMatch(text, /Long raw skill document/)
+})
+
+test('GLM assembly replaces raw skill documents with bounded infrastructure state', () => {
+  const promptMessages = buildGLMAssemblyPromptMessagesForTest({
+    messages: [
+      { role: 'user', content: 'Run the long probe.' },
+      {
+        role: 'tool',
+        tool_call_id: 'call_skill_0',
+        content: [{
+          type: 'text',
+          text: `<skill_content name="long-conversation-probe">${'superpowers repeated instructions '.repeat(1000)}</skill_content>`,
+        }],
+      },
+    ],
+    infrastructurePrompt: '[Active skill workflow — follow these steps in order]\n1. Use read.\n2. Use bash.',
+    toolManifest: null,
+    summaryText: null,
+    metadata: {
+      contextManagementApplied: true,
+      strategiesExecuted: ['summary'],
+      originalMessageCount: 2,
+      finalMessageCount: 2,
+    },
+  } as any)
+
+  const text = promptMessages
+    .flatMap((message: any) => message.content)
+    .filter((item: any) => item.type === 'text')
+    .map((item: any) => item.text)
+    .join('\n')
+
+  assert.match(text, /Active skill workflow/)
+  assert.match(text, /1\. Use read\./)
+  assert.doesNotMatch(text, /superpowers repeated instructions/)
+})
+
+test('GLM assembly replaces raw skill documents even when the client sends them as user content', () => {
+  const rawSkill = '<skill_content>\n1. Use the `bash` tool to inspect the project.\n</skill_content>'
+  const promptMessages = buildGLMAssemblyPromptMessagesForTest({
+    messages: [{ role: 'user', content: rawSkill } as any],
+    toolManifest: null,
+    summaryText: null,
+    infrastructurePrompt: '[Active skill workflow — follow these steps in order]\n1. Use the `bash` tool to inspect the project.',
+    metadata: {
+      contextManagementApplied: false,
+      strategiesExecuted: [],
+      originalMessageCount: 1,
+      finalMessageCount: 1,
+    },
+  })
+
+  const text = promptMessages.flatMap(message => message.content as any[])
+    .filter(part => part.type === 'text')
+    .map(part => part.text)
+    .join('\n')
+  assert.doesNotMatch(text, /<skill_content>/)
+  assert.match(text, /Active skill workflow/)
 })
 
 test('GLM adapter adds a continuation anchor after trailing tool_result in multi-turn delta', () => {
@@ -804,6 +866,30 @@ test('GLM stream decodes gzip SSE and emits managed XML as OpenAI tool_calls', a
   assert.match(output, /"name":"default_api:read_file"/)
   assert.match(output, /"finish_reason":"tool_calls"/)
   assert.equal((output.match(/data: \[DONE\]/g) || []).length, 1)
+})
+
+test('GLM stream keeps tool XML when the terminal finish event carries parts', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const body = [
+    sseEvent({
+      conversation_id: 'glm-finish-parts-1',
+      status: 'finish',
+      parts: [{
+        logic_id: 'part-finish-1',
+        status: 'finish',
+        content: [{ type: 'text', text: managedXmlToolCall }],
+      }],
+    }),
+  ].join('')
+
+  const output = await collect(await handler.handleStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  ))
+
+  assert.match(output, /"tool_calls"/)
+  assert.match(output, /"name":"default_api:read_file"/)
+  assert.match(output, /"finish_reason":"tool_calls"/)
 })
 
 test('GLM stream reparses cumulative snapshot when a managed marker was partially buffered', async () => {
@@ -1366,6 +1452,26 @@ test('applyNonStreamResponse: ignores bracket tool calls when plan expects manag
   assert.equal(result.choices[0].message.tool_calls, undefined)
   assert.match(result.choices[0].message.content, /\[function_calls\]/)
   assert.equal(result.choices[0].finish_reason, 'stop')
+})
+
+test('GLM non-stream keeps payload parts when the terminal finish event carries them', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const body = sseEvent({
+    conversation_id: 'glm-ns-finish-parts-1',
+    status: 'finish',
+    parts: [{
+      logic_id: 'part-ns-finish-1',
+      status: 'finish',
+      content: [{ type: 'text', text: managedXmlToolCall }],
+    }],
+  })
+
+  const result = await handler.handleNonStream(
+    Readable.from([gzipSync(Buffer.from(body))]),
+    { headers: { 'content-encoding': 'gzip' } } as any,
+  )
+
+  assert.match(result.choices[0].message.content, /<\|CHAT2API\|tool_calls>/)
 })
 
 // ── Standalone <|CHAT2API|invoke> (no outer <|CHAT2API|tool_calls> wrapper) ──

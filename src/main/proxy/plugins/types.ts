@@ -27,6 +27,11 @@ export interface ProviderPluginCapabilities {
   transport: 'openai_chat_completions' | 'provider_chat_api' | 'grpc_web_stream' | 'polling_stream' | 'websocket' | 'unknown'
   /** Some provider conversation APIs must keep tool-child turns in one conversation. */
   reuseProviderSessionForToolChild?: boolean
+  /** Minimum spacing between all upstream requests for one account, including summaries and retries. */
+  requestThrottle?: {
+    minIntervalMs: number
+    rateLimitBackoffMs: number
+  }
 }
 
 // ── Request / response normalization ────────────────────────────────

@@ -32,7 +32,7 @@ export const managedXmlStructureAdapter: StructureProtocolAdapter = {
   id: PROTOCOL,
 
   detectIntent(rawOutput: string): ProtocolIntentDetection {
-    const stripped = stripFencedCodeBlocks(rawOutput)
+    const stripped = normalizePipeClosedTags(stripFencedCodeBlocks(rawOutput))
     const marker = findFirstMarker(stripped)
     const index = marker?.index ?? -1
     if (index !== -1) {
@@ -54,7 +54,7 @@ export const managedXmlStructureAdapter: StructureProtocolAdapter = {
       return { kind: 'no_intent', protocol: PROTOCOL, content: rawOutput }
     }
 
-    const parseable = stripFencedCodeBlocks(rawOutput)
+    const parseable = normalizePipeClosedTags(stripFencedCodeBlocks(rawOutput))
     const marker = findFirstMarker(parseable)
     if (!marker) {
       return { kind: 'no_intent', protocol: PROTOCOL, content: rawOutput }
@@ -103,6 +103,13 @@ export const managedXmlStructureAdapter: StructureProtocolAdapter = {
       warnings: extraction.warnings,
     }
   },
+}
+
+function normalizePipeClosedTags(content: string): string {
+  return content.replace(
+    /(<\/?\|CHAT2API\|(?:tool_calls|invoke|parameter|tool_result)(?:\s[^<>]*)?)\|>/g,
+    '$1>',
+  )
 }
 
 export function recoverFinalMalformedManagedXmlStructure(rawOutput: string): ProtocolStructureResult | null {

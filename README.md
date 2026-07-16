@@ -1,272 +1,218 @@
 # Chat2API
 
 <p align="center">
-  <img src="build/icons.png" alt="Chat2API Logo" width="128" height="128">
+  <img src="build/icons.png" alt="Chat2API" width="128" height="128">
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.3.0-blue?style=flat-square&logo=github" alt="Release">
-  <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License">
-  <br>
-  <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/Electron-33+-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron"></a>
-  <a href="https://react.dev/"><img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React"></a>
-  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"></a>
-  <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
+  <strong>A rebuilt desktop gateway for OpenAI-compatible AI clients</strong>
 </p>
 
 <p align="center">
-  <strong><a href="README_CN.md">中文</a> | <a href="https://chat2api-doc.vercel.app/">Official Website</a> | <a href="https://chat2api-doc.vercel.app/docs">Documentation</a></strong>
+  <a href="README_CN.md">中文</a> ·
+  <a href="https://github.com/llc141525/Chat2API/issues">Issues</a> ·
+  <a href="docs/providers/README.md">Provider guides</a>
 </p>
 
 <p align="center">
-  <strong>Multi-platform AI Service Unified Management Tool</strong>
+  <img src="https://img.shields.io/badge/Electron-33%2B-47848F?logo=electron&logoColor=white" alt="Electron 33+">
+  <img src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black" alt="React 18">
+  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" alt="TypeScript 5">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0 license">
 </p>
 
-<p align="center">
-  Chat2API enables zero-cost access to leading AI models by leveraging official web UIs. It supports providers such as DeepSeek, GLM, Kimi, MiniMax, Perplexity, Qwen, and Z.ai, and seamlessly integrates with tools like OpenCode, Cline, and Roo-Code — making any OpenAI-compatible client work out of the box. This fork adds managed XML tool-calling, OpenCode session continuity, deterministic agent-capability probes, and a full regression test suite not present in the upstream xiaoY233/Chat2API repository.
-</p>
+Chat2API is a cross-platform Electron application and local API gateway. It turns several web-based AI providers into one OpenAI-compatible endpoint that can be used by OpenCode, Cline, Roo Code, Cherry Studio, custom scripts, and other clients.
 
-![Product Preview](docs/screenshots/preview.png)
+This repository is the result of a complete runtime and tool-calling refactor. The project is designed around provider isolation, explicit request contracts, long-session continuity, and regression tests for the failure modes that matter in agent workflows.
 
-## ✨ Features
+![Chat2API preview](docs/screenshots/preview.png)
 
-- OpenAI Compatible API: Provides standard OpenAI-compatible API endpoints for seamless integration
-- Multi-Provider Support: Connect DeepSeek, GLM, Kimi, MiniMax, Perplexity 🆕, Qwen, Z.ai and more
-- 🆕 Context Management: Intelligent conversation context management with sliding window, token limit, and summary strategies
-- 🆕 Function Calling Support: Universal tool calling capability for all models via prompt engineering, compatible with Cherry Studio, Kilo Code, and other clients
-- 🆕 Model Mapping: Flexible model name mapping with wildcard support and preferred provider/account selection
-- 🆕 Custom Parameters: Support for custom HTTP headers to enable web search, thinking mode, and deep research features
-- Dashboard Monitoring: Real-time request traffic, token usage, and success rates
-- API Key Management: Generate and manage keys for your local proxy
-- Model Management: View and manage available models from all providers
-- Request Logs: Detailed request logging for debugging and analysis
-- Proxy Configuration: Flexible proxy settings and routing strategies
-- System Tray Integration: Quick access to status from menu bar
-- Multilingual: English and Simplified Chinese support
-- Modern UI: Clean, responsive interface with dark/light theme support
+## Why this project
 
-## 🤖 Supported Providers
+Most web-session gateways work for a single request, then become unreliable when an agent starts reading files, invoking tools, compacting context, or switching between streaming and non-streaming responses. Chat2API treats those flows as first-class behavior:
 
-| Provider         | Auth Type     | OAuth | Models                                                                                                                                                                                                                                          |
-| ---------------- | ------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DeepSeek         | User Token    | Yes   | deepseek-v4-flash, deepseek-v4-pro                                                                                                                                                                                                              |
-| GLM              | Refresh Token | Yes   | GLM-5.2, GLM-5.1                                                                                                                                                                                                                                |
-| Kimi             | JWT Token     | Yes   | Kimi-K2.6                                                                                                                                                                                                                                       |
-| MiniMax          | JWT Token     | Yes   | MiniMax-M2.7                                                                                                                                                                                                                                    |
-| Mimo             | Cookie        | Yes   | MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5-Pro, MiMo-V2.5, MiMo-V2-Flash                                                                                                                                                                               |
-| Perplexity       | Cookie        | Yes   | Auto                                                                                                                                                                                                                                           |
-| Qwen (CN)        | SSO Ticket    | Yes   | Qwen3.6, Qwen3.7-Max, Qwen3.5-Flash, Qwen3-Max, Qwen3-Max-Thinking-Preview, Qwen3-Coder                                                                                                                                                         |
-| Qwen AI (Global) | JWT Token     | Yes   | Qwen3.7-Max, Qwen3.6-Plus, Qwen3.6-35B-A3B, Qwen3.6-27B, Qwen3-Coder                                                                                                                                                                           |
-| Z.ai             | JWT Token     | Yes   | Temporarily unavailable due to frontend captcha risk control                                                                                                                                                                                    |
+- one local OpenAI-compatible API for multiple providers;
+- a single managed tool-calling engine instead of provider-specific prompt injection;
+- provider sessions and client sessions kept separate and explicit;
+- tool catalogs, assistant tool calls, tool results, and summaries preserved across turns;
+- observable request, session, routing, and tool-runtime boundaries;
+- deterministic fixtures, provider tests, and long-conversation capability probes.
 
-Provider adaptation notes and manual model-addition guides are in [docs/providers](docs/providers/README.md).
+## Highlights
 
-## 📥 Installation
+### Provider gateway
 
-### Download
+- OpenAI-compatible Chat Completions API.
+- Provider and model mapping with account selection and failover strategies.
+- Built-in account, credential, API key, proxy, model, and request-log management.
+- Streaming and non-streaming response normalization.
+- Optional custom headers for provider-specific capabilities such as search or thinking modes.
+- System-tray desktop application with English and Simplified Chinese UI.
 
-Download the latest release from [GitHub Releases](https://github.com/xiaoY233/Chat2API/releases):
+### Agent-grade tool calling
 
-| Platform              | Download                                |
-| --------------------- | --------------------------------------- |
-| macOS (Apple Silicon) | `Chat2API-x.x.x-arm64.dmg`              |
-| macOS (Intel)         | `Chat2API-x.x.x-x64.dmg`                |
-| Windows               | `Chat2API-x.x.x-x64-setup.exe`          |
-| Linux                 | `Chat2API-x.x.x-x64.AppImage` or `.deb` |
+- Canonical managed XML protocol for providers without native OpenAI tool calls.
+- Strict parsing of valid tool blocks while ignoring ordinary XML examples, angle brackets, fenced code, malformed blocks, and unknown tools.
+- Correct OpenAI `tool_calls` conversion for both streaming deltas and non-streaming messages.
+- Preservation of `tool_call_id` and assistant tool-call history on later turns.
+- Stateless fallbacks when session metadata is unavailable.
+- Tool catalog persistence and drift detection to prevent a long-running agent from silently losing tools.
 
-### Build from Source
+### Long-context continuity
 
-**Requirements:**
+- Provider session reuse for supported providers, including GLM and Qwen paths.
+- Explicit session-boundary planning for OpenAI-compatible routes.
+- Context classification, prompt-budget control, summary quality gates, and summary sanitization.
+- Workflow state digests so compaction reduces context without erasing the current task.
+- Regression coverage for repeated tool calls, tool loss after compaction, summary contamination, and multi-turn history.
 
-- Node.js 18+
-- npm
-- Git
+### Built-in observability and testing
 
-```bash
-# Clone the repository
-git clone https://github.com/xiaoY233/Chat2API.git
+- Dashboard, request logs, provider health, model catalog, and proxy status in the desktop UI.
+- Reproducible provider fixtures and parser-level tests.
+- Capability probes for OpenCode-style long conversations.
+- CI checks for adapter boundaries, tool-calling behavior, and provider regressions.
+
+## Supported providers
+
+The built-in provider adapters currently cover:
+
+| Provider | Guide |
+| --- | --- |
+| DeepSeek | [Guide](docs/providers/deepseek.md) |
+| GLM | [Guide](docs/providers/glm.md) |
+| Kimi | [Guide](docs/providers/kimi.md) |
+| MiniMax | [Guide](docs/providers/minimax.md) |
+| MiMo | [Guide](docs/providers/mimo.md) |
+| Perplexity | [Guide](docs/providers/perplexity.md) |
+| Qwen | [Guide](docs/providers/qwen.md) |
+| Qwen AI | [Guide](docs/providers/qwen-ai.md) |
+| Z.ai | [Guide](docs/providers/zai.md) |
+
+Provider authentication methods and available model names change over time. Check the individual guide and the in-app provider catalog instead of hard-coding a model list in client configuration.
+
+## Install
+
+Download a packaged build from [GitHub Releases](https://github.com/llc141525/Chat2API/releases) when releases are available. Supported build targets are Windows x64, macOS arm64/x64, and Linux x64/arm64.
+
+## Build from source
+
+Requirements: Node.js 20 or newer, npm, and Git.
+
+~~~bash
+git clone https://github.com/llc141525/Chat2API.git
 cd Chat2API
+npm ci
+npm run dev:win       # Windows development
+~~~
 
-# Install dependencies
-npm install
+Build the application:
 
-# Start development server
-npx electron-vite dev 2>&1
-```
+~~~bash
+npm run build
+npm run build:win
+npm run build:mac
+npm run build:linux
+~~~
 
-### Build for Production
+The packaged artifacts are written to `dist/` and are intentionally ignored by Git.
 
-```bash
-npm run build              # Build the application
-npm run build:mac          # Build for macOS (dmg, zip)
-npm run build:win          # Build for Windows (nsis)
-npm run build:linux        # Build for Linux (AppImage, deb)
-npm run build:all          # Build for all platforms
-```
+## Quick start
 
-## 📖 Usage
+1. Start Chat2API and add a provider account from the **Providers** page.
+2. Open **Proxy**, choose a port and routing strategy, then start the local proxy.
+3. Create an API key if client authentication is enabled.
+4. Point an OpenAI-compatible client at `http://127.0.0.1:<port>/v1`.
 
-### Step 1: Launch the App
+Example with the OpenAI Python SDK:
 
-After installation, launch Chat2API. You'll see the main dashboard.
-
-### Step 2: Add a Provider
-
-1. Navigate to **Providers** from the sidebar
-2. Click **Add Provider** button
-3. Select a built-in provider (e.g., DeepSeek)
-4. Enter your authentication credentials
-
-For example, to get a DeepSeek token:
-
-1. Visit [DeepSeek Chat](https://chat.deepseek.com/)
-2. Start any conversation
-3. Press `F12` to open Developer Tools
-4. Go to **Application** > **Local Storage**
-5. Find `userToken` and copy its value
-
-### Step 3: Configure Proxy
-
-1. Navigate to **Proxy Settings** from the sidebar
-2. Set the port (default: 48763)
-3. Choose a load balancing strategy:
-   - **Round Robin**: Distributes requests evenly across accounts
-   - **Fill First**: Uses one account until limit is reached
-   - **Failover**: Automatically switches on failure
-4. Click **Start Proxy**
-
-### Step 4: Test the API
-
-Using Python (OpenAI SDK):
-
-```python
+~~~python
 from openai import OpenAI
 
 client = OpenAI(
-    api_key="your-api-key",
-    base_url="http://localhost:48763/v1"
+    api_key="your-chat2api-key",
+    base_url="http://127.0.0.1:48763/v1",
 )
 
 response = client.chat.completions.create(
-    model="deepseek-v4-flash",
-    messages=[
-        {"role": "user", "content": "Hello, who are you?"}
-    ]
+    model="your-provider-model",
+    messages=[{"role": "user", "content": "Hello from Chat2API"}],
 )
 
 print(response.choices[0].message.content)
-```
+~~~
 
-### Step 5: Manage API Keys (Optional)
+Use the provider guides for authentication, account setup, model mapping, and provider-specific options.
 
-For security, you can enable API Key authentication:
+## Development and verification
 
-1. Go to **API Keys** page
-2. Click **New API Key**
-3. Enter a name and description
-4. Copy the generated key
+Run the focused regression suites:
 
-## 📸 Screenshots
+~~~bash
+npm run build
+node --test tests/tool-calling/*.test.ts
+node --test tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+~~~
 
-| Dashboard | Providers |
-|-----------|-----------|
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Providers](docs/screenshots/providers.png) |
+For a real local proxy probe, start the development server and run the capability script:
 
-| Proxy Settings | API Keys |
-|----------------|----------|
-| ![Proxy](docs/screenshots/proxy.png) | ![API Keys](docs/screenshots/api-keys.png) |
+~~~powershell
+npm run dev:win 2>&1 | Tee-Object -FilePath .\dev.log
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
+~~~
 
-| Models | Session |
-|--------|---------|
-| ![Models](docs/screenshots/models.png) | ![Session](docs/screenshots/Session.png) |
+The test and probe suites are intentionally focused on behavior, not only compilation: multi-turn tool calls, streaming conversion, catalog continuity, compaction survival, session identity, and degraded provider responses.
 
-## ⚙️ Settings
+## Architecture
 
-- **Port**: Change the proxy listening port (default: 48763)
-- **Routing Strategy**: Round Robin or Fill First
-- **Auto-start**: Launch proxy automatically on app startup
-- **Theme**: Light, Dark, or System preference
-- **Language**: English or Simplified Chinese
+~~~text
+OpenAI-compatible client
+          │
+          ▼
+Koa proxy / route identity / API keys
+          │
+          ▼
+Forwarder + RequestAssembly + ProviderRuntime
+          │
+          ├── ToolCallingEngine
+          │     ├── tool catalog and managed prompt
+          │     ├── managed XML parser
+          │     └── OpenAI stream/message conversion
+          │
+          ├── context economy and session boundary services
+          └── provider adapters and web sessions
+~~~
 
-## 🏗️ Architecture
+Important source areas:
 
-```
-Chat2API/
-├── src/
-│   ├── main/                    # Electron main process
-│   │   ├── index.ts            # App entry point
-│   │   ├── tray.ts             # System tray integration
-│   │   ├── proxy/              # Proxy server management
-│   │   ├── ipc/                # IPC handlers
-│   │   └── utils/              # Utilities
-│   ├── preload/                # Context bridge
-│   └── renderer/               # React frontend
-│       ├── components/         # UI components
-│       ├── pages/              # Page components
-│       ├── stores/             # Zustand state
-│       └── hooks/              # Custom hooks
-├── build/                      # Build resources
-└── scripts/                    # Build scripts
-```
+- `src/main/proxy/forwarder.ts` — request routing and response flow;
+- `src/main/proxy/adapters/` — provider-specific transport and conversion;
+- `src/main/proxy/toolCalling/` — tool contracts, prompt injection, parsing, and normalization;
+- `src/main/proxy/services/` — provider runtime, session boundaries, context economy, and summaries;
+- `src/renderer/src/` — the React desktop UI;
+- `tests/` — unit, integration, fixture, and capability tests.
 
-## 🔧 Tech Stack
+## Data and security
 
-| Component | Technology            |
-| --------- | --------------------- |
-| Framework | Electron 33+          |
-| Frontend  | React 18 + TypeScript |
-| Styling   | Tailwind CSS          |
-| State     | Zustand               |
-| Build     | Vite + electron-vite  |
-| Packaging | electron-builder      |
-| Server    | Koa                   |
+Chat2API is a local gateway. Account credentials and provider session data are managed by the desktop app and stored in the user's application data directory. Do not paste tokens, cookies, refresh tokens, request logs, or provider session exports into issues or pull requests. Redact secrets before sharing diagnostics.
 
-## 📁 Data Storage
+Web-session adapters depend on provider-side authentication, availability, rate limits, and terms of service. A provider may change its web interface without notice; provider support should therefore be treated as compatibility support, not an official provider API guarantee.
 
-Application data is stored in `~/.chat2api/` directory:
+## Contributing
 
-- `config.json` - Application configuration
-- `providers.json` - Provider settings
-- `accounts.json` - Account credentials (encrypted)
-- `logs/` - Request logs
+Bug reports and provider regressions are welcome. Please include the operating system, Chat2API version or commit, provider/model, reproduction steps, and a redacted log excerpt. Start with [provider guides](docs/providers/README.md) and the existing test fixtures before adding a new adapter.
 
-## ❓ FAQ
+Before opening a pull request:
 
-### macOS: "App is damaged and can't be opened"
+~~~bash
+npm run build
+git diff --check
+~~~
 
-Due to macOS security mechanisms, apps downloaded outside the App Store may trigger this warning. Run the following command to fix it:
+Keep provider-specific behavior inside the adapter/profile boundary. Tool prompt injection and managed XML parsing belong to the shared tool-calling engine.
 
-```bash
-sudo xattr -rd com.apple.quarantine "/Applications/Chat2API.app"
-```
+## License and attribution
 
-### How to update?
+Chat2API is released under the [GNU GPL-3.0 license](LICENSE).
 
-Check for updates in the **About** page, or download the latest version from [GitHub Releases](https://github.com/xiaoY233/Chat2API/releases).
-
-## 🤝 Contributing
-
-1. Fork the project
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📄 License
-
-GNU General Public License v3.0. See [LICENSE](LICENSE) for details.
-
-This means:
-
-- ✅ Free to use, modify, and distribute
-- ✅ Derivative works must be open-sourced under the same license
-- ✅ Must preserve original copyright notices
-
-## 🙏 Acknowledgments
-
-- [Electron](https://www.electronjs.org/) - Cross-platform framework
-- [React](https://react.dev/) - UI framework
-- [TypeScript](https://www.typescriptlang.org/) - Type-safe JavaScript
-- [Tailwind CSS](https://tailwindcss.com/) - CSS framework
-- [Zustand](https://zustand-demo.pmnd.rs/) - State management
-- [Koa](https://koajs.com/) - HTTP server
+The project builds on the original [xiaoY233/Chat2API](https://github.com/xiaoY233/Chat2API) and has since undergone a substantial runtime, context-management, tool-calling, testing, and UI refactor.

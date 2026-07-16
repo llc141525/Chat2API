@@ -1,7 +1,0 @@
-{
-  "model": "deepseek/deepseek-chat",
-  "run": 1,
-  "exitCode": 1,
-  "passed": false,
-  "outputDir": "E:\\Chat2API\\artifacts\\track-e-runs\\deepseek-run-1-20260711-145020"
-}

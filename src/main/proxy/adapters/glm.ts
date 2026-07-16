@@ -159,8 +159,14 @@ export function buildGLMAssemblyPromptMessagesForTest(
   includeToolPrompt: boolean = true,
 ): { role: string; content: any[] }[] {
   const adapter = Object.create(GLMAdapter.prototype) as GLMAdapter
-  const messages = [...selectProviderMessagesForAssembly(assembly)] as GLMMessage[]
-  let toolsPrompt = assembly.summaryText ?? ''
+  const messages = [...selectProviderMessagesForAssembly(assembly, {
+    stripRuntimeConfig: true,
+    stripToolContractHistory: true,
+    dropRuntimeConfig: true,
+  })] as GLMMessage[]
+  let toolsPrompt = [assembly.infrastructurePrompt, assembly.summaryText]
+    .filter((part): part is string => Boolean(part?.trim()))
+    .join('\n\n')
 
   if (includeToolPrompt && assembly.toolManifest) {
     toolsPrompt = toolsPrompt
@@ -516,272 +522,6 @@ export class GLMAdapter {
     return [{ role: 'user', content }]
   }
 
-  async chatCompletion(request: ChatCompletionRequest): Promise<{ response: AxiosResponse; conversationId: string }> {
-    const token = await this.acquireToken()
-    const sign = generateSign()
-
-    // Clone messages to avoid modifying original request
-    const messages = [...request.messages]
-    const managedToolPrompt = extractManagedToolPrompt(messages)
-
-    // Tool prompts are injected by ToolCallingEngine in the forwarder.
-    // Adapter only formats already-injected messages via messagesToPrompt.
-    const toolsPrompt = managedToolPrompt.toolsPrompt
-
-    // Extract and upload files (skip for multi-turn, server already has them via conversation_id)
-    const refs: any[] = []
-    if (!request.conversationId) {
-      const { fileUrls, imageUrls } = this.extractFileUrls(managedToolPrompt.messages)
-
-      // Upload files
-      for (const fileUrl of fileUrls) {
-        try {
-          const result = await this.uploadFile(fileUrl)
-          refs.push({
-            source_id: result.source_id,
-            file_url: result.file_url || fileUrl,
-          })
-        } catch (error) {
-          console.error('[GLM] Failed to upload file:', error)
-        }
-      }
-
-      // Upload images
-      for (const imageUrl of imageUrls) {
-        try {
-          const result = await this.uploadFile(imageUrl)
-          refs.push({
-            source_id: result.source_id,
-            image_url: result.file_url || imageUrl,
-            width: 0,
-            height: 0,
-          })
-        } catch (error) {
-          console.error('[GLM] Failed to upload image:', error)
-        }
-      }
-    }
-
-    const preparedMessages = this.messagesToPrompt(managedToolPrompt.messages, refs, toolsPrompt, !!request.conversationId)
-
-    let assistantId = DEFAULT_ASSISTANT_ID
-    let chatMode = ''
-    let isNetworking = false
-
-    // Use request parameters for mode control (OpenAI compatible)
-    if (request.reasoning_effort) {
-      chatMode = 'zero'
-      console.log('[GLM] Using reasoning mode, effort:', request.reasoning_effort)
-    }
-    
-    if (request.web_search) {
-      isNetworking = true
-      console.log('[GLM] Web search enabled')
-    }
-    
-    if (request.deep_research) {
-      chatMode = 'deep_research'
-      console.log('[GLM] Using deep research mode')
-    }
-
-    // Fallback: check model name for backward compatibility
-    // Use originalModel for feature detection (preserves user's intent before mapping)
-    const modelForDetection = request.originalModel || request.model
-    const modelLower = modelForDetection.toLowerCase()
-    if (!chatMode && (modelLower.includes('think') || modelLower.includes('zero'))) {
-      chatMode = 'zero'
-      console.log('[GLM] Using reasoning mode (from model name)')
-    }
-    if (!chatMode && modelLower.includes('deepresearch')) {
-      chatMode = 'deep_research'
-      console.log('[GLM] Using deep research mode (from model name)')
-    }
-    
-    // Check if model is an assistant ID (24+ alphanumeric characters)
-    if (/^[a-z0-9]{24,}$/.test(request.model)) {
-      assistantId = request.model
-    }
-
-    console.log('[GLM] Sending chat request...')
-    
-    const response = await axios.post(
-      `${GLM_API_BASE}/backend-api/assistant/stream`,
-      {
-        assistant_id: assistantId,
-        conversation_id: request.conversationId || '',
-        project_id: '',
-        chat_type: 'user_chat',
-        messages: preparedMessages,
-        meta_data: {
-          channel: '',
-          chat_mode: chatMode || undefined,
-          draft_id: '',
-          if_plus_model: true,
-          input_question_type: 'xxxx',
-          is_networking: isNetworking,
-          is_test: false,
-          platform: 'pc',
-          quote_log_id: '',
-          cogview: {
-            rm_label_watermark: false,
-          },
-        },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...FAKE_HEADERS,
-          'X-Device-Id': uuid(),
-          'X-Request-Id': uuid(),
-          'X-Sign': sign.sign,
-          'X-Timestamp': sign.timestamp,
-          'X-Nonce': sign.nonce,
-        },
-        timeout: 120000,
-        validateStatus: () => true,
-        responseType: 'stream',
-      }
-    )
-
-    return { response, conversationId: request.conversationId || '' }
-  }
-
-  async chatCompletionWithAssembly(
-    assembly: import('../RequestAssembly.ts').RequestAssembly,
-    request: ChatCompletionRequest
-  ): Promise<{ response: import('axios').AxiosResponse; conversationId: string }> {
-    const token = await this.acquireToken()
-    const sign = generateSign()
-
-    // Build messages from assembly (already clean, no embedded tool contracts)
-    const messages = [...selectProviderMessagesForAssembly(assembly)] as GLMMessage[]
-
-    // Build toolsPrompt from assembly: summary goes first, then tool contract (authoritative)
-    let toolsPrompt = ''
-    if (assembly.summaryText) {
-      toolsPrompt = assembly.summaryText
-    }
-    if (assembly.toolManifest) {
-      toolsPrompt = toolsPrompt
-        ? `${toolsPrompt}\n\n${assembly.toolManifest.renderedPrompt}`
-        : assembly.toolManifest.renderedPrompt
-    }
-
-    // Extract and upload files
-    const { fileUrls, imageUrls } = this.extractFileUrls(messages)
-    const refs: any[] = []
-
-    // Upload files
-    for (const fileUrl of fileUrls) {
-      try {
-        const result = await this.uploadFile(fileUrl)
-        refs.push({
-          source_id: result.source_id,
-          file_url: result.file_url || fileUrl,
-        })
-      } catch (error) {
-        console.error('[GLM] Failed to upload file:', error)
-      }
-    }
-
-    // Upload images
-    for (const imageUrl of imageUrls) {
-      try {
-        const result = await this.uploadFile(imageUrl)
-        refs.push({
-          source_id: result.source_id,
-          image_url: result.file_url || imageUrl,
-          width: 0,
-          height: 0,
-        })
-      } catch (error) {
-        console.error('[GLM] Failed to upload image:', error)
-      }
-    }
-
-    const preparedMessages = this.messagesToPrompt(messages, refs, toolsPrompt, false)
-
-    let assistantId = DEFAULT_ASSISTANT_ID
-    let chatMode = ''
-    let isNetworking = false
-
-    // Use request parameters for mode control (OpenAI compatible)
-    if (request.reasoning_effort) {
-      chatMode = 'zero'
-      console.log('[GLM] Using reasoning mode, effort:', request.reasoning_effort)
-    }
-
-    if (request.web_search) {
-      isNetworking = true
-      console.log('[GLM] Web search enabled')
-    }
-
-    if (request.deep_research) {
-      chatMode = 'deep_research'
-      console.log('[GLM] Using deep research mode')
-    }
-
-    // Fallback: check model name for backward compatibility
-    const modelForDetection = request.originalModel || request.model
-    const modelLower = modelForDetection.toLowerCase()
-    if (!chatMode && (modelLower.includes('think') || modelLower.includes('zero'))) {
-      chatMode = 'zero'
-      console.log('[GLM] Using reasoning mode (from model name)')
-    }
-    if (!chatMode && modelLower.includes('deepresearch')) {
-      chatMode = 'deep_research'
-      console.log('[GLM] Using deep research mode (from model name)')
-    }
-
-    // Check if model is an assistant ID (24+ alphanumeric characters)
-    if (/^[a-z0-9]{24,}$/.test(request.model)) {
-      assistantId = request.model
-    }
-
-    console.log('[GLM] Sending chat request via assembly path...')
-
-    const response = await axios.post(
-      `${GLM_API_BASE}/backend-api/assistant/stream`,
-      {
-        assistant_id: assistantId,
-        conversation_id: request.conversationId || '',
-        project_id: '',
-        chat_type: 'user_chat',
-        messages: preparedMessages,
-        meta_data: {
-          channel: '',
-          chat_mode: chatMode || undefined,
-          draft_id: '',
-          if_plus_model: true,
-          input_question_type: 'xxxx',
-          is_networking: isNetworking,
-          is_test: false,
-          platform: 'pc',
-          quote_log_id: '',
-          cogview: {
-            rm_label_watermark: false,
-          },
-        },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...FAKE_HEADERS,
-          'X-Device-Id': uuid(),
-          'X-Request-Id': uuid(),
-          'X-Sign': sign.sign,
-          'X-Timestamp': sign.timestamp,
-          'X-Nonce': sign.nonce,
-        },
-        timeout: 120000,
-        validateStatus: () => true,
-        responseType: 'stream',
-      }
-    )
-
-    return { response, conversationId: '' }
-  }
-
   async deleteConversation(conversationId: string): Promise<boolean> {
     try {
       const token = await this.acquireToken()
@@ -1053,17 +793,18 @@ export class GLMStreamHandler {
             this.conversationId = result.conversation_id
           }
 
-          if (result.status !== 'finish' && result.status !== 'intervene') {
-            if (result.parts) {
-              result.parts.forEach((part: any) => {
-                const index = cachedParts.findIndex((p) => p.logic_id === part.logic_id)
-                if (index !== -1) {
-                  cachedParts[index] = mergeGLMPart(cachedParts[index], part)
-                } else {
-                  cachedParts.push(part)
-                }
-              })
-            }
+          if (result.parts) {
+            result.parts.forEach((part: any) => {
+              const index = cachedParts.findIndex((p) => p.logic_id === part.logic_id)
+              if (index !== -1) {
+                cachedParts[index] = mergeGLMPart(cachedParts[index], part)
+              } else {
+                cachedParts.push(part)
+              }
+            })
+          }
+
+          if (result.status !== 'intervene') {
 
             const searchMap = new Map<string, any>()
             cachedParts.forEach((part) => {
@@ -1201,6 +942,9 @@ export class GLMStreamHandler {
             }
 
             if (outputChunks.length > 0) sentRole = true
+            if (result.status === 'finish') {
+              finishStream({}, true)
+            }
           } else {
             finishStream(
               result.status === 'intervene' && result.last_error?.intervene_text
@@ -1249,20 +993,20 @@ export class GLMStreamHandler {
               this.conversationId = result.conversation_id
             }
 
-            if (result.status !== 'finish') {
-              if (result.parts) {
-                // Accumulate parts (same as handleStream), don't replace
-                // GLM sends incremental parts, each event only contains new content
-                result.parts.forEach((part: any) => {
-                  const index = cachedParts.findIndex((p) => p.logic_id === part.logic_id)
-                  if (index !== -1) {
-                    cachedParts[index] = mergeGLMPart(cachedParts[index], part)
-                  } else {
-                    cachedParts.push(part)
-                  }
-                })
-              }
-            } else {
+            if (result.parts) {
+              // Accumulate parts (same as handleStream), including terminal events.
+              // GLM may put the final text/tool payload on status=finish.
+              result.parts.forEach((part: any) => {
+                const index = cachedParts.findIndex((p) => p.logic_id === part.logic_id)
+                if (index !== -1) {
+                  cachedParts[index] = mergeGLMPart(cachedParts[index], part)
+                } else {
+                  cachedParts.push(part)
+                }
+              })
+            }
+
+            if (result.status === 'finish') {
               const searchMap = new Map<string, any>()
               cachedParts.forEach((part) => {
                 if (!part.content || !Array.isArray(part.content)) return

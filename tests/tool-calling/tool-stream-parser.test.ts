@@ -422,6 +422,17 @@ test('XML tool call preserves literal angle brackets in CDATA arguments', () => 
   })
 })
 
+test('GLM pipe-closed XML delimiters are normalized into a managed tool call', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const chunks = parser.push(
+    '<|CHAT2API|tool_calls|><|CHAT2API|invoke name="default_api:read_file"|><|CHAT2API|parameter name="filePath"|><![CDATA[/tmp/a]]></|CHAT2API|parameter|></|CHAT2API|invoke|></|CHAT2API|tool_calls|>',
+    {},
+  )
+  const parsed = parser.flush({})
+  const toolChunks = [...chunks, ...parsed].filter(chunk => chunk.choices?.[0]?.delta?.tool_calls)
+  assert.equal(toolChunks.length > 0, true)
+})
+
 test('Qwen stream repairs question tool call with truncated Chat2API XML tail', () => {
   const parser = new ToolStreamParser(qwenQuestionPlan())
   const payload = '{"question":"Dark mode style?","header":"Dark Mode Style","options":[{"label":"Unified Light","description":"Use the same quiet design language."}]}'
@@ -655,6 +666,26 @@ test('stream parser suppresses later plain text after a tool call was emitted', 
   assert.equal(first.at(-1)?.choices[0].delta.tool_calls[0].function.name, 'default_api:read_file')
   assert.deepEqual(second, [])
   assert.deepEqual(parser.flush(baseChunk), [])
+})
+
+test('stream parser suppresses protocol residue after a malformed tool block', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const malformed = parser.push(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="missing">'
+      + '<|CHAT2API|parameter name="filePath"><![CDATA[E:/Chat2API/tailwind.config.js]]></|CHAT2API|parameter>'
+      + '</|CHAT2API|invoke></|CHAT2API|tool_calls>',
+    baseChunk,
+  )
+
+  const residue = parser.push(
+    '|CHAT2API|parameter><|CHAT2API|invoke><|CHAT2API|tool_calls>',
+    baseChunk,
+  )
+
+  assert.deepEqual(malformed, [])
+  assert.deepEqual(residue, [])
+  assert.deepEqual(parser.flush(baseChunk), [])
+  assert.equal(parser.getObservation().suppressedMalformedToolOutput, true)
 })
 
 test('stream parser flush does not release a partial marker as plain text', () => {

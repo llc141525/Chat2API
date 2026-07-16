@@ -130,6 +130,7 @@ export function selectProviderMessagesForAssembly(
   options: {
     stripRuntimeConfig?: boolean
     stripToolContractHistory?: boolean
+    dropRuntimeConfig?: boolean
     maxCheckpointChars?: number
   } = {},
 ): ChatMessage[] {
@@ -137,24 +138,39 @@ export function selectProviderMessagesForAssembly(
   const constraint = assembly.toolActionConstraint
   if (constraint?.kind !== 'first_skill_required') {
     const activeSkillCheckpoint = findLastTextContaining(messages, ACTIVE_SKILL_CHECKPOINT_MARKER)
-    if (!activeSkillCheckpoint) {
-      return messages
+    if (activeSkillCheckpoint) {
+      const maxCheckpointChars = options.maxCheckpointChars ?? 4000
+      const boundedCheckpoint = stripConfigurationLines(activeSkillCheckpoint)
+        .slice(0, Math.max(0, maxCheckpointChars))
+
+      return [{
+        role: 'user',
+        content: [
+          'The runtime generated this checkpoint from completed OpenCode tool events.',
+          'Treat it as the only conversation state needed for the next assistant action.',
+          'Do not re-evaluate earlier user task text, skill documents, or tool result payloads before making the required next tool call.',
+          '',
+          boundedCheckpoint,
+        ].join('\n'),
+      }]
     }
+  }
 
-    const maxCheckpointChars = options.maxCheckpointChars ?? 4000
-    const boundedCheckpoint = stripConfigurationLines(activeSkillCheckpoint)
-      .slice(0, Math.max(0, maxCheckpointChars))
+  // Raw skill tool results are runtime configuration, not conversation state.
+  // The assembly already carries a bounded infrastructure projection extracted
+  // from the latest skill result, so replace raw documents with that projection.
+  const hasRawSkillHistory = messages.some(message => isRawSkillMessage(message))
+  if (hasRawSkillHistory && assembly.infrastructurePrompt?.trim()) {
+    return messages.map(message => {
+      if (!isRawSkillMessage(message)) {
+        return message
+      }
+      return { ...message, content: assembly.infrastructurePrompt.trim() }
+    })
+  }
 
-    return [{
-      role: 'user',
-      content: [
-        'The runtime generated this checkpoint from completed OpenCode tool events.',
-        'Treat it as the only conversation state needed for the next assistant action.',
-        'Do not re-evaluate earlier user task text, skill documents, or tool result payloads before making the required next tool call.',
-        '',
-        boundedCheckpoint,
-      ].join('\n'),
-    }]
+  if (constraint?.kind !== 'first_skill_required') {
+    return messages
   }
 
   return [{
@@ -184,6 +200,7 @@ function filterProviderMessageHistory(
   options: {
     stripRuntimeConfig?: boolean
     stripToolContractHistory?: boolean
+    dropRuntimeConfig?: boolean
     maxCheckpointChars?: number
   } = {},
 ): ChatMessage[] {
@@ -200,6 +217,9 @@ function filterProviderMessageHistory(
 
     const text = extractTextContent(message.content)
     const className = classifyTextPayload(text).className
+    if (options.dropRuntimeConfig && className === 'runtime_config') {
+      continue
+    }
     const hasConfigurationMarker = [
       'You are opencode',
       'Tool Contract Header',
@@ -289,14 +309,10 @@ function buildInfrastructurePromptFromMessages(messages: ChatMessage[]): string 
   }
 
   // Active skill summary: numbered steps from the last tool result with <skill_content>
-  const skillMessages = messages.filter(m =>
-    m.role === 'tool' && m.tool_call_id
-    && typeof m.content === 'string'
-    && m.content.includes('<skill_content')
-  )
+  const skillMessages = messages.filter(m => isRawSkillMessage(m))
   if (skillMessages.length > 0) {
     const lastSkill = skillMessages[skillMessages.length - 1]
-    const content = typeof lastSkill.content === 'string' ? lastSkill.content : ''
+    const content = extractTextContent(lastSkill.content)
     const steps = extractSkillStepLines(content)
     if (steps) {
       sections.push(`[Active skill workflow — follow these steps in order]\n${steps}`)
@@ -304,6 +320,10 @@ function buildInfrastructurePromptFromMessages(messages: ChatMessage[]): string 
   }
 
   return sections.length > 0 ? sections.join('\n\n') : null
+}
+
+function isRawSkillMessage(message: ChatMessage): boolean {
+  return extractTextContent(message.content).includes('<skill_content')
 }
 
 function extractSkillStepLines(skillContent: string): string | null {
