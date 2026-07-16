@@ -750,6 +750,18 @@ export class QwenStreamHandler {
     this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
   }
 
+  /**
+   * Qwen has changed the mime type used for answer snapshots several times.
+   * Keep protocol/control messages out, but accept any message carrying a
+   * textual answer payload instead of coupling the parser to two legacy types.
+   */
+  private isAnswerMessage(msg: any): boolean {
+    if (!msg || typeof msg !== 'object') return false
+    const mimeType = typeof msg.mime_type === 'string' ? msg.mime_type : ''
+    if (mimeType === 'signal/post' || mimeType === 'bar/progress') return false
+    return typeof msg.content === 'string' && msg.content.length > 0
+  }
+
   hasSessionError(): boolean {
     return this.hasError
   }
@@ -1005,7 +1017,7 @@ export class QwenStreamHandler {
               for (const { msg } of eventMessages) {
                 
                 // Filter out [(deep_think)] and [(multimodal_chat_think_*)] markers from content
-                if ((msg.mime_type === 'text/plain' || msg.mime_type === 'multi_load/iframe') && msg.content) {
+                if (this.isAnswerMessage(msg)) {
                   // Skip content that is just the deep_think marker
                   let newContent = msg.content
                   if (newContent === '[(deep_think)]' || newContent.trim() === '[(deep_think)]') {
@@ -1055,8 +1067,8 @@ export class QwenStreamHandler {
                 }
 
                 if (msg.status === 'complete' || msg.status === 'finished') {
-                  // 只有当 multi_load/iframe 消息完成时才发送 stop
-                  if (msg.mime_type === 'multi_load/iframe' && !this.stopSent) {
+                  // Complete answer snapshots may use different mime types.
+                  if (this.isAnswerMessage(msg) && !this.stopSent) {
                     this.stopSent = true
                     console.log('[Qwen] Sending stop for multi_load/iframe, content so far:', this.content.length)
                     this.finalizeStream(transStream, safeEnd)
@@ -1244,6 +1256,9 @@ export class QwenStreamHandler {
                   data.id = result.communication.sessionid
                   this.sessionId = result.communication.sessionid
                 }
+                if (result.communication.reqid) {
+                  this.responseId = result.communication.reqid
+                }
               }
 
               if (result.data?.messages) {
@@ -1276,25 +1291,7 @@ export class QwenStreamHandler {
                     }
                   }
                   
-                  // Handle multi_load/iframe content (actual response content)
-                  if (msg.mime_type === 'multi_load/iframe' && msg.content) {
-                    // Filter out deep_think and multimodal_chat_think markers
-                    let filteredContent = msg.content
-                    if (filteredContent === '[(deep_think)]' || filteredContent.trim() === '[(deep_think)]') {
-                      console.log('[Qwen] Non-stream: Skipping deep_think marker')
-                      continue
-                    }
-                    // Filter out all think markers: [(deep_think)], [(multimodal_chat_think_*)]
-                    filteredContent = filteredContent.replace(/\[\(deep_think\)\]/g, '')
-                    filteredContent = filteredContent.replace(/\[\(multimodal_chat_think_\d+\)\]/g, '')
-                    if (filteredContent.length > contentAccumulator.length) {
-                      contentAccumulator = filteredContent
-                      console.log('[Qwen] Non-stream multi_load/iframe content length:', contentAccumulator.length)
-                    }
-                  }
-                  
-                  // Also handle text/plain content
-                  if (msg.mime_type === 'text/plain' && msg.content) {
+                  if (this.isAnswerMessage(msg)) {
                     // Filter out deep_think and multimodal_chat_think markers
                     let filteredContent = msg.content.replace(/\[\(deep_think\)\]/g, '')
                     filteredContent = filteredContent.replace(/\[\(multimodal_chat_think_\d+\)\]/g, '')
@@ -1304,7 +1301,7 @@ export class QwenStreamHandler {
                   }
 
                   if (msg.status === 'complete' || msg.status === 'finished') {
-                    if (msg.mime_type === 'multi_load/iframe') {
+                    if (this.isAnswerMessage(msg)) {
                       console.log('[Qwen] Non-stream finished, content length:', contentAccumulator.length)
                       this.content = contentAccumulator
                       

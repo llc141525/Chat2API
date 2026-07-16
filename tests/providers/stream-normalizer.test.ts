@@ -459,3 +459,31 @@ await test('full pipeline with thinking content included as text_delta', async (
   assert.ok(output.includes('Final answer'), 'final answer must appear')
   assert.ok(output.includes('[DONE]'), '[DONE] marker must appear')
 })
+
+await test('full pipeline accepts a non-legacy Qwen answer mime type', async () => {
+  const { QwenProviderPlugin } = await import(
+    '../../src/main/proxy/plugins/QwenProviderPlugin.ts'
+  )
+  const { normalizeProviderStreamToOpenAI } = await import(
+    '../../src/main/proxy/services/streamNormalizer.ts'
+  )
+
+  const rawData = [
+    qwenEvent('message', {
+      communication: { sessionid: 'sess-new-shape', reqid: 'req-new-shape' },
+      data: {
+        messages: [
+          { mime_type: 'text', content: 'Qwen answer after protocol change', status: 'complete' },
+        ],
+      },
+    }),
+  ].join('')
+
+  const output = await collect(normalizeProviderStreamToOpenAI(
+    QwenProviderPlugin.parseStream!({ data: streamFrom(rawData), headers: {} }),
+  ))
+
+  assert.ok(output.includes('Qwen answer after protocol change'))
+  assert.ok(output.includes('"finish_reason":"stop"'))
+  assert.ok(output.includes('[DONE]'))
+})

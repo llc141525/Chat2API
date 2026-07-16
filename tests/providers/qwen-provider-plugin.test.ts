@@ -281,6 +281,28 @@ test('parseNonStream returns valid ProviderRuntimeResult', async () => {
   assert.equal(result.response.status, 200)
 })
 
+test('parseNonStream consumes Qwen SSE and returns an OpenAI response', async () => {
+  const p = await loadPlugin()
+  const { Readable } = await import('node:stream')
+  const data = Readable.from([
+    'data: {"communication":{"sessionid":"session-1","reqid":"request-1"}}\n\n',
+    'data: {"data":{"messages":[{"mime_type":"text","content":"Reply exactly OK.","status":"complete"}]}}\n\n',
+    'event: complete\n\n',
+  ])
+
+  const result = await p.parseNonStream({
+    status: 200,
+    headers: {},
+    data,
+  })
+
+  const body = result.response.data as any
+  assert.equal(result.sessionId, 'session-1')
+  assert.equal(result.reqId, 'request-1')
+  assert.equal(body.choices[0].message.content, 'Reply exactly OK.')
+  assert.equal(body.choices[0].finish_reason, 'stop')
+})
+
 // ── No regression: existing tests must still pass ────────────────────
 
 test('plugin can be imported without side effects on existing adapters', async () => {

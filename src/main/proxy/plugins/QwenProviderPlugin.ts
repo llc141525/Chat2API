@@ -256,6 +256,20 @@ export const QwenProviderPlugin: WebProviderPlugin = {
   },
 
   async parseNonStream(input: ProviderWebResponse): Promise<ProviderRuntimeResult> {
+    if (input.data && typeof (input.data as any).on === 'function') {
+      const handler = new QwenStreamHandler('qwen')
+      const body = await handler.handleNonStream(input.data, input as any)
+
+      return {
+        sessionId: handler.getSessionId(),
+        reqId: handler.getResponseId(),
+        response: {
+          ...input,
+          data: body,
+        },
+      }
+    }
+
     let sessionId = ''
     let reqId = ''
 
