@@ -3,8 +3,8 @@
  * Enables tool calling for models without native function calling support
  */
 
-import { ChatCompletionTool, ChatMessage } from '../types'
-import { CLIENT_SIGNATURES, GENERAL_TOOL_SIGNATURES, hasGeneralToolPromptSignature } from '../constants/signatures'
+import type { ChatCompletionTool, ChatMessage } from '../types.ts'
+import { CLIENT_SIGNATURES, GENERAL_TOOL_SIGNATURES, hasGeneralToolPromptSignature } from '../constants/signatures.ts'
 
 // Re-export for backward compatibility
 export const TOOL_PROMPT_SIGNATURES = {
@@ -17,6 +17,11 @@ export const TOOL_PROMPT_SIGNATURES = {
   ),
 }
 
+/**
+ * @deprecated INV-001: Tool prompt injection detection is owned by ToolCallingEngine.
+ * Provider Adapters must NOT import this function.
+ * Used only by PromptAdapters for formatting decisions.
+ */
 export function hasToolPromptInjected(messages: ChatMessage[]): boolean {
   for (const msg of messages) {
     if (msg.role === 'system' || msg.role === 'user') {
@@ -42,6 +47,11 @@ export const DEFAULT_TOOL_PROMPT_CONFIG: ToolPromptConfig = {
   keywords: ['search', 'find', 'get', 'call', 'use', 'tool', 'query', 'fetch', 'read', 'write', 'list', 'delete', 'update', 'create']
 }
 
+/**
+ * @deprecated INV-001: Tool prompt injection decision is owned by ToolCallingEngine.
+ * Provider Adapters must NOT import this function.
+ * Kept for backward compatibility in PromptAdapter formatting paths only.
+ */
 export function shouldInjectToolPrompt(
   messages: ChatMessage[],
   tools: ChatCompletionTool[] | undefined,
@@ -105,6 +115,11 @@ function isComplexQuery(messages: ChatMessage[], config: ToolPromptConfig): bool
   return false
 }
 
+/**
+ * @deprecated INV-001: Tool prompt rendering is owned by ToolCallingEngine.
+ * Provider Adapters must NOT import this function.
+ * Replaced by getToolProtocol(plan.protocol).renderPrompt() in managed protocol layer.
+ */
 export function toolsToSystemPrompt(tools: ChatCompletionTool[], simple: boolean = false): string {
   if (!tools || tools.length === 0) {
     return ''
@@ -181,6 +196,11 @@ When you receive a tool result, it will be in the format:
 `
 }
 
+/**
+ * @deprecated INV-001: Tool wrap hints are managed by ToolCallingEngine.
+ * Provider Adapters must NOT import this constant.
+ * Legacy bracket-format hint; replaced by Contract Header + managed protocol rendering.
+ */
 export const TOOL_WRAP_HINT = `
 
 IMPORTANT: If you need to use a tool, you MUST wrap the tool call inside a [function_calls] block exactly like:

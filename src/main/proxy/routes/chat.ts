@@ -6,20 +6,106 @@
 import Router from '@koa/router'
 import type { Context } from 'koa'
 import { PassThrough } from 'stream'
-import { ChatCompletionRequest, ChatCompletionResponse, ProxyContext } from '../types'
-import { loadBalancer } from '../loadbalancer'
-import { requestForwarder } from '../forwarder'
-import { streamHandler } from '../stream'
-import { proxyStatusManager } from '../status'
-import { modelMapper } from '../modelMapper'
-import { storeManager } from '../../store/store'
-import { 
-  isAnthropicToolFormat,
-  transformResponseToAnthropic,
-  transformChunkToAnthropic
-} from '../utils/toolFormatConverter'
+import type { ChatCompletionRequest, ProxyContext } from '../types.ts'
+import { applyOpenAISessionIdentity } from './openaiSession.ts'
+
+interface ChatRouteDependencies {
+  getConfig: () => { loadBalanceStrategy: string }
+  getPreferredProvider: (model: string) => string | undefined
+  getPreferredAccount: (model: string) => string | undefined
+  selectAccount: (
+    model: string,
+    strategy: string,
+    preferredProviderId?: string,
+    preferredAccountId?: string,
+  ) => {
+    account: any
+    provider: any
+    actualModel: string
+  } | null
+  recordRequestStart: (model: string, providerId: string, accountId: string) => void
+  forwardChatCompletion: (
+    request: ChatCompletionRequest,
+    account: any,
+    provider: any,
+    actualModel: string,
+    context: ProxyContext,
+  ) => Promise<{
+    success: boolean
+    status?: number
+    headers?: Record<string, string>
+    body?: any
+    stream?: NodeJS.ReadableStream
+    skipTransform?: boolean
+    error?: string
+    latency?: number
+    providerSessionId?: string
+    parentMessageId?: string
+  }>
+}
 
 const router = new Router({ prefix: '/v1/chat' })
+
+type ChatRouteSelection = ReturnType<ChatRouteDependencies['selectAccount']>
+
+interface PreparedChatForwardRequest {
+  request: ChatCompletionRequest
+  selection: NonNullable<ChatRouteSelection>
+  context: ProxyContext
+  result: Awaited<ReturnType<ChatRouteDependencies['forwardChatCompletion']>>
+  startTime: number
+  requestId: string
+}
+
+const defaultChatRouteDependencies: ChatRouteDependencies = {
+  getConfig: () => {
+    throw new Error('default getConfig dependency unavailable before runtime initialization')
+  },
+  getPreferredProvider: () => undefined,
+  getPreferredAccount: () => undefined,
+  selectAccount: () => {
+    throw new Error('default selectAccount dependency unavailable before runtime initialization')
+  },
+  recordRequestStart: () => undefined,
+  forwardChatCompletion: async (request, account, provider, actualModel, context) => {
+    const { requestForwarder } = await import('../forwarder.ts')
+    return requestForwarder.forwardChatCompletion(request, account, provider, actualModel, context)
+  },
+}
+
+async function resolveChatRouteDependencies(
+  deps: ChatRouteDependencies,
+): Promise<ChatRouteDependencies> {
+  if (deps !== defaultChatRouteDependencies) {
+    return deps
+  }
+
+  const [
+    { storeManager },
+    { modelMapper },
+    { loadBalancer },
+    { proxyStatusManager },
+  ] = await Promise.all([
+    import('../../store/store.ts'),
+    import('../modelMapper.ts'),
+    import('../loadbalancer.ts'),
+    import('../status.ts'),
+  ])
+
+  return {
+    getConfig: () => storeManager.getConfig(),
+    getPreferredProvider: (model) => modelMapper.getPreferredProvider(model),
+    getPreferredAccount: (model) => modelMapper.getPreferredAccount(model),
+    selectAccount: (model, strategy, preferredProviderId, preferredAccountId) => loadBalancer.selectAccount(
+      model,
+      strategy,
+      preferredProviderId,
+      preferredAccountId,
+    ),
+    recordRequestStart: (model, providerId, accountId) => proxyStatusManager.recordRequestStart(model, providerId, accountId),
+    forwardChatCompletion: defaultChatRouteDependencies.forwardChatCompletion,
+  }
+}
 
 /**
  * Generate Request ID
@@ -62,10 +148,62 @@ function extractUserInput(messages: Array<{ role: string; content?: string | any
   return undefined
 }
 
+interface TokenUsage {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+}
+
+function extractTokenUsageFromBody(body: unknown): TokenUsage | undefined {
+  const usage = (body as { usage?: unknown } | undefined)?.usage
+  if (!usage || typeof usage !== 'object') return undefined
+
+  const usageRecord = usage as Record<string, unknown>
+  const promptTokens = normalizeTokenCount(usageRecord.prompt_tokens)
+  const completionTokens = normalizeTokenCount(usageRecord.completion_tokens)
+  const totalTokens = normalizeTokenCount(usageRecord.total_tokens) || promptTokens + completionTokens
+
+  if (promptTokens === 0 && completionTokens === 0 && totalTokens === 0) {
+    return undefined
+  }
+
+  return { promptTokens, completionTokens, totalTokens }
+}
+
+function extractTokenUsageFromSse(content: string): TokenUsage | undefined {
+  let usage: TokenUsage | undefined
+
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue
+
+    const payload = line.slice(5).trim()
+    if (!payload || payload === '[DONE]') continue
+
+    try {
+      const parsed = JSON.parse(payload)
+      usage = extractTokenUsageFromBody(parsed) || usage
+    } catch {
+      // Ignore non-JSON SSE data.
+    }
+  }
+
+  return usage
+}
+
+function normalizeTokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0
+}
+
 /**
  * Handle Chat Completions Request
  */
-router.post('/completions', async (ctx: Context) => {
+export async function prepareAndForwardChatCompletion(
+  ctx: Context,
+  deps: ChatRouteDependencies = defaultChatRouteDependencies,
+): Promise<PreparedChatForwardRequest | null> {
+  const resolvedDeps = await resolveChatRouteDependencies(deps)
   const startTime = Date.now()
   const requestId = generateRequestId()
   const clientIP = getClientIP(ctx)
@@ -139,11 +277,11 @@ router.post('/completions', async (ctx: Context) => {
     console.log('[Chat] Deep research enabled via X-Deep-Research header')
   }
 
-  const config = storeManager.getConfig()
-  const preferredProviderId = modelMapper.getPreferredProvider(request.model)
-  const preferredAccountId = modelMapper.getPreferredAccount(request.model)
+  const config = resolvedDeps.getConfig()
+  const preferredProviderId = resolvedDeps.getPreferredProvider(request.model)
+  const preferredAccountId = resolvedDeps.getPreferredAccount(request.model)
 
-  const selection = loadBalancer.selectAccount(
+  const selection = resolvedDeps.selectAccount(
     request.model,
     config.loadBalanceStrategy,
     preferredProviderId,
@@ -160,12 +298,12 @@ router.post('/completions', async (ctx: Context) => {
         code: 'no_available_account',
       },
     }
-    return
+    return null
   }
 
   const { account, provider, actualModel } = selection
 
-  const context: ProxyContext = {
+  const baseContext: ProxyContext = {
     requestId,
     providerId: provider.id,
     accountId: account.id,
@@ -176,16 +314,60 @@ router.post('/completions', async (ctx: Context) => {
     clientIP,
   }
 
-  proxyStatusManager.recordRequestStart(request.model, provider.id, account.id)
+  const context = applyOpenAISessionIdentity(
+    baseContext,
+    request,
+    ctx.headers as Record<string, string | string[] | undefined>,
+  )
 
-  try {
-    const result = await requestForwarder.forwardChatCompletion(
+  resolvedDeps.recordRequestStart(request.model, provider.id, account.id)
+
+  const result = await resolvedDeps.forwardChatCompletion(
+    request,
+    account,
+    provider,
+    actualModel,
+    context,
+  )
+
+  return {
+    request,
+    selection,
+    context,
+    result,
+    startTime,
+    requestId,
+  }
+}
+
+export function createChatCompletionsHandler(
+  deps: ChatRouteDependencies = defaultChatRouteDependencies,
+) {
+  return async (ctx: Context) => {
+    const prepared = await prepareAndForwardChatCompletion(ctx, deps)
+    if (!prepared) {
+      return
+    }
+
+    const [
+      { loadBalancer },
+      { proxyStatusManager },
+      { storeManager },
+    ] = await Promise.all([
+      import('../loadbalancer.ts'),
+      import('../status.ts'),
+      import('../../store/store.ts'),
+    ])
+
+    const {
       request,
-      account,
-      provider,
-      actualModel,
-      context
-    )
+      selection: { account, provider, actualModel },
+      result,
+      startTime,
+      requestId,
+    } = prepared
+
+    try {
 
     const latency = Date.now() - startTime
 
@@ -276,6 +458,7 @@ router.post('/completions', async (ctx: Context) => {
     const responseBodyForLog = !request.stream && result.body
       ? JSON.stringify(result.body)
       : undefined
+    const responseTokenUsage = !request.stream ? extractTokenUsageFromBody(result.body) : undefined
 
     // For streaming requests, we'll collect content and update the log later
     let logEntryId: string | undefined
@@ -300,6 +483,9 @@ router.post('/completions', async (ctx: Context) => {
         reasoningEffort: request.reasoning_effort,
         responseStatus: 200,
         responseBody: responseBodyForLog,
+        promptTokens: responseTokenUsage?.promptTokens,
+        completionTokens: responseTokenUsage?.completionTokens,
+        totalTokens: responseTokenUsage?.totalTokens,
         latency,
         isStream: false,
       })
@@ -329,7 +515,7 @@ router.post('/completions', async (ctx: Context) => {
       logEntryId = logEntry.id
     }
 
-    storeManager.recordRequestInStats(true, latency, request.model, provider.id, account.id)
+    storeManager.recordRequestInStats(true, latency, request.model, provider.id, account.id, responseTokenUsage)
 
     if (request.stream === true && result.stream) {
       ctx.set('Content-Type', 'text/event-stream')
@@ -342,6 +528,21 @@ router.post('/completions', async (ctx: Context) => {
 
       // Collect stream content for logging (raw SSE output)
       let collectedContent = ''
+      const updateStreamingRequestLog = () => {
+        if (!logEntryId) return
+
+        const tokenUsage = extractTokenUsageFromSse(collectedContent)
+        storeManager.updateRequestLog(logEntryId, {
+          responseBody: collectedContent || undefined,
+          promptTokens: tokenUsage?.promptTokens,
+          completionTokens: tokenUsage?.completionTokens,
+          totalTokens: tokenUsage?.totalTokens,
+        })
+
+        if (tokenUsage) {
+          storeManager.addTokenUsageToStats(tokenUsage)
+        }
+      }
 
       // Handle stream errors
       result.stream.once('error', (err: Error) => {
@@ -385,16 +586,12 @@ router.post('/completions', async (ctx: Context) => {
 
         // When source stream ends normally, update log and end wrapper
         result.stream.once('end', () => {
-          // Update log with collected response
-          if (logEntryId) {
-            storeManager.updateRequestLog(logEntryId, {
-              responseBody: collectedContent || undefined,
-            })
-          }
+          updateStreamingRequestLog()
           wrapperStream.end()
         })
       } else {
         // Need to transform the stream
+        const { streamHandler } = await import('../stream.ts')
         const transformStream = streamHandler.createTransformStream(
           actualModel,
           requestId,
@@ -412,12 +609,7 @@ router.post('/completions', async (ctx: Context) => {
         transformStream.pipe(wrapperStream, { end: false })
 
         transformStream.once('end', () => {
-          // Update log with collected response
-          if (logEntryId) {
-            storeManager.updateRequestLog(logEntryId, {
-              responseBody: collectedContent || undefined,
-            })
-          }
+          updateStreamingRequestLog()
           wrapperStream.end()
         })
       }
@@ -428,6 +620,10 @@ router.post('/completions', async (ctx: Context) => {
 
       if (result.body) {
         // Check if we need to transform to Anthropic format
+        const {
+          isAnthropicToolFormat,
+          transformResponseToAnthropic,
+        } = await import('../utils/toolFormatConverter.ts')
         if (isAnthropicToolFormat(request.tool_format)) {
           ctx.body = transformResponseToAnthropic(result.body)
           console.log('[Chat] Transformed response to Anthropic tool format')
@@ -456,7 +652,7 @@ router.post('/completions', async (ctx: Context) => {
         }
       }
     }
-  } catch (error) {
+    } catch (error) {
     const latency = Date.now() - startTime
     proxyStatusManager.recordRequestFailure(latency)
 
@@ -516,7 +712,10 @@ router.post('/completions', async (ctx: Context) => {
     })
 
     storeManager.recordRequestInStats(false, latency, request.model, provider.id, account.id)
+    }
   }
-})
+}
+
+router.post('/completions', createChatCompletionsHandler())
 
 export default router

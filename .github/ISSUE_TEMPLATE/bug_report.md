@@ -3,7 +3,7 @@ name: Bug report
 about: Create a report to help us improve
 title: "[BUG]"
 labels: bug
-assignees: xiaoY233
+assignees: llc141525
 
 ---
 
@@ -31,7 +31,7 @@ assignees: xiaoY233
 ### 基本信息
 | 项目 | 值 |
 |---|---|
-| Chat2API 版本 | <!-- 如 v1.2.0，可在 About 页面查看 --> |
+| Chat2API 版本 | <!-- 可在 About 页面或发布页查看 --> |
 | 操作系统及版本 | <!-- 如 macOS 15.3 / Windows 11 23H2 / Ubuntu 24.04 --> |
 | 系统架构 | <!-- arm64 / x64 --> |
 
@@ -63,7 +63,7 @@ assignees: xiaoY233
 ## 代理配置
 | 项目 | 值 |
 |---|---|
-| 代理端口 | <!-- 默认 8080 --> |
+| 代理端口 | <!-- 默认 48763 --> |
 | 负载均衡策略 | <!-- Round Robin / Fill First / Failover --> |
 | 添加的账号数量 |  |
 | 是否启用 API Key 认证 |  |

@@ -3,9 +3,10 @@
  * Implements Round Robin and Fill First strategies
  */
 
-import { Account, Provider, LoadBalanceStrategy } from '../store/types'
-import { AccountSelection } from './types'
-import { storeManager } from '../store/store'
+import { Account, Provider, LoadBalanceStrategy } from '../store/types.ts'
+import { AccountSelection } from './types.ts'
+import { storeManager } from '../store/store.ts'
+import { resolveQualifiedModel } from './modelMapper.ts'
 
 /**
  * Load Balancer
@@ -134,7 +135,12 @@ export class LoadBalancer {
       return true
     }
 
-    const normalizedModel = model.toLowerCase()
+    const qualified = resolveQualifiedModel(model)
+    if (qualified.providerId && qualified.providerId !== provider.id) {
+      return false
+    }
+
+    const normalizedModel = qualified.model.toLowerCase()
     const supported = effectiveModels.some(m => {
       const normalizedSupported = m.displayName.toLowerCase()
       if (normalizedSupported.endsWith('*')) {
@@ -149,6 +155,8 @@ export class LoadBalancer {
 
     const config = storeManager.getConfig()
     const globalMapping = config.modelMappings[model]
+    const normalizedQualifiedModel = qualified.model.toLowerCase()
+    const qualifiedMapping = qualified.model !== model ? config.modelMappings[qualified.model] : undefined
     if (globalMapping) {
       if (globalMapping.preferredProviderId) {
         if (globalMapping.preferredProviderId === provider.id) {
@@ -167,13 +175,43 @@ export class LoadBalancer {
         }
         return normalizedSupported === normalizedActualModel
       })
-      
+
       if (actualSupported) {
         console.log(`[LoadBalancer] Model "${model}" (actualModel: "${actualModel}") supported by ${provider.name}`)
         return true
       }
     }
-    
+
+    if (qualifiedMapping && (!qualifiedMapping.preferredProviderId || qualifiedMapping.preferredProviderId === provider.id)) {
+      const actualModel = qualifiedMapping.actualModel
+      const normalizedActualModel = actualModel.toLowerCase()
+      const actualSupported = effectiveModels.some(m => {
+        const normalizedSupported = m.displayName.toLowerCase()
+        if (normalizedSupported.endsWith('*')) {
+          return normalizedActualModel.startsWith(normalizedSupported.slice(0, -1))
+        }
+        return normalizedSupported === normalizedActualModel
+      })
+
+      if (actualSupported) {
+        console.log(`[LoadBalancer] Qualified model "${model}" matched ${provider.name} via "${qualified.model}" -> "${actualModel}"`)
+        return true
+      }
+    }
+
+    const qualifiedSupported = effectiveModels.some(m => {
+      const normalizedSupported = m.displayName.toLowerCase()
+      if (normalizedSupported.endsWith('*')) {
+        return normalizedQualifiedModel.startsWith(normalizedSupported.slice(0, -1))
+      }
+      return normalizedSupported === normalizedQualifiedModel
+    })
+
+    if (qualifiedSupported) {
+      console.log(`[LoadBalancer] Qualified model "${model}" matched ${provider.name} via unqualified model "${qualified.model}"`)
+      return true
+    }
+
     console.log(`[LoadBalancer] Provider ${provider.name} does not support model ${model}`)
     return false
   }
@@ -198,10 +236,12 @@ export class LoadBalancer {
    */
   private mapModel(model: string, provider: Provider): string {
     console.log(`[LoadBalancer] mapModel called with model="${model}", provider="${provider.name}"`)
-    
+    const qualified = resolveQualifiedModel(model)
+    const targetModel = qualified.providerId === provider.id ? qualified.model : model
+
     const effectiveModels = storeManager.getEffectiveModels(provider.id)
     const effectiveModel = effectiveModels.find(m => 
-      m.displayName.toLowerCase() === model.toLowerCase()
+      m.displayName.toLowerCase() === targetModel.toLowerCase()
     )
     
     if (effectiveModel) {
@@ -211,6 +251,7 @@ export class LoadBalancer {
 
     const config = storeManager.getConfig()
     const mapping = config.modelMappings[model]
+      || (targetModel !== model ? config.modelMappings[targetModel] : undefined)
 
     if (mapping && (!mapping.preferredProviderId || mapping.preferredProviderId === provider.id)) {
       const actualModel = mapping.actualModel

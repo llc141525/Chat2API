@@ -1,3 +1,8 @@
+import type {
+  LegacyToolPromptConfig,
+  ToolCallingConfig,
+} from './toolCalling'
+
 export type AccountStatus = 'active' | 'inactive' | 'expired' | 'error'
 
 export type ProviderStatus = 'online' | 'offline' | 'unknown'
@@ -138,6 +143,9 @@ export interface ProxyStatistics {
   totalRequests: number
   successRequests: number
   failedRequests: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
   avgLatency: number
   requestsPerMinute: number
   activeConnections: number
@@ -344,6 +352,9 @@ export interface StatisticsResponse {
     totalRequests: number
     successRequests: number
     failedRequests: number
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
   }>
 }
 

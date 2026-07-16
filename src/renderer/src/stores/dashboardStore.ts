@@ -4,11 +4,11 @@ import type { ProviderStats, ActivityItem, ChartDataPoint } from '@/components/d
 
 interface DashboardStats {
   totalRequests: number
-  successRate: number
+  totalTokens: number
   avgLatency: number
   activeAccounts: number
   requestsTrend: number
-  successRateTrend: number
+  tokensTrend: number
   latencyTrend: number
   accountsTrend: number
 }
@@ -79,6 +79,9 @@ interface RequestLogEntry {
   latency: number
   userInput?: string
   errorMessage?: string
+  promptTokens?: number
+  completionTokens?: number
+  totalTokens?: number
 }
 
 const convertRequestLogsToActivities = (logs: RequestLogEntry[]): ActivityItem[] => {
@@ -111,11 +114,11 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   statistics: null,
   stats: {
     totalRequests: 0,
-    successRate: 0,
+    totalTokens: 0,
     avgLatency: 0,
     activeAccounts: 0,
     requestsTrend: 0,
-    successRateTrend: 0,
+    tokensTrend: 0,
     latencyTrend: 0,
     accountsTrend: 0,
   },
@@ -153,9 +156,10 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       const providerStatusPromise = window.electronAPI?.providers?.checkAllStatus?.() ?? Promise.resolve({})
       const logsPromise = window.electronAPI?.logs?.get?.({ limit: 10 }) ?? Promise.resolve([])
       const trendPromise = window.electronAPI?.logs?.getTrend?.(7) ?? Promise.resolve([])
+      const requestLogStatsPromise = window.electronAPI?.requestLogs?.getStats?.() ?? Promise.resolve(null)
       const requestLogTrendPromise = window.electronAPI?.requestLogs?.getTrend?.(7) ?? Promise.resolve([])
 
-      const [proxyStatus, statistics, persistentStats, providers, accounts, providerStatuses, logs, trends, requestLogTrends] = await Promise.all([
+      const [proxyStatus, statistics, persistentStats, providers, accounts, providerStatuses, logs, trends, requestLogStats, requestLogTrends] = await Promise.all([
         proxyStatusPromise,
         statisticsPromise,
         persistentStatsPromise,
@@ -164,17 +168,16 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         providerStatusPromise,
         logsPromise,
         trendPromise,
+        requestLogStatsPromise,
         requestLogTrendPromise,
-      ]) as [ProxyStatus | null, ProxyStatistics | null, any, Provider[], Account[], Record<string, ProviderCheckResult>, LogEntry[], LogTrend[], any[]]
+      ]) as [ProxyStatus | null, ProxyStatistics | null, any, Provider[], Account[], Record<string, ProviderCheckResult>, LogEntry[], LogTrend[], any, any[]]
 
       setProxyStatus(proxyStatus)
       setStatistics(statistics)
 
       const totalRequests = persistentStats?.totalRequests ?? statistics?.totalRequests ?? 0
       const successRequests = persistentStats?.successRequests ?? statistics?.successRequests ?? 0
-      const successRate = totalRequests > 0
-        ? Math.round((successRequests / totalRequests) * 100)
-        : 0
+      const totalTokens = persistentStats?.totalTokens ?? requestLogStats?.totalTokens ?? 0
       
       const today = new Date().toISOString().split('T')[0]
       const todayStats = persistentStats?.dailyStats?.[today]
@@ -204,11 +207,14 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         requestsTrend = 100
       }
 
-      const todaySuccess = useRequestLogTrends ? (todayTrend?.success ?? 0) : (todayTrend?.info ?? 0)
-      const yesterdaySuccess = useRequestLogTrends ? (yesterdayTrend?.success ?? 0) : (yesterdayTrend?.info ?? 0)
-      const todaySuccessRate = todayRequests > 0 ? Math.round((todaySuccess / todayRequests) * 100) : 0
-      const yesterdaySuccessRate = yesterdayRequests > 0 ? Math.round((yesterdaySuccess / yesterdayRequests) * 100) : 0
-      const successRateTrend = yesterdaySuccessRate > 0 ? todaySuccessRate - yesterdaySuccessRate : 0
+      const todayTokens = todayTrend?.totalTokens ?? 0
+      const yesterdayTokens = yesterdayTrend?.totalTokens ?? 0
+      let tokensTrend = 0
+      if (yesterdayTokens > 0) {
+        tokensTrend = Math.round(((todayTokens - yesterdayTokens) / yesterdayTokens) * 100)
+      } else if (todayTokens > 0) {
+        tokensTrend = 100
+      }
 
       const todayAvgLatency = todayTrend?.avgLatency ?? 0
       const yesterdayAvgLatency = yesterdayTrend?.avgLatency ?? 0
@@ -218,11 +224,11 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
       setStats({
         totalRequests,
-        successRate,
+        totalTokens,
         avgLatency,
         activeAccounts,
         requestsTrend,
-        successRateTrend,
+        tokensTrend,
         latencyTrend,
       })
 
@@ -232,9 +238,11 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       
       const providerSuccessCount: Record<string, number> = {}
       const providerTotalCount: Record<string, number> = {}
+      const providerTokenCount: Record<string, number> = {}
       for (const log of requestLogs) {
         if (log.providerId) {
           providerTotalCount[log.providerId] = (providerTotalCount[log.providerId] || 0) + 1
+          providerTokenCount[log.providerId] = (providerTokenCount[log.providerId] || 0) + (log.totalTokens || 0)
           if (log.status === 'success') {
             providerSuccessCount[log.providerId] = (providerSuccessCount[log.providerId] || 0) + 1
           }
@@ -253,6 +261,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
           status: status?.status ?? provider.status ?? 'unknown',
           requestCount: totalCount,
           successCount: successCount,
+          totalTokens: providerTokenCount[provider.id] || 0,
           latency: status?.latency,
         }
       })
@@ -281,11 +290,11 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       setError(error instanceof Error ? error.message : 'Failed to fetch data')
       setStats({
         totalRequests: 0,
-        successRate: 0,
+        totalTokens: 0,
         avgLatency: 0,
         activeAccounts: 0,
         requestsTrend: 0,
-        successRateTrend: 0,
+        tokensTrend: 0,
         latencyTrend: 0,
         accountsTrend: 0,
       })

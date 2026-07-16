@@ -1,0 +1,263 @@
+# P0 Swallowed Replies Writing Plan
+
+Date: 2026-07-10
+Parent spec: `docs/superpowers/specs/2026-07-10-agent-tooling-stability-spec.md`
+
+## Objective
+
+Make swallowed or empty assistant replies impossible to treat as successful agent responses unless the request contract explicitly allows intentional silence.
+
+This is the first repair track because it blocks all other diagnosis: if Chat2API silently returns empty success, OpenCode and Claude Code cannot distinguish model failure, parser failure, stream failure, or tool-runtime failure.
+
+## User-Visible Symptoms
+
+- After a tool call, the follow-up assistant reply disappears.
+- Some models return an empty first assistant reply.
+- Streaming can finish without visible content and without a clear error.
+- Non-streaming can return empty `content` with `finish_reason: "stop"` and be accepted as success.
+
+## Scope
+
+Primary files:
+
+- `src/main/proxy/toolCalling/outputInspection.ts`
+- `src/main/proxy/toolCalling/diagnostics.ts`
+- `src/main/proxy/forwarder.ts`
+- `src/main/proxy/toolCalling/ToolStreamParser.ts`
+- `src/main/proxy/adapters/qwen.ts`
+- `src/main/proxy/adapters/glm.ts`
+- `src/main/proxy/adapters/qwen-ai.ts`
+
+Primary tests:
+
+- `tests/tool-calling/output-inspection.test.ts`
+- `tests/tool-calling/tool-stream-parser.test.ts`
+- provider stream tests under `tests/providers/`
+- final OpenCode probe under `tests/agent-capability/`
+
+## Writing Sequence
+
+### Step 1: Define The Empty Output Contract
+
+Write down the precise distinction between these outcomes:
+
+- `content`: usable assistant text exists.
+- `tool_calls`: validated tool calls exist.
+- `provider_empty`: no usable text and no usable tool calls.
+- `malformed_tool_output`: provider emitted protocol-like content that was blocked.
+- `provider_error`: provider failed before a normalized assistant message existed.
+
+The implementation must not rely on raw truthiness alone. It must classify empty strings, whitespace-only content, `null`, missing message, and empty choices.
+
+### Step 2: Strengthen Non-Stream Inspection
+
+Update `inspectNonStreamAssistantOutput` so strict contracts reject:
+
+- `choices: []`
+- missing `choices[0].message`
+- `message.content === ""`
+- whitespace-only `message.content`
+- `message.content === null` with no `tool_calls`
+- `finish_reason: "stop"` with no usable content
+
+Keep this rule:
+
+- `message.tool_calls.length > 0` counts as non-empty even when `content` is `null`.
+
+### Step 3: Add Stream-Level Empty Detection
+
+Add a stream terminal accounting path:
+
+- Track whether any visible `delta.content` was emitted.
+- Track whether any `delta.tool_calls` was emitted.
+- Track whether only role, whitespace, or empty deltas were emitted.
+- On finish, strict contracts must not end as success if there was no content and no tool calls.
+
+If the current architecture cannot fail a stream after headers are sent, write a diagnostic event and emit a client-safe final error event in the stream format used by that route.
+
+### Step 4: Protect Post-Tool-Call Turns
+
+Once a stream emits `delta.tool_calls`, suppress later normal `delta.content` in the same assistant message. Record the suppression as `malformed_tool_output`.
+
+This prevents provider residue from being interpreted as the assistant's final answer and prevents tool-call turns from becoming mixed content/tool turns.
+
+### Step 5: Provider-Specific Confirmation
+
+For Qwen and Qwen AI, inspect adapter finalization paths:
+
+- finish chunks
+- `[DONE]` handling
+- provider error chunks
+- status transitions
+- empty provider messages
+
+For GLM, keep current passing behavior intact.
+
+## Test Plan
+
+Add deterministic tests before implementation where possible:
+
+- Non-stream empty strict output fails with `provider_empty`.
+- Non-stream whitespace-only strict output fails with `provider_empty`.
+- Non-stream missing message fails with `provider_empty`.
+- Non-stream validated tool calls pass with `content: null`.
+- Stream role-only then finish fails or emits typed diagnostic.
+- Stream whitespace-only then finish fails or emits typed diagnostic.
+- Stream whitespace first, real content later succeeds.
+- Stream tool call followed by later text suppresses the later text.
+
+Run:
+
+```powershell
+node --test tests/tool-calling/output-inspection.test.ts tests/tool-calling/tool-stream-parser.test.ts
+```
+
+Then run the deterministic gate:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+## OpenCode Verification
+
+After deterministic tests pass:
+
+```powershell
+npm run dev:win 2>&1 | Tee-Object -FilePath .\dev.log
+```
+
+```powershell
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
+```
+
+For suspected Qwen-specific swallowed output:
+
+```powershell
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "qwen/Qwen3.7-Max"
+```
+
+## Acceptance Criteria
+
+- Empty successful assistant responses are no longer silently accepted under strict agent contracts.
+- Tool calls remain valid non-empty output.
+- Streamed tool-call turns cannot leak later text.
+- Diagnostics classify empty failures without requiring raw log archaeology.
+- GLM OpenCode probe still passes.
+
+## Acceptance Run: 2026-07-10
+
+Deterministic P0 focused gate passed:
+
+```powershell
+node --test tests/tool-calling/output-inspection.test.ts tests/tool-calling/tool-stream-parser.test.ts
+```
+
+Result:
+
+- 26 tests passed.
+- Empty non-stream output fails under strict contracts.
+- Whitespace-only non-stream output fails.
+- Missing non-stream message fails.
+- Stream whitespace-only output fails as `provider_empty`.
+- Suppressed protocol output reports `malformed_tool_output`.
+- Stream parser suppresses later plain text after a tool call.
+
+Full deterministic gate passed:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Result:
+
+- 205 tests passed.
+
+OpenCode GLM probe was executed:
+
+```powershell
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
+```
+
+Result:
+
+- OpenCode exited successfully.
+- Probe failed because `.agent-probe/result.json` was not created.
+- Event stream shows the first `skill` tool call succeeded.
+- The next assistant turn was not swallowed; it emitted plain text claiming only `open_url` was directly available and did not call `read` or `bash`.
+
+Classification:
+
+- This does not reproduce the P0 swallowed/empty-reply failure.
+- The remaining real-probe failure belongs to P1 tool catalog/tool availability reliability: the model saw or trusted the wrong available-tool set after the skill turn.
+
+## Acceptance Run: 2026-07-10 Follow-Up
+
+After the P1 catalog/tool availability fixes in the working tree, P0 was re-verified together with P1.
+
+Focused deterministic gate passed:
+
+```powershell
+node --test tests/tool-calling/output-inspection.test.ts tests/tool-calling/tool-stream-parser.test.ts tests/tool-calling/catalog-fallback.test.ts tests/tool-calling/tool-catalog.test.ts tests/tool-calling/tool-engine.test.ts tests/tool-runtime/data/*.test.ts
+```
+
+Result:
+
+- 107 tests passed.
+
+Full deterministic gate passed:
+
+```powershell
+node --test tests/tool-calling/*.test.ts tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+```
+
+Result:
+
+- 207 tests passed.
+
+Real OpenCode probes passed:
+
+```powershell
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "qwen/Qwen3.7-Max"
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "deepseek/deepseek-v4-pro"
+```
+
+Result:
+
+- All three probes returned `CAPABILITY_PROBE_PASS`.
+- `result.json` was created and matched deterministic expected values.
+- Event streams included a real `agent-capability-probe` skill invocation.
+- Event streams included at least two non-skill tool calls.
+- Event streams proved a non-skill tool call after a tool result.
+- Final assistant text included `CAPABILITY_PROBE_DONE`.
+
+P0 status:
+
+- Accepted for the verified GLM, Qwen, and DeepSeek paths.
+- The previous failed GLM probe is superseded by this follow-up run.
+
+## Stop Conditions
+
+Stop and write a follow-up issue if:
+
+- A provider returns no usable raw output at all, and the adapter cannot distinguish auth failure from model failure.
+- Streaming headers make it impossible to return a proper client error without route-level redesign.
+- A fix would require weakening tool-call validation or prompt-injection ownership.
+
+## Reopening: 2026-07-11 — DeepSeek Swallow-After-Tool-Use Regression
+
+The 2026-07-10 acceptance is superseded for the DeepSeek path only. Manual reproduction on 2026-07-11 showed DeepSeek turns swallow the assistant reply when a tool is used — the same failure shape P0 was designed to close for all managed providers. Qwen no longer reproduces this failure; DeepSeek still does.
+
+Follow-up plan: `2026-07-11-p0-p1-followup-plan.md` — Track A.
+
+Scope added to P0 in the follow-up:
+
+- Non-stream DeepSeek path must route through the same tool-stream parser (or equivalent buffered parser) that the streaming path uses, so tool-call emission and post-tool-call content suppression are consistent between modes.
+- Diagnostic events must distinguish `provider_empty` from `malformed_tool_output` on the DeepSeek non-stream branch. Empty content with `finish_reason: 'stop'` cannot coexist with a managed-tool contract.
+- Real DeepSeek probe gate widened to require three consecutive `CAPABILITY_PROBE_PASS` runs and observation of at least one non-stream managed tool turn plus one post-tool-result assistant reply with non-empty content.
+
+Scope added to P0 for context management (shared with P1 follow-up Track C):
+
+- P0's "swallowed reply" surface expands to include replies swallowed indirectly by context management compaction that drops the tool contract. If compaction prunes the prompt-injected tool definitions and the session catalog rescue is unavailable, the next turn behaves like an availability-drift / empty-output regression. See follow-up Track C.
+
+Original P0 status: ACCEPTED for GLM and Qwen paths; **REOPENED** for DeepSeek and for compaction-induced swallow. Do not close this reopening until the follow-up plan's acceptance criteria are met.

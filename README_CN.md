@@ -1,272 +1,219 @@
 # Chat2API
 
 <p align="center">
-  <img src="build/icons.png" alt="Chat2API Logo" width="128" height="128">
+  <img src="build/icons.png" alt="Chat2API" width="128" height="128">
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.3.0-blue?style=flat-square&logo=github" alt="Release">
-  <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License">
-  <br>
-  <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/Electron-33+-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron"></a>
-  <a href="https://react.dev/"><img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black" alt="React"></a>
-  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"></a>
-  <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
+  <strong>经过完全重构的 OpenAI 兼容 AI 客户端桌面网关</strong>
 </p>
 
 <p align="center">
-  <strong><a href="README.md">English</a> | <a href="https://chat2api-doc.vercel.app/">官网介绍</a> | <a href="https://chat2api-doc.vercel.app/docs">文档</a></strong>
+  <a href="README.md">English</a> ·
+  <a href="https://github.com/llc141525/Chat2API/issues">问题反馈</a> ·
+  <a href="docs/providers/README.md">Provider 文档</a>
 </p>
 
 <p align="center">
-  <strong>多平台 AI 服务统一管理工具</strong>
+  <img src="https://img.shields.io/badge/Electron-33%2B-47848F?logo=electron&logoColor=white" alt="Electron 33+">
+  <img src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black" alt="React 18">
+  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" alt="TypeScript 5">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0 license">
 </p>
 
-<p align="center">
-  Chat2API 通过驱动各大模型的官方 Web UI，实现 0 成本接入主流 AI 大模型。支持 DeepSeek、GLM、Kimi、MiniMax、Qwen、Z.ai 等渠道，可无缝连接 openlcaw、Cline、Roo-Code 等工具，让任何 OpenAI 兼容客户端即刻可用。
-</p>
+Chat2API 是一个跨平台 Electron 桌面应用和本地 API 网关。它把多个基于 Web 会话的 AI 服务商统一为一个 OpenAI 兼容接口，可直接连接 OpenCode、Cline、Roo Code、Cherry Studio、自定义脚本以及其他兼容客户端。
 
-![Product Preview](docs/screenshots/preview.png)
+当前仓库已经完成运行时和工具调用架构的整体重构。项目围绕 Provider 隔离、显式请求契约、长会话连续性和真实故障回归测试设计，重点解决 Agent 在读文件、连续调用工具、上下文压缩和流式响应中的稳定性问题。
 
-## ✨ 功能特性
+![Chat2API 预览](docs/screenshots/preview.png)
 
-- OpenAI 兼容 API：提供标准 OpenAI 兼容接口，无缝对接现有工具
-- 多服务商支持：支持 DeepSeek、GLM、Kimi、MiniMax、Perplexity 🆕、Qwen、Z.ai 等
-- 🆕 上下文管理：智能对话上下文管理，支持滑动窗口、Token 限制和总结压缩策略
-- 🆕 工具调用支持：通过提示词工程为所有模型提供通用工具调用能力，兼容 Cherry Studio、Kilo Code 等客户端
-- 🆕 模型映射：灵活的模型名称映射，支持通配符和首选服务商/账户选择
-- 🆕 自定义参数：支持自定义 HTTP Header 开启联网搜索、深度思考、深度研究等功能
-- 仪表盘监控：实时请求流量、Token 使用量和成功率统计
-- API Key 管理：为本地代理生成和管理密钥
-- 模型管理：查看和管理所有服务商的可用模型
-- 请求日志：详细的请求日志记录，便于调试和分析
-- 代理配置：灵活的代理设置和路由策略
-- 系统托盘集成：从菜单栏快速访问状态
-- 多语言支持：支持英文和简体中文
-- 现代界面：简洁响应式界面，支持深色/浅色主题
+## 为什么要使用 Chat2API
 
-## 🤖 支持的服务商
+很多 Web 会话网关只能处理单次请求；当 Agent 开始连续读文件、调用工具、压缩上下文或切换流式模式后，就容易出现工具丢失、重复调用、历史污染或响应格式异常。Chat2API 把这些流程作为核心能力处理：
 
-| 服务商           | 认证类型          | OAuth | 模型                                                                                                                                                                                                                                            |
-| ------------- | ------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DeepSeek      | User Token    | 是     | deepseek-v4-flash, deepseek-v4-pro                                                                                                                                                                                                            |
-| GLM           | Refresh Token | 是     | GLM-5.1                                                                                                                                                                                                                                       |
-| Kimi          | JWT Token     | 是     | Kimi-K2.6                                                                                                                                                                                                                                     |
-| MiniMax       | JWT Token     | 是     | MiniMax-M2.7                                                                                                                                                                                                                                  |
-| Mimo          | Cookie        | 是     | MiMo-V2.5-Pro, MiMo-V2.5, MiMo-V2-Flash                                                                                                                                                                                                       |
-| Perplexity    | Cookie        | 是     | Auto                                                                                                                                                                                                                                         |
-| Qwen (国内版)    | SSO Ticket    | 是     | Qwen3.6, Qwen3.7-Max, Qwen3.5-Flash, Qwen3-Max, Qwen3-Max-Thinking-Preview, Qwen3-Coder                                                                                                                                                       |
-| Qwen AI (国际版) | JWT Token     | 是     | Qwen3.7-Max, Qwen3.6-Plus, Qwen3.6-35B-A3B, Qwen3.6-27B, Qwen3-Coder                                                                                                                                                                         |
-| Z.ai          | JWT Token     | 是     | 受前端验证码风控限制，暂不可用                                                                                                                                                                                                                              |
+- 一个本地 OpenAI 兼容 API 接入多个 Provider；
+- 由统一的托管工具调用引擎负责提示词注入和解析；
+- Provider 会话与客户端会话明确分离；
+- 工具目录、助手工具调用、工具结果和摘要跨轮次保留；
+- 请求、会话、路由和工具运行时边界可观测；
+- 使用 fixtures、Provider 测试和长对话能力探针覆盖真实故障模式。
 
-供应商适配说明和手动添加模型教程见 [docs/providers](docs/providers/README.md)。
+## 核心亮点
 
-## 📥 安装
+### 统一 Provider 网关
 
-### 下载安装
+- 提供 OpenAI 兼容 Chat Completions API。
+- 支持 Provider/模型映射、账户选择和故障转移策略。
+- 在桌面 UI 中管理账户、凭证、API Key、代理、模型和请求日志。
+- 统一处理流式和非流式响应。
+- 支持通过自定义 Header 开启搜索、思考等 Provider 特有能力。
+- 系统托盘应用，支持英文和简体中文界面。
 
-从 [GitHub Releases](https://github.com/xiaoY233/Chat2API/releases) 下载最新版本：
+### 面向 Agent 的工具调用
 
-| 平台                    | 下载文件                                   |
-| --------------------- | -------------------------------------- |
-| macOS (Apple Silicon) | `Chat2API-x.x.x-arm64.dmg`             |
-| macOS (Intel)         | `Chat2API-x.x.x-x64.dmg`               |
-| Windows               | `Chat2API-x.x.x-x64-setup.exe`         |
-| Linux                 | `Chat2API-x.x.x-x64.AppImage` 或 `.deb` |
+- 为不支持原生 OpenAI 工具调用的 Provider 提供统一托管 XML 协议。
+- 只解析合法工具块，忽略普通 XML 示例、尖括号、代码围栏、损坏块和未知工具。
+- 正确把流式工具块转换为 OpenAI `delta.tool_calls`。
+- 正确把非流式工具块转换为 `message.tool_calls`，并设置 `finish_reason: "tool_calls"`。
+- 跨轮次保留 `tool_call_id` 和助手工具调用历史。
+- Session 元数据不可用时提供无状态降级路径。
+- 持久化工具目录并检测工具漂移，避免长任务中工具静默丢失。
 
-### 从源码构建
+### 长上下文连续性
 
-**环境要求：**
+- 为支持的 Provider 提供会话复用，包括 GLM 和 Qwen 路径。
+- 为 OpenAI 兼容路由显式规划 Session 边界。
+- 提供上下文分类、Prompt 预算控制、摘要质量门禁和摘要清洗。
+- 通过工作流状态摘要在压缩上下文后保留当前任务状态。
+- 覆盖重复工具调用、压缩后工具丢失、摘要污染和多轮历史回归。
 
-- Node.js 18+
-- npm
-- Git
+### 可观测性和测试体系
 
-```bash
-# 克隆仓库
-git clone https://github.com/xiaoY233/Chat2API.git
+- 提供仪表盘、请求日志、Provider 状态、模型目录和代理状态。
+- 使用可复现的 Provider fixtures 和解析器测试。
+- 提供 OpenCode 风格长对话能力探针。
+- CI 检查适配器边界、工具调用行为和 Provider 回归。
+
+## 支持的 Provider
+
+当前内置适配器包括：
+
+| Provider | 文档 |
+| --- | --- |
+| DeepSeek | [使用说明](docs/providers/deepseek.md) |
+| GLM | [使用说明](docs/providers/glm.md) |
+| Kimi | [使用说明](docs/providers/kimi.md) |
+| MiniMax | [使用说明](docs/providers/minimax.md) |
+| MiMo | [使用说明](docs/providers/mimo.md) |
+| Perplexity | [使用说明](docs/providers/perplexity.md) |
+| Qwen | [使用说明](docs/providers/qwen.md) |
+| Qwen AI | [使用说明](docs/providers/qwen-ai.md) |
+| Z.ai | [使用说明](docs/providers/zai.md) |
+
+Provider 的认证方式、可用模型和风控策略会变化，请以对应文档和应用内模型目录为准，不要在客户端配置中固定过时的模型列表。
+
+## 安装
+
+如果已有发布版本，请从 [GitHub Releases](https://github.com/llc141525/Chat2API/releases) 下载。当前构建目标包括 Windows x64、macOS arm64/x64，以及 Linux x64/arm64。
+
+## 从源码构建
+
+环境要求：Node.js 20 或更高版本、npm、Git。
+
+~~~bash
+git clone https://github.com/llc141525/Chat2API.git
 cd Chat2API
+npm ci
+npm run dev:win       # Windows 开发环境
+~~~
 
-# 安装依赖
-npm install
+构建应用：
 
-# 启动开发服务器
-npx electron-vite dev 2>&1
-```
+~~~bash
+npm run build
+npm run build:win
+npm run build:mac
+npm run build:linux
+~~~
 
-### 构建生产版本
+打包结果写入 `dist/`，该目录不会提交到 Git。
 
-```bash
-npm run build              # 构建应用
-npm run build:mac          # 构建 macOS 版本 (dmg, zip)
-npm run build:win          # 构建 Windows 版本 (nsis)
-npm run build:linux        # 构建 Linux 版本 (AppImage, deb)
-npm run build:all          # 构建所有平台
-```
+## 快速开始
 
-## 📖 使用方法
+1. 启动 Chat2API，在 **Provider** 页面添加账户。
+2. 打开 **Proxy** 页面，设置端口和路由策略并启动本地代理。
+3. 如果启用了客户端认证，在 **API Keys** 页面创建 API Key。
+4. 将 OpenAI 兼容客户端指向 `http://127.0.0.1:<端口>/v1`。
 
-### 步骤 1：启动应用
+OpenAI Python SDK 示例：
 
-安装完成后，启动 Chat2API。您将看到主仪表盘。
-
-### 步骤 2：添加供应商
-
-1. 从侧边栏导航到**供应商**页面
-2. 点击**添加供应商**按钮
-3. 选择一个内置供应商（例如 DeepSeek）
-4. 输入您的认证凭证
-
-例如，获取 DeepSeek Token：
-
-1. 访问 [DeepSeek Chat](https://chat.deepseek.com/)
-2. 开始任意对话
-3. 按 `F12` 打开开发者工具
-4. 转到 **Application** > **Local Storage**
-5. 找到 `userToken` 并复制其值
-
-### 步骤 3：配置代理
-
-1. 从侧边栏导航到**代理设置**页面
-2. 设置端口（默认：8080）
-3. 选择负载均衡策略：
-   - **轮询**：在账户间均匀分配请求
-   - **填充优先**：使用一个账户直到达到限制
-   - **故障转移**：失败时自动切换
-4. 点击**启动代理**
-
-### 步骤 4：测试 API
-
-使用 Python (OpenAI SDK)：
-
-```python
+~~~python
 from openai import OpenAI
 
 client = OpenAI(
-    api_key="your-api-key",
-    base_url="http://localhost:8080/v1"
+    api_key="your-chat2api-key",
+    base_url="http://127.0.0.1:48763/v1",
 )
 
 response = client.chat.completions.create(
-    model="deepseek-v4-flash",
-    messages=[
-        {"role": "user", "content": "你好，你是谁？"}
-    ]
+    model="your-provider-model",
+    messages=[{"role": "user", "content": "你好，Chat2API"}],
 )
 
 print(response.choices[0].message.content)
-```
+~~~
 
-### 步骤 5：管理 API Key（可选）
+认证、账户配置、模型映射和 Provider 特有参数请参考 [Provider 文档](docs/providers/README.md)。
 
-为了安全，您可以启用 API Key 认证：
+## 开发和验证
 
-1. 转到 **API Keys** 页面
-2. 点击**新建 API Key**
-3. 输入名称和描述
-4. 复制生成的密钥
+运行核心回归测试：
 
-## 📸 截图
+~~~bash
+npm run build
+node --test tests/tool-calling/*.test.ts
+node --test tests/providers/glm-tool-calling.test.ts tests/providers/context-tool-metadata.test.ts tests/providers/qwen-request-routing.test.ts
+~~~
 
-| 仪表盘 | 服务商 |
-|--------|--------|
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Providers](docs/screenshots/providers.png) |
+运行真实的本地代理探针：
 
-| 代理设置 | API Key |
-|----------|---------|
-| ![Proxy](docs/screenshots/proxy.png) | ![API Keys](docs/screenshots/api-keys.png) |
+~~~powershell
+npm run dev:win 2>&1 | Tee-Object -FilePath .\dev.log
+.\tests\agent-capability\verify-opencode-capability.ps1 -Model "glm/GLM-5.2"
+~~~
 
-| 模型管理 | 会话管理 |
-|----------|----------|
-| ![Models](docs/screenshots/models.png) | ![Session](docs/screenshots/Session.png) |
+测试和探针关注的不只是编译成功，还包括多轮工具调用、流式转换、工具目录连续性、压缩后的工具存活、Session 身份以及 Provider 降级响应。
 
-## ⚙️ 设置选项
+## 架构概览
 
-- **端口**：更改代理监听端口（默认：8080）
-- **路由策略**：轮询（Round Robin）或填充优先（Fill First）
-- **自动启动**：应用启动时自动启动代理
-- **主题**：浅色、深色或跟随系统
-- **语言**：英文或简体中文
+~~~text
+OpenAI 兼容客户端
+        │
+        ▼
+Koa 代理 / 路由身份 / API Key
+        │
+        ▼
+Forwarder + RequestAssembly + ProviderRuntime
+        │
+        ├── ToolCallingEngine
+        │     ├── 工具目录和托管 Prompt
+        │     ├── Managed XML 解析器
+        │     └── OpenAI 流式/消息转换
+        │
+        ├── 上下文经济和 Session 边界服务
+        └── Provider 适配器和 Web 会话
+~~~
 
-## 🏗️ 项目结构
+关键源码目录：
 
-```
-Chat2API/
-├── src/
-│   ├── main/                    # Electron 主进程
-│   │   ├── index.ts            # 应用入口
-│   │   ├── tray.ts             # 系统托盘集成
-│   │   ├── proxy/              # 代理服务器管理
-│   │   ├── ipc/                # IPC 处理器
-│   │   └── utils/              # 工具函数
-│   ├── preload/                # 上下文桥接
-│   └── renderer/               # React 前端
-│       ├── components/         # UI 组件
-│       ├── pages/              # 页面组件
-│       ├── stores/             # Zustand 状态
-│       └── hooks/              # 自定义 Hooks
-├── build/                      # 构建资源
-└── scripts/                    # 构建脚本
-```
+- `src/main/proxy/forwarder.ts`：请求路由和响应流程；
+- `src/main/proxy/adapters/`：Provider 传输和格式转换；
+- `src/main/proxy/toolCalling/`：工具契约、Prompt、解析和标准化；
+- `src/main/proxy/services/`：Provider Runtime、Session 边界、上下文经济和摘要；
+- `src/renderer/src/`：React 桌面 UI；
+- `tests/`：单元、集成、fixture 和能力测试。
 
-## 🔧 技术栈
+## 数据和安全
 
-| 组件   | 技术                    |
-| ---- | --------------------- |
-| 框架   | Electron 33+          |
-| 前端   | React 18 + TypeScript |
-| 样式   | Tailwind CSS          |
-| 状态管理 | Zustand               |
-| 构建工具 | Vite + electron-vite  |
-| 打包工具 | electron-builder      |
-| 服务器  | Koa                   |
+Chat2API 是本地网关。账户凭证和 Provider Session 数据由桌面应用管理，并存储在用户的应用数据目录中。不要在 Issue 或 Pull Request 中粘贴 Token、Cookie、Refresh Token、请求日志或 Session 导出文件；分享诊断信息前请脱敏。
 
-## 📁 数据存储
+Web 会话适配器依赖 Provider 的认证、可用性、速率限制和服务条款。Provider 可能随时改变 Web 界面，因此这里的支持属于兼容性支持，不等同于 Provider 官方 API 保证。
 
-应用数据存储在 `~/.chat2api/` 目录下：
+## 贡献
 
-- `config.json` - 应用配置
-- `providers.json` - 服务商设置
-- `accounts.json` - 账户凭证（加密）
-- `logs/` - 请求日志
+欢迎提交 Bug 和 Provider 回归问题。请附上操作系统、Chat2API 版本或 commit、Provider/模型、复现步骤以及脱敏后的日志片段。新增适配器前，请先参考 [Provider 文档](docs/providers/README.md) 和现有测试 fixtures。
 
-## ❓ 常见问题
+提交 Pull Request 前运行：
 
-### macOS 提示"应用已损坏，无法打开"？
+~~~bash
+npm run build
+git diff --check
+~~~
 
-由于 macOS 的安全机制，非 App Store 下载的应用可能会触发此提示。运行以下命令即可修复：
+Provider 特有逻辑应保留在适配器/Profile 边界内；工具 Prompt 注入和 Managed XML 解析应由共享工具调用引擎统一负责。
 
-```bash
-sudo xattr -rd com.apple.quarantine "/Applications/Chat2API.app"
-```
+## 许可证和致谢
 
-### 如何更新？
+Chat2API 使用 [GNU GPL-3.0 许可证](LICENSE)。
 
-在 **关于** 页面检查更新，或从 [GitHub Releases](https://github.com/xiaoY233/Chat2API/releases) 下载最新版本。
-
-## 🤝 贡献
-
-1. Fork 本项目
-2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 提交 Pull Request
-
-## 📄 许可证
-
-GNU 通用公共许可证 v3.0。详见 [LICENSE](LICENSE)。
-
-这意味着：
-
-- ✅ 可以自由使用、修改和分发
-- ✅ 衍生作品必须以相同许可证开源
-- ✅ 必须保留原始版权声明
-
-## 🙏 致谢
-
-- [Electron](https://www.electronjs.org/) - 跨平台框架
-- [React](https://react.dev/) - UI 框架
-- [TypeScript](https://www.typescriptlang.org/) - 类型安全的 JavaScript
-- [Tailwind CSS](https://tailwindcss.com/) - CSS 框架
-- [Zustand](https://zustand-demo.pmnd.rs/) - 状态管理
-- [Koa](https://koajs.com/) - HTTP 服务器
+项目基于最初的 [xiaoY233/Chat2API](https://github.com/xiaoY233/Chat2API)，之后完成了运行时、上下文管理、工具调用、测试体系和 UI 的大规模重构。

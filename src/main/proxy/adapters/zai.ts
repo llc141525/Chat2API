@@ -8,21 +8,21 @@ import crypto from 'crypto'
 import { PassThrough } from 'stream'
 import { createParser } from 'eventsource-parser'
 import FormData from 'form-data'
-import { Account, Provider } from '../../store/types'
-import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
-import { parseToolCallsFromText } from '../utils/toolParser'
+import { Account, Provider } from '../../store/types.ts'
+import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse.ts'
+import { parseToolCallsFromText } from '../utils/toolParser.ts'
 import {
   createToolCallState,
   processStreamContent,
   flushToolCallBuffer,
   createBaseChunk,
   ToolCallState
-} from '../utils/streamToolHandler'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
+} from '../utils/streamToolHandler.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const ZAI_API_BASE = 'https://chat.z.ai'
-const X_FE_VERSION = 'prod-fe-1.1.37'
+const X_FE_VERSION = 'prod-fe-1.1.68'
 const ZAI_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36'
 
 const FAKE_HEADERS = {
@@ -55,10 +55,10 @@ function cleanSearchCitations(text: string): string {
 
 function cleanSearchCitationsWithBuffer(text: string, buffer: { value: string }): string {
   const combined = buffer.value + text
-
+  
   // First try to match complete citations
   let cleaned = combined.replace(new RegExp(SEARCH_CITATION_LOOSE_PATTERN, 'g'), '')
-
+  
   // Check if there's an opening bracket at the end that might start a citation
   const lastOpenBracket = cleaned.lastIndexOf(SEARCH_CITATION_BRACKET_START)
   if (lastOpenBracket !== -1) {
@@ -78,7 +78,7 @@ function cleanSearchCitationsWithBuffer(text: string, buffer: { value: string })
   } else {
     buffer.value = ''
   }
-
+  
   return cleaned
 }
 
@@ -186,7 +186,7 @@ export class ZaiAdapter {
     const r = timestampMs
     const i = String(timestampMs)
     const e = `requestId,${requestId},timestamp,${timestampMs},user_id,${userId}`
-
+    
     // a = message text UTF-8 bytes
     const a = Buffer.from(messageText, 'utf-8')
     // w = base64 encode of message text
@@ -196,10 +196,10 @@ export class ZaiAdapter {
 
     // E = window index (5 minute window)
     const windowIndex = Math.floor(r / (5 * 60 * 1000))
-
+    
     // Layer1: A = HMAC(secret, window_index) -> hex string
     const derivedKeyHex = crypto.createHmac('sha256', secret).update(String(windowIndex)).digest('hex')
-
+    
     // Layer2: k = HMAC(A_hex, canonical_string) -> hex string
     const signature = crypto.createHmac('sha256', derivedKeyHex).update(canonicalString).digest('hex')
 
@@ -210,9 +210,9 @@ export class ZaiAdapter {
     const token = await this.ensureToken()
     const timestamp = Math.floor(Date.now() / 1000)
     const messageId = uuid()
-
+    
     console.log('[Z.ai] Creating chat with model:', model)
-
+    
     const requestBody = {
       chat: {
         id: '',
@@ -251,16 +251,17 @@ export class ZaiAdapter {
         type: 'default',
       },
     }
-
+    
     const response = await axios.post(
       `${ZAI_API_BASE}/api/v1/chats/new`,
-      requestBody,
+      { chat: requestBody.chat, bot_id: '' },
       {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
-          ...FAKE_HEADERS,
-          'Cookie': `token=${token}`,
+          Accept: 'application/json',
+          'Accept-Language': 'zh-CN',
+          Origin: ZAI_API_BASE,
           Referer: `${ZAI_API_BASE}/`,
         },
         timeout: 15000,
@@ -280,7 +281,7 @@ export class ZaiAdapter {
   async deleteChat(chatId: string): Promise<boolean> {
     try {
       const token = await this.ensureToken()
-
+      
       const response = await axios.delete(
         `${ZAI_API_BASE}/api/v1/chats/${chatId}`,
         {
@@ -305,9 +306,9 @@ export class ZaiAdapter {
   async deleteAllChats(): Promise<boolean> {
     try {
       const token = await this.ensureToken()
-
+      
       console.log('[Z.ai] Deleting all chats...')
-
+      
       const response = await axios.delete(
         `${ZAI_API_BASE}/api/v1/chats/`,
         {
@@ -322,12 +323,12 @@ export class ZaiAdapter {
       )
 
       console.log('[Z.ai] Delete all chats response:', response.status, response.data)
-
+      
       if (response.status === 200 && response.data === true) {
         console.log('[Z.ai] All chats deleted successfully')
         return true
       }
-
+      
       console.warn('[Z.ai] Delete all chats failed:', response.status, response.data)
       return false
     } catch (error) {
@@ -339,20 +340,22 @@ export class ZaiAdapter {
   async chatCompletion(request: ChatCompletionRequest): Promise<{ response: AxiosResponse; chatId: string; requestId: string }> {
     const token = await this.ensureToken()
     const userId = this.extractUserIDFromToken(token)
-
+    
     console.log('[Z.ai] chatCompletion called with request.model:', request.model)
-
+    
     // Z.ai API requires specific model name casing:
-    // - GLM-5.1 and GLM-5-Turbo keep uppercase
+    // - GLM-5.2, GLM-5.1, and GLM-5-Turbo keep uppercase
     // - GLM-5V-Turbo uses lowercase "v" in the request model id
     // - GLM-5 and GLM-4.7 use lowercase request model ids
     const modelMapping: Record<string, string> = {
+      'glm-5.2': 'GLM-5.2',
       'glm-5.1': 'GLM-5.1',
       'glm-5-turbo': 'GLM-5-Turbo',
       'glm-5v-turbo': 'GLM-5v-Turbo',
       'glm-5': 'glm-5',
       'glm-4.7': 'glm-4.7',
       // Also handle uppercase input
+      'GLM-5.2': 'GLM-5.2',
       'GLM-5.1': 'GLM-5.1',
       'GLM-5-Turbo': 'GLM-5-Turbo',
       'GLM-5V-Turbo': 'GLM-5v-Turbo',
@@ -361,13 +364,13 @@ export class ZaiAdapter {
       'GLM-4.7': 'glm-4.7',
     }
     const mappedModel = modelMapping[request.model] || modelMapping[request.model.toLowerCase()] || request.model
-
+    
     console.log('[Z.ai] Original model:', request.model, '-> Mapped model:', mappedModel)
-
+    
     // Extract system message and merge with user message
     let systemContent = ''
     let processedMessages = []
-
+    
     for (const msg of request.messages) {
       if (msg.role === 'system') {
         systemContent += (systemContent ? '\n\n' : '') + (typeof msg.content === 'string' ? msg.content : '')
@@ -375,34 +378,34 @@ export class ZaiAdapter {
         processedMessages.push(msg)
       }
     }
-
+    
     // If system prompt exists, prepend it to the first user message
     if (systemContent && processedMessages.length > 0) {
       const firstUserIdx = processedMessages.findIndex(m => m.role === 'user')
       if (firstUserIdx !== -1) {
         const firstUserMsg = processedMessages[firstUserIdx]
-        const originalContent = typeof firstUserMsg.content === 'string'
-          ? firstUserMsg.content
-          : (Array.isArray(firstUserMsg.content)
-              ? firstUserMsg.content.find((p: any) => p.type === 'text')?.text || ''
+        const originalContent = typeof firstUserMsg.content === 'string' 
+          ? firstUserMsg.content 
+          : (Array.isArray(firstUserMsg.content) 
+              ? firstUserMsg.content.find((p: any) => p.type === 'text')?.text || '' 
               : '')
-
+        
         processedMessages[firstUserIdx] = {
           ...firstUserMsg,
           content: `${systemContent}\n\nUser: ${originalContent}`
         }
       }
     }
-
+    
     const signaturePrompt = this.extractLastUserMessage(processedMessages)
-
+    
     // Always create a new chat (single-turn mode only)
     const chatResult = await this.createChat(mappedModel, signaturePrompt)
     const chatId = chatResult.chatId
     const messageId = chatResult.messageId
     const parentMessageId = null
     console.log('[Z.ai] Created new chat:', chatId)
-
+    
     const requestId = uuid()
     const timestamp = Date.now()
     const signature = this.generateSignature(signaturePrompt, requestId, timestamp, userId)
@@ -412,10 +415,10 @@ export class ZaiAdapter {
     // Use originalModel for feature detection (preserves user's intent before mapping)
     const modelForDetection = request.originalModel || request.model
     const modelLower = modelForDetection.toLowerCase()
-
+    
     let enableThinking = request.reasoning_effort === false ? false : true
     let enableWebSearch = !!request.web_search
-
+    
     // Auto-enable based on model name (if not explicitly set)
     if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
       enableThinking = true
@@ -525,6 +528,257 @@ export class ZaiAdapter {
       {
         headers: {
           Authorization: `Bearer ${token}`,
+          'Cookie': `token=${token}`,
+          'Content-Type': 'application/json',
+          'Accept-Language': 'zh-CN',
+          'X-FE-Version': X_FE_VERSION,
+          'X-Signature': signature,
+          Origin: ZAI_API_BASE,
+          Referer: `${ZAI_API_BASE}/c/${chatId}`,
+        },
+        responseType: 'stream',
+        timeout: 120000,
+        validateStatus: () => true,
+      }
+    )
+
+    console.log('[Z.ai] Response status:', response.status)
+    if (response.status !== 200) {
+      console.log('[Z.ai] Request body:', JSON.stringify(requestBody, null, 2))
+      console.log('[Z.ai] Signature:', signature)
+      console.log('[Z.ai] Timestamp:', timestamp)
+      console.log('[Z.ai] RequestId:', requestId)
+      console.log('[Z.ai] UserId:', userId)
+      if (response.data && typeof response.data.on === 'function') {
+        const chunks: Buffer[] = []
+        response.data.on('data', (chunk: Buffer) => chunks.push(chunk))
+        await new Promise<void>((resolve) => {
+          response.data.on('end', () => resolve())
+          response.data.on('error', () => resolve())
+        })
+        const errorBody = Buffer.concat(chunks).toString('utf8')
+        console.log('[Z.ai] Error response body:', errorBody)
+      } else if (response.data) {
+        console.log('[Z.ai] Error response data:', JSON.stringify(response.data, null, 2))
+      }
+    }
+
+    return { response, chatId, requestId }
+  }
+
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{ response: AxiosResponse; chatId: string; requestId: string }> {
+    const token = await this.ensureToken()
+    const userId = this.extractUserIDFromToken(token)
+
+    console.log('[Z.ai] chatCompletionWithAssembly called with request.model:', request.model)
+
+    // Z.ai API requires specific model name casing:
+    // - GLM-5.2, GLM-5.1, and GLM-5-Turbo keep uppercase
+    // - GLM-5V-Turbo uses lowercase "v" in the request model id
+    // - GLM-5 and GLM-4.7 use lowercase request model ids
+    const modelMapping: Record<string, string> = {
+      'glm-5.2': 'GLM-5.2',
+      'glm-5.1': 'GLM-5.1',
+      'glm-5-turbo': 'GLM-5-Turbo',
+      'glm-5v-turbo': 'GLM-5v-Turbo',
+      'glm-5': 'glm-5',
+      'glm-4.7': 'glm-4.7',
+      // Also handle uppercase input
+      'GLM-5.2': 'GLM-5.2',
+      'GLM-5.1': 'GLM-5.1',
+      'GLM-5-Turbo': 'GLM-5-Turbo',
+      'GLM-5V-Turbo': 'GLM-5v-Turbo',
+      'GLM-5v-Turbo': 'GLM-5v-Turbo',
+      'GLM-5': 'glm-5',
+      'GLM-4.7': 'glm-4.7',
+    }
+    const mappedModel = modelMapping[request.model] || modelMapping[request.model.toLowerCase()] || request.model
+
+    console.log('[Z.ai] Original model:', request.model, '-> Mapped model:', mappedModel)
+
+    // === NEW: Build from assembly, not from embedded strings in messages ===
+    let systemContent = ''
+    const processedMessages: any[] = []
+
+    // Extract system text from assembly.messages (these are base instructions, NOT tool contracts)
+    for (const msg of assembly.messages) {
+      if (msg.role === 'system') {
+        systemContent += (systemContent ? '\n\n' : '') + (typeof msg.content === 'string' ? msg.content : '')
+      } else {
+        processedMessages.push(msg)
+      }
+    }
+
+    // Enhanced system text with summary and tool contract
+    let enhancedSystem = systemContent
+
+    // Summary text (non-authoritative) goes before tool contract
+    if (assembly.summaryText) {
+      enhancedSystem = enhancedSystem
+        ? `${enhancedSystem}\n\n${assembly.summaryText}`
+        : assembly.summaryText
+    }
+
+    // Tool contract (authoritative, injected AFTER summary to take precedence)
+    if (assembly.toolManifest) {
+      const toolContractText = assembly.toolManifest.renderedPrompt
+      enhancedSystem = enhancedSystem
+        ? `${enhancedSystem}\n\n${toolContractText}`
+        : toolContractText
+    }
+
+    // If system prompt exists, prepend it to the first user message
+    if (enhancedSystem && processedMessages.length > 0) {
+      const firstUserIdx = processedMessages.findIndex(m => m.role === 'user')
+      if (firstUserIdx !== -1) {
+        const firstUserMsg = processedMessages[firstUserIdx]
+        const originalContent = typeof firstUserMsg.content === 'string'
+          ? firstUserMsg.content
+          : (Array.isArray(firstUserMsg.content)
+              ? firstUserMsg.content.find((p: any) => p.type === 'text')?.text || ''
+              : '')
+
+        processedMessages[firstUserIdx] = {
+          ...firstUserMsg,
+          content: `${enhancedSystem}\n\nUser: ${originalContent}`
+        }
+      }
+    }
+
+    const signaturePrompt = this.extractLastUserMessage(processedMessages)
+
+    // Always create a new chat (single-turn mode only)
+    const chatResult = await this.createChat(mappedModel, signaturePrompt)
+    const chatId = chatResult.chatId
+    const messageId = chatResult.messageId
+    const parentMessageId = null
+    console.log('[Z.ai] Created new chat:', chatId)
+
+    const requestId = uuid()
+    const timestamp = Date.now()
+    const signature = this.generateSignature(signaturePrompt, requestId, timestamp, userId)
+
+    // Determine if thinking and web search should be enabled
+    // Priority: explicit parameters > model name detection
+    // Use originalModel for feature detection (preserves user's intent before mapping)
+    const modelForDetection = request.originalModel || request.model
+    const modelLower = modelForDetection.toLowerCase()
+
+    let enableThinking = request.reasoning_effort === false ? false : true
+    let enableWebSearch = !!request.web_search
+
+    // Auto-enable based on model name (if not explicitly set)
+    if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
+      enableThinking = true
+      console.log('[Z.ai] Thinking mode enabled (from model name)')
+    }
+    if (!enableWebSearch && modelLower.includes('search')) {
+      enableWebSearch = true
+      console.log('[Z.ai] Web search enabled (from model name)')
+    }
+
+    // Z.ai API uses auto_web_search for web search feature
+    // web_search should always be false, use auto_web_search instead
+    const features = {
+      image_generation: false,
+      web_search: false,
+      auto_web_search: enableWebSearch,
+      preview_mode: true,
+      flags: [],
+      vlm_tools_enable: false,
+      vlm_web_search_enable: false,
+      vlm_website_mode: false,
+      enable_thinking: enableThinking,
+    }
+
+    const requestBody: Record<string, any> = {
+      stream: request.stream !== false,
+      model: mappedModel,
+      messages: processedMessages,
+      signature_prompt: signaturePrompt,
+      params: {},
+      extra: {},
+      features,
+      variables: {
+        '{{USER_NAME}}': 'User',
+        '{{USER_LOCATION}}': 'Unknown',
+        '{{CURRENT_DATETIME}}': new Date().toISOString().replace('T', ' ').substring(0, 19),
+        '{{CURRENT_DATE}}': new Date().toISOString().substring(0, 10),
+        '{{CURRENT_TIME}}': new Date().toISOString().substring(11, 19),
+        '{{CURRENT_WEEKDAY}}': ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date().getDay()],
+        '{{CURRENT_TIMEZONE}}': 'Asia/Shanghai',
+        '{{USER_LANGUAGE}}': 'zh-CN',
+      },
+      chat_id: chatId,
+      id: requestId,
+      current_user_message_id: messageId,
+      current_user_message_parent_id: parentMessageId,
+      background_tasks: {
+        title_generation: true,
+        tags_generation: true,
+      },
+    }
+
+    const captchaVerifyParam = this.getCaptchaVerifyParam()
+    if (captchaVerifyParam) {
+      requestBody.captcha_verify_param = captchaVerifyParam
+    }
+
+    console.log('[Z.ai] Sending chat request (assembly path)...')
+    console.log('[Z.ai] Model:', request.model)
+    console.log('[Z.ai] ChatId:', chatId)
+    console.log('[Z.ai] MessageId (current_user_message_id):', messageId)
+    console.log('[Z.ai] ParentMessageId:', parentMessageId || '(none)')
+
+    const queryParams = new URLSearchParams({
+      timestamp: String(timestamp),
+      requestId,
+      user_id: userId,
+      version: '0.0.1',
+      platform: 'web',
+      token,
+      user_agent: ZAI_USER_AGENT,
+      language: 'zh-CN',
+      languages: 'zh-CN,zh',
+      timezone: 'Asia/Shanghai',
+      cookie_enabled: 'true',
+      screen_width: '1512',
+      screen_height: '982',
+      screen_resolution: '1512x982',
+      viewport_height: '945',
+      viewport_width: '923',
+      viewport_size: '923x945',
+      color_depth: '30',
+      pixel_ratio: '2',
+      current_url: `${ZAI_API_BASE}/c/${chatId}`,
+      pathname: `/c/${chatId}`,
+      search: '',
+      hash: '',
+      host: 'chat.z.ai',
+      hostname: 'chat.z.ai',
+      protocol: 'https:',
+      referrer: '',
+      title: 'Z.ai - Free AI Chatbot & Agent powered by GLM-5 & GLM-4.7',
+      timezone_offset: '-480',
+      local_time: new Date().toISOString(),
+      utc_time: new Date().toUTCString(),
+      is_mobile: 'false',
+      is_touch: 'false',
+      max_touch_points: '0',
+      browser_name: 'Chrome',
+      os_name: 'Mac OS',
+      signature_timestamp: String(timestamp),
+    })
+
+    const response = await axios.post(
+      `${ZAI_API_BASE}/api/v2/chat/completions?${queryParams.toString()}`,
+      requestBody,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
           ...FAKE_HEADERS,
           'X-Signature': signature,
@@ -577,12 +831,12 @@ export class ZaiStreamHandler {
   private toolCallsSent: boolean = false
   private lastMessageId: string = ''
   private toolCallState: ToolCallState
+  private toolStreamParser?: ToolStreamParser
   private sentRole: boolean = false
   private sentThinkingRole: boolean = false
   private streamEnded: boolean = false
   private citationBuffer: { value: string } = { value: '' }
   private thinkingCitationBuffer: { value: string } = { value: '' }
-  private toolStreamParser?: ToolStreamParser
 
   constructor(model: string, onEnd?: (chatId: string) => void, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
@@ -602,11 +856,11 @@ export class ZaiStreamHandler {
 
   private sendToolCalls(transStream: PassThrough): void {
     if (this.toolCallsSent) return
-
+    
     const toolCalls = parseToolUse(this.content)
     if (toolCalls && toolCalls.length > 0) {
       this.toolCallsSent = true
-
+      
       // Send tool_calls delta
       for (let i = 0; i < toolCalls.length; i++) {
         const tc = toolCalls[i]
@@ -634,7 +888,7 @@ export class ZaiStreamHandler {
           })}\n\n`
         )
       }
-
+      
       // Send finish with tool_calls
       transStream.write(
         `data: ${JSON.stringify({
@@ -661,7 +915,7 @@ export class ZaiStreamHandler {
     const transStream = new PassThrough()
 
     console.log('[Z.ai] Starting stream handler...')
-
+    
     let streamEnded = false
 
     const safeEnd = (data?: string) => {
@@ -680,9 +934,9 @@ export class ZaiStreamHandler {
           if (event.data === '[DONE]') return
 
           const data = JSON.parse(event.data)
-
+          
           if (data.type !== 'chat:completion') return
-
+          
           const result = data.data
           if (!result) return
 
@@ -722,17 +976,20 @@ export class ZaiStreamHandler {
             if (!cleanedContent) return
             this.content += cleanedContent
 
-            // Process tool call interception
             const baseChunk = createBaseChunk(this.chatId, this.model, this.created)
-            const outputChunks = this.toolStreamParser
-              ? this.toolStreamParser.push(cleanedContent, baseChunk, !this.sentRole && !this.sentThinkingRole)
-              : processStreamContent(
-                  cleanedContent,
-                  this.toolCallState,
-                  baseChunk,
-                  !this.sentRole && !this.sentThinkingRole,
-                  'zai'
-                ).chunks
+            let outputChunks: any[]
+            if (this.toolStreamParser) {
+              outputChunks = this.toolStreamParser.push(cleanedContent, baseChunk, !this.sentRole && !this.sentThinkingRole)
+            } else {
+              const streamResult = processStreamContent(
+                cleanedContent,
+                this.toolCallState,
+                baseChunk,
+                !this.sentRole && !this.sentThinkingRole,
+                'zai'
+              )
+              outputChunks = streamResult.chunks
+            }
 
             for (const outChunk of outputChunks) {
               transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
@@ -742,7 +999,6 @@ export class ZaiStreamHandler {
           } else if (result.phase === 'done' && result.done) {
             console.log('[Z.ai] Stream finished, content length:', this.content.length)
 
-            // Flush any remaining tool calls
             const baseChunk = createBaseChunk(this.chatId, this.model, this.created)
             const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? flushToolCallBuffer(this.toolCallState, baseChunk, 'zai')
 
@@ -750,11 +1006,10 @@ export class ZaiStreamHandler {
               transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
             }
 
-            // Check if we emitted tool calls
             const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
-
+            
             const usage = result.usage || { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
-
+            
             transStream.write(
               `data: ${JSON.stringify({
                 id: this.chatId,
@@ -811,7 +1066,7 @@ export class ZaiStreamHandler {
 
   async handleNonStream(response: any): Promise<any> {
     console.log('[Z.ai] Starting non-stream handler...')
-
+    
     return new Promise((resolve, reject) => {
       const data = {
         id: '',
@@ -870,9 +1125,9 @@ export class ZaiStreamHandler {
               if (event.data === '[DONE]') return
 
               const eventData = JSON.parse(event.data)
-
+              
               if (eventData.type !== 'chat:completion') return
-
+              
               const result = eventData.data
               if (!result) return
 
@@ -944,7 +1199,7 @@ export class ZaiStreamHandler {
             // Direct JSON object
             data.choices[0].message.content = streamData.choices?.[0]?.message?.content || ''
           }
-
+          
           console.log('[Z.ai] Non-stream JSON finished, content length:', data.choices[0].message.content.length)
           resolveOnce(data)
         } catch (err) {

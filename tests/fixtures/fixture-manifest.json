@@ -1,0 +1,8 @@
+{
+  "description": "Redacted structural fixtures for context economy regression testing",
+  "fixtures": {
+    "main-session-repeated-config": "Main session with repeated runtime/tool config markers",
+    "tool-session-large-payload": "Tool-call session with large config payload and small task text",
+    "summary-session-contaminated": "Summary input contaminated with skill docs and runtime config"
+  }
+}

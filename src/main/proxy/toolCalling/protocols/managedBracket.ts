@@ -7,6 +7,7 @@ import {
   detectMarkers,
   renderToolList,
   stripFencedCodeBlocks,
+  tryParseObjectArguments,
   toolNames,
 } from './shared.ts'
 
@@ -54,7 +55,26 @@ When calling tools, respond with only this block:
           continue
         }
 
-        toolCalls.push(buildToolCall(`call_${toolCalls.length}`, toolCalls.length, name, callMatch[2], callMatch[0]))
+        const parsedArguments = tryParseObjectArguments(callMatch[2])
+        if (!parsedArguments.ok) {
+          return createParseResult({
+            content,
+            toolCalls: [],
+            protocol: 'managed_bracket',
+            rawMatches,
+            invalidToolNames,
+            malformedReason: parsedArguments.reason,
+          })
+        }
+
+        toolCalls.push(buildToolCall(
+          `call_${toolCalls.length}`,
+          toolCalls.length,
+          name,
+          parsedArguments.argumentsText,
+          callMatch[0],
+          context.tools,
+        ))
       }
     }
 

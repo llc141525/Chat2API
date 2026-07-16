@@ -54,6 +54,37 @@ test('managed xml ignores fenced tool examples', () => {
   assert.equal(result.toolCalls.length, 0)
 })
 
+test('managed xml preserves literal angle bracket text inside parameters', () => {
+  const result = managedXmlProtocol.parse(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath"><![CDATA[tests/<literal>/input.txt with <tag attr="1">value</tag>]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+    { tools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), {
+    filePath: 'tests/<literal>/input.txt with <tag attr="1">value</tag>',
+  })
+})
+
+test('managed xml ignores escaped tool-call text', () => {
+  const result = managedXmlProtocol.parse(
+    'This is plain text: &lt;tool_calls&gt;&lt;invoke name="default_api:read_file"&gt;&lt;/invoke&gt;&lt;/tool_calls&gt;',
+    { tools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 0)
+  assert.equal(result.content.includes('&lt;tool_calls&gt;'), true)
+})
+
+test('managed xml rejects incomplete Chat2API blocks', () => {
+  const result = managedXmlProtocol.parse(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter>',
+    { tools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 0)
+})
+
 test('unknown tool name is rejected', () => {
   const result = managedBracketProtocol.parse(
     '[function_calls][call:missing_tool]{"x":1}[/call][/function_calls]',
@@ -62,6 +93,16 @@ test('unknown tool name is rejected', () => {
 
   assert.equal(result.toolCalls.length, 0)
   assert.deepEqual(result.invalidToolNames, ['missing_tool'])
+})
+
+test('managed bracket rejects non-object JSON arguments', () => {
+  const result = managedBracketProtocol.parse(
+    '[function_calls][call:default_api:read_file]["/tmp/a"][/call][/function_calls]',
+    { tools, protocol: 'managed_bracket' },
+  )
+
+  assert.equal(result.toolCalls.length, 0)
+  assert.equal(result.malformedReason, 'arguments_not_object')
 })
 
 test('managed XML parser rejects undeclared tool names and records invalid names', () => {

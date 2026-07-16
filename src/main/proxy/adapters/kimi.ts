@@ -1,18 +1,24 @@
 /**
+ * ADR-001: Tool prompt injection is owned by ToolCallingEngine.
+ * This file is a Provider Adapter — it must NEVER import
+ * hasToolPromptInjected, toolsToSystemPrompt, TOOL_WRAP_HINT,
+ * or shouldInjectToolPrompt.
+ *
  * Kimi K2.6 Adapter
  * Implements Kimi web API protocol with thinking mode and web search support
  */
 
-import axios, { AxiosResponse } from 'axios'
-import { Account, Provider } from '../../store/types'
+import axios, { type AxiosResponse } from 'axios'
+import type { Account, Provider } from '../../store/types.ts'
 import { PassThrough } from 'stream'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected } from '../utils/tools'
-import { parseToolCallsFromText } from '../utils/toolParser'
-import { createBaseChunk } from '../utils/streamToolHandler'
-import { createKimiChatPayload, encodeKimiGrpcFrame } from './providerModelOptions'
-import { getProviderToolProfile } from '../toolCalling/providerProfiles'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
+
+import { parseToolCallsFromText } from '../utils/toolParser.ts'
+import { createBaseChunk } from '../utils/streamToolHandler.ts'
+import { createKimiChatPayload, encodeKimiGrpcFrame } from './providerModelOptions.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import { getToolProtocol } from '../toolCalling/protocols/index.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const KIMI_API_BASE = 'https://www.kimi.com'
 
@@ -45,6 +51,17 @@ interface KimiMessage {
   content: string | any[] | null
   tool_call_id?: string
   tool_calls?: any[]
+}
+
+function extractKimiTextContent(content: any): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: any) => c.type === 'text')
+      .map((c: any) => c.text)
+      .join('\n')
+  }
+  return String(content || '')
 }
 
 interface ChatCompletionRequest {
@@ -154,115 +171,43 @@ export class KimiAdapter {
     return { accessToken: this.token, userId: '' }
   }
 
-  private messagesPrepare(messages: KimiMessage[], toolsPrompt?: string, isMultiTurn: boolean = false): string {
+  private messagesPrepare(messages: KimiMessage[], toolsPrompt?: string): string {
     const toolProfile = getProviderToolProfile('kimi')
-    // Process messages including tool calls and tool responses
-    const processedMessages = messages.map(msg => {
-      // Handle tool calls in assistant message
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        return {
-          ...msg,
-          content: toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
-            id: tc.id,
-            name: tc.function.name,
-            arguments: tc.function.arguments,
-          }))),
-        }
-      }
-      // Handle tool response message
-      if (msg.role === 'tool' && msg.tool_call_id) {
-        return { 
-          ...msg, 
-          role: 'user' as const,
-          content: toolProfile.formatToolResult({
-            toolCallId: msg.tool_call_id,
-            content: String(msg.content || ''),
-          }),
-        }
-      }
-      return msg
-    })
+    const conversationParts: string[] = []
+    let systemPrompt = ''
 
-    // Extract system message first
-    let systemContent = ''
-    const otherMessages = processedMessages.filter(msg => {
+    for (const msg of messages) {
       if (msg.role === 'system') {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        systemContent = text
-        return false
-      }
-      return true
-    })
-
-    let content = ''
-
-    // Prepend system message if exists
-    if (systemContent) {
-      content = `system:${systemContent}\n`
-    }
-
-    // For multi-turn with existing session, only send the last user message
-    if (isMultiTurn) {
-      // Find last user message index manually (ES2021 compatible)
-      let lastUserIdx = -1
-      for (let i = otherMessages.length - 1; i >= 0; i--) {
-        if (otherMessages[i].role === 'user') {
-          lastUserIdx = i
-          break
-        }
-      }
-      
-      if (lastUserIdx !== -1) {
-        const lastUserMsg = otherMessages[lastUserIdx]
-        const text = typeof lastUserMsg.content === 'string' ? lastUserMsg.content : ''
-        content += `user:${this.wrapUrlsToTags(text)}\n`
-        
-        // Include any tool results after the last user message
-        for (let i = lastUserIdx + 1; i < otherMessages.length; i++) {
-          if (otherMessages[i].role === 'user') {
-            const toolText = typeof otherMessages[i].content === 'string' ? otherMessages[i].content : ''
-            content += `user:${toolText}\n`
-          }
-        }
-        
-        if (toolsPrompt) {
-          content = content.trim() + "\n\n" + toolsPrompt
-        }
-        return content
+        systemPrompt = extractKimiTextContent(msg.content)
+      } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        conversationParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
+          id: tc.id,
+          name: tc.function.name,
+          arguments: tc.function.arguments,
+        }))))
+      } else if (msg.role === 'tool' && msg.tool_call_id) {
+        const rawContent = extractKimiTextContent(msg.content)
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
+        conversationParts.push(toolProfile.formatToolResult({
+          toolCallId: msg.tool_call_id,
+          content: truncated,
+        }))
+      } else if (msg.role === 'assistant') {
+        conversationParts.push(`Assistant: ${extractKimiTextContent(msg.content)}`)
+      } else if (msg.role === 'user') {
+        conversationParts.push(this.wrapUrlsToTags(extractKimiTextContent(msg.content)))
       }
     }
 
-    if (otherMessages.length < 2) {
-      content += otherMessages.reduce((acc, msg) => {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        return acc + `${msg.role === 'user' ? this.wrapUrlsToTags(text) : text}\n`
-      }, '')
-    } else {
-      const latestMessage = otherMessages[otherMessages.length - 1]
-      const hasFileOrImage = Array.isArray(latestMessage.content) &&
-        latestMessage.content.some((v: any) => typeof v === 'object' && ['file', 'image_url'].includes(v.type))
+    const userContent = conversationParts.join('\n\n')
+    let content = systemPrompt
+      ? `${systemPrompt}\n\nUser: ${userContent}`
+      : userContent
 
-      if (hasFileOrImage) {
-        otherMessages.splice(otherMessages.length - 1, 0, {
-          content: 'Focus on the latest files and messages sent by user',
-          role: 'system' as const,
-        })
-      } else {
-        otherMessages.splice(otherMessages.length - 1, 0, {
-          content: 'Focus on the latest message from user',
-          role: 'system' as const,
-        })
-      }
-
-      content += otherMessages.reduce((acc, msg) => {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        return acc + `${msg.role}:${msg.role === 'user' ? this.wrapUrlsToTags(text) : text}\n`
-      }, '')
-    }
-
-    // Inject tools prompt at the VERY END of the content to maximize attention
     if (toolsPrompt) {
-      content = content.trim() + "\n\n" + toolsPrompt
+      content = content.trimEnd() + '\n\n' + toolsPrompt
     }
 
     return content
@@ -280,30 +225,7 @@ export class KimiAdapter {
 
     const messages = [...request.messages]
 
-    // Check if tool prompt has already been injected by client
-    const toolPromptExists = hasToolPromptInjected(messages)
-
-    let toolsPrompt = ''
-    if (request.tools && request.tools.length > 0 && !toolPromptExists) {
-      toolsPrompt = toolsToSystemPrompt(request.tools, true)
-
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') {
-          const currentContent = messages[i].content
-          if (typeof currentContent === 'string') {
-            messages[i] = { ...messages[i], content: currentContent + TOOL_WRAP_HINT }
-          } else if (Array.isArray(currentContent)) {
-            messages[i] = {
-              ...messages[i],
-              content: [...currentContent, { type: 'text', text: TOOL_WRAP_HINT }],
-            }
-          }
-          break
-        }
-      }
-    }
-
-    const content = this.messagesPrepare(messages, toolsPrompt, false)
+    const content = this.messagesPrepare(messages)
 
     // Determine if thinking and web search should be enabled
     // Priority: explicit parameters > model name detection
@@ -314,6 +236,87 @@ export class KimiAdapter {
     let enableThinking = request.enableThinking ?? false
     let enableWebSearch = request.enableWebSearch ?? false
     
+    // Auto-enable based on model name (if not explicitly set)
+    if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
+      enableThinking = true
+      console.log('[Kimi] Thinking mode enabled (from model name)')
+    }
+    if (!enableWebSearch && modelLower.includes('search')) {
+      enableWebSearch = true
+      console.log('[Kimi] Web search enabled (from model name)')
+    }
+
+    const payload = createKimiChatPayload({
+      model: request.model,
+      content,
+      enableWebSearch,
+      enableThinking,
+    })
+    const frameBuffer = encodeKimiGrpcFrame(payload)
+
+    console.log('[Kimi] Request body length:', frameBuffer.length, 'JSON length:', frameBuffer.length - 5)
+
+    const response = await axios.post(
+      `${KIMI_API_BASE}/apiv2/kimi.gateway.chat.v1.ChatService/Chat`,
+      frameBuffer,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/connect+json',
+          ...FAKE_HEADERS,
+        },
+        timeout: 120000,
+        validateStatus: () => true,
+        responseType: 'stream',
+      }
+    )
+
+    console.log('[Kimi] Completion response status:', response.status)
+
+    if (response.status === 401) {
+      accessTokenMap.delete(this.token)
+      throw new Error('Token invalid or expired')
+    }
+
+    if (response.status !== 200) {
+      throw new Error(`Completion request failed: HTTP ${response.status}`)
+    }
+
+    return { response, conversationId: '' }
+  }
+
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{ response: AxiosResponse; conversationId: string }> {
+    const { accessToken } = await this.acquireToken()
+
+    // === NEW: Build from assembly, not from embedded strings in messages ===
+    let toolsPrompt = ''
+
+    // Summary text (non-authoritative) goes before tool contract
+    if (assembly.summaryText) {
+      toolsPrompt = assembly.summaryText
+    }
+
+    // Tool contract (authoritative, injected AFTER summary to take precedence)
+    if (assembly.toolManifest) {
+      const toolContractText = assembly.toolManifest.renderedPrompt
+      toolsPrompt = toolsPrompt
+        ? `${toolsPrompt}\n\n${toolContractText}`
+        : toolContractText
+    }
+
+    const content = this.messagesPrepare([...assembly.messages] as KimiMessage[], toolsPrompt, false)
+
+    // Determine if thinking and web search should be enabled
+    // Priority: explicit parameters > model name detection
+    const modelForDetection = request.originalModel || request.model
+    const modelLower = modelForDetection.toLowerCase()
+
+    let enableThinking = request.enableThinking ?? false
+    let enableWebSearch = request.enableWebSearch ?? false
+
     // Auto-enable based on model name (if not explicitly set)
     if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
       enableThinking = true
@@ -873,9 +876,18 @@ export class KimiStreamHandler {
               }
 
               if (data.done !== undefined) {
-                const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-                  ? { content, toolCalls: [] }
-                  : parseToolCallsFromText(content, 'kimi')
+                let cleanContent: string
+                let toolCalls: any[]
+                if (this.toolCallingPlan?.shouldParseResponse) {
+                  const protocol = getToolProtocol(this.toolCallingPlan.protocol)
+                  const parsed = protocol.parse(content, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
+                  cleanContent = parsed.content || content
+                  toolCalls = parsed.toolCalls || []
+                } else {
+                  const result = parseToolCallsFromText(content, 'kimi')
+                  cleanContent = result.content
+                  toolCalls = result.toolCalls
+                }
 
                 const message: any = {
                   role: 'assistant',

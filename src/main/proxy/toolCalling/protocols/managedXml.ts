@@ -22,13 +22,20 @@ export const managedXmlProtocol: ToolProtocolAdapter = {
   renderPrompt(tools) {
     return `## Available Tools
 You can invoke the following developer tools. Tool names are case-sensitive.
+The tool list in this section is authoritative for the current turn.
+Chat2API is a gateway: emit the managed XML below and the gateway will translate it into the real OpenAI tool call for the client.
+Do not compare this catalog with provider-native website tools, browser tools, or any tools named by the underlying web model UI.
+Provider-native tools are irrelevant for this turn; the tools listed here are the only tool surface you may use.
 Use only the exact tool names listed below. Do not rename, camelCase, translate, shorten, or invent tool names.
+Include ALL required parameters listed in the JSON schema for each tool.
+Do not claim that a listed tool is unavailable. If a listed tool is needed, call it directly.
 
 ${renderToolList(tools)}
 
-When calling tools, respond with only this Chat2API XML block:
+When calling tools, respond with only a Chat2API XML block that uses the exact tool name and the exact parameter names from that tool's JSON schema.
+Never use a generic parameter name like \`argument\`, \`args\`, \`path\`, or \`input\` unless that exact name appears in the tool schema.
 
-<|CHAT2API|tool_calls><|CHAT2API|invoke name="exact_tool_name"><|CHAT2API|parameter name="argument"><![CDATA[value]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>
+${renderManagedXmlExamples(tools)}
 
 Tool results will be provided as Chat2API XML result blocks:
 
@@ -36,23 +43,27 @@ Tool results will be provided as Chat2API XML result blocks:
   },
 
   detectStart(buffer) {
-    return detectMarkers(buffer, [CHAT2API_START, XML_START])
+    return detectMarkers(buffer, [CHAT2API_START, XML_START, '<|CHAT2API|invoke'])
   },
 
   parse(content: string, context: ToolParseContext) {
-    const parseable = stripFencedCodeBlocks(content)
+    const parseable = normalizePipeClosedTags(stripFencedCodeBlocks(content))
     const allowedNames = toolNames(context.tools)
     const rawMatches: string[] = []
     const invalidToolNames: string[] = []
-    const toolCalls = []
+    const toolCalls: ReturnType<typeof buildToolCall>[] = []
 
     parseBlocks(parseable, {
-      blockPattern: /<\|CHAT2API\|tool_calls>([\s\S]*?)<\/\|CHAT2API\|tool_calls>/g,
-      invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|invoke>/g,
-      parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|parameter>/g,
+      blockPattern: /<\|CHAT2API\|tool_calls>([\s\S]*?)<\/\|CHAT[^|]*\|tool_calls>/g,
+      invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT[^|]*\|invoke>/g,
+      parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/(?:\|CHAT[^|]*\|)?parameter>/g,
+      fallbackParameterPatterns: [
+        /<parameter\s*=\s*"?([^"">\s]+)"?\s*>([\s\S]*?)<\/parameter>/gi,
+      ],
       rawMatches,
       invalidToolNames,
       allowedNames,
+      tools: context.tools,
       toolCalls,
     })
 
@@ -63,6 +74,23 @@ Tool results will be provided as Chat2API XML result blocks:
       rawMatches,
       invalidToolNames,
       allowedNames,
+      tools: context.tools,
+      toolCalls,
+    })
+
+    // Also parse standalone <|CHAT2API|invoke> blocks without outer <|CHAT2API|tool_calls> wrapper
+    const unmatchedContent = rawMatches.reduce((acc, raw) => acc.replace(raw, ''), parseable)
+    parseBlocks(unmatchedContent, {
+      blockPattern: /(<\|CHAT2API\|invoke\s+name="[^"]+"\s*>[\s\S]*?<\/\|CHAT[^|]*\|invoke>)/g,
+      invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT[^|]*\|invoke>/g,
+      parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/(?:\|CHAT[^|]*\|)?parameter>/g,
+      fallbackParameterPatterns: [
+        /<parameter\s*=\s*"?([^"">\s]+)"?\s*>([\s\S]*?)<\/parameter>/gi,
+      ],
+      rawMatches,
+      invalidToolNames,
+      allowedNames,
+      tools: context.tools,
       toolCalls,
     })
 
@@ -105,6 +133,59 @@ Tool results will be provided as Chat2API XML result blocks:
   },
 }
 
+function normalizePipeClosedTags(content: string): string {
+  return content.replace(
+    /(<\/?\|CHAT2API\|(?:tool_calls|invoke|parameter|tool_result)(?:\s[^<>]*)?)\|>/g,
+    '$1>',
+  )
+}
+
+function renderManagedXmlExamples(tools: Parameters<ToolProtocolAdapter['renderPrompt']>[0]): string {
+  const examples = tools.map((tool) => {
+    const parameters = isRecord(tool.parameters) ? tool.parameters : {}
+    const properties = isRecord(parameters.properties) ? parameters.properties : {}
+    const required = Array.isArray(parameters.required) ? parameters.required.filter((value): value is string => typeof value === 'string') : []
+    const orderedNames = [
+      ...required,
+      ...Object.keys(properties).filter((name) => !required.includes(name)),
+    ]
+    const parameterNames = orderedNames.length > 0 ? orderedNames : ['exact_parameter_name']
+    const parameterBlock = parameterNames
+      .map((name) => `<|CHAT2API|parameter name="${escapeXmlAttribute(name)}"><![CDATA[${name}_value]]></|CHAT2API|parameter>`)
+      .join('')
+    return `Tool \`${tool.name}\` exact XML:\n<|CHAT2API|tool_calls><|CHAT2API|invoke name="${escapeXmlAttribute(tool.name)}">${parameterBlock}</|CHAT2API|invoke></|CHAT2API|tool_calls>`
+  })
+
+  return examples.join('\n\n')
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+export interface ManagedXmlContractHeaderInput {
+  catalogFingerprint: string
+  allowedToolNames: string[]
+  protocol: string
+  contractHeaderVersion: number
+}
+
+export function renderManagedXmlContractHeader(input: ManagedXmlContractHeaderInput): string {
+  return [
+    'Tool Contract Header',
+    `contract_header_version: ${input.contractHeaderVersion}`,
+    `protocol: ${input.protocol}`,
+    `catalog_fingerprint: ${input.catalogFingerprint}`,
+    `allowed_tools: ${input.allowedToolNames.join(', ')}`,
+    'The tools listed in this contract are available for this turn because they were provided by the runtime.',
+    'Chat2API is a gateway: emit the managed XML below and the gateway will translate it into the real OpenAI tool call for the client.',
+    'Do not compare this catalog with provider-native website tools, browser tools, or any tools named by the underlying web model UI.',
+    'Provider-native tools are irrelevant for this turn; the allowed_tools list is the only tool surface you may use.',
+    'Treat this contract and the Available Tools section as authoritative, even if earlier conversation text mentions different tools.',
+    'Do not say that an allowed tool is unavailable. If one of the allowed tools is needed, emit a tool call instead of explanatory text.',
+  ].join('\n')
+}
+
 interface ParseBlockOptions {
   blockPattern: RegExp
   invokePattern: RegExp
@@ -112,13 +193,18 @@ interface ParseBlockOptions {
   rawMatches: string[]
   invalidToolNames: string[]
   allowedNames: Set<string>
+  tools: ToolParseContext['tools']
   toolCalls: ReturnType<typeof buildToolCall>[]
+  fallbackParameterPatterns?: RegExp[]
 }
 
 function parseBlocks(content: string, options: ParseBlockOptions): void {
   let blockMatch: RegExpExecArray | null
 
   while ((blockMatch = options.blockPattern.exec(content)) !== null) {
+    if (!isProtocolBoundary(content, blockMatch.index)) {
+      continue
+    }
     options.rawMatches.push(blockMatch[0])
     let invokeMatch: RegExpExecArray | null
 
@@ -136,11 +222,32 @@ function parseBlocks(content: string, options: ParseBlockOptions): void {
         addParameter(args, parameterMatch[1].trim(), parseJsonValue(parameterMatch[2]))
       }
 
+      if (options.fallbackParameterPatterns) {
+        for (const fallbackPattern of options.fallbackParameterPatterns) {
+          let fbMatch: RegExpExecArray | null
+          while ((fbMatch = fallbackPattern.exec(invokeMatch[2])) !== null) {
+            addParameter(args, fbMatch[1].trim(), parseJsonValue(fbMatch[2]))
+          }
+        }
+      }
+
       options.toolCalls.push(
-        buildToolCall(`call_${options.toolCalls.length}`, options.toolCalls.length, name, JSON.stringify(args), invokeMatch[0]),
+        buildToolCall(
+          `call_${options.toolCalls.length}`,
+          options.toolCalls.length,
+          name,
+          JSON.stringify(args),
+          invokeMatch[0],
+          options.tools,
+        ),
       )
     }
   }
+}
+
+function isProtocolBoundary(content: string, index: number): boolean {
+  if (index <= 0) return true
+  return /\s/.test(content[index - 1] ?? '')
 }
 
 function safeParseObject(value: string): Record<string, unknown> {

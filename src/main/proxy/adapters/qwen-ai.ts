@@ -4,13 +4,17 @@
  * Based on qwen3-reverse project
  */
 
-import axios, { AxiosResponse } from 'axios'
+import axios from 'axios'
+import type { AxiosResponse } from 'axios'
 import { PassThrough } from 'stream'
 import { createParser } from 'eventsource-parser'
-import { Account, Provider } from '../../store/types'
-import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
+import type { Account, Provider } from '../../store/types.ts'
+import { hasToolUse, parseToolUse } from '../promptToolUse.ts'
+import type { ToolCall } from '../promptToolUse.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
 
 const QWEN_AI_BASE = 'https://chat.qwen.ai'
 
@@ -45,13 +49,14 @@ const MODEL_ALIASES: Record<string, string> = {
 }
 
 interface QwenAiMessage {
-  role: 'user' | 'assistant' | 'system'
-  content: string
+  role: 'user' | 'assistant' | 'system' | 'tool'
+  content: string | any[] | null
+  tool_call_id?: string
+  tool_calls?: any[]
 }
 
 interface ChatCompletionRequest {
   model: string
-  /** Original model name before mapping (used for feature detection like thinking mode) */
   originalModel?: string
   messages: QwenAiMessage[]
   stream?: boolean
@@ -59,6 +64,7 @@ interface ChatCompletionRequest {
   enable_thinking?: boolean
   thinking_budget?: number
   chatId?: string
+  tools?: any[]
 }
 
 function uuid(): string {
@@ -264,23 +270,56 @@ export class QwenAiAdapter {
 
     const messages = request.messages
     
-    // Extract system message and user message
-    let systemContent = ''
-    let userContent = ''
+    // Strip rawText from tool_calls to prevent Qwen API from detecting them as duplicates
+    const cleanMessages = messages.map(msg => {
+      if (msg.role === 'assistant' && (msg as any).tool_calls) {
+        return {
+          ...msg,
+          tool_calls: (msg as any).tool_calls.map((tc: any) => {
+            const { rawText, ...clean } = tc
+            return clean
+          })
+        }
+      }
+      return msg
+    })
     
-    // Single-turn mode: extract all messages
-    for (const msg of messages) {
+    // Build conversation preserving full history
+    const toolProfile = getProviderToolProfile('qwen-ai')
+    let systemContent = ''
+    let allContent = ''
+
+    for (const msg of cleanMessages) {
       if (msg.role === 'system') {
-        systemContent += (systemContent ? '\n\n' : '') + msg.content
+        systemContent += (systemContent ? '\n\n' : '') + (typeof msg.content === 'string' ? msg.content : '')
       } else if (msg.role === 'user') {
-        userContent = msg.content
+        const text = typeof msg.content === 'string' ? msg.content : (Array.isArray(msg.content) ? msg.content.find((p: any) => p.type === 'text')?.text || '' : '')
+        allContent += (allContent ? '\n\n' : '') + `User: ${text}`
+      } else if (msg.role === 'assistant') {
+        if (msg.content) {
+          allContent += (allContent ? '\n\n' : '') + `Assistant: ${msg.content}`
+        }
+        if (msg.tool_calls) {
+          allContent += (allContent ? '\n\n' : '') + toolProfile.formatAssistantToolCalls(msg.tool_calls.map((tc: any) => ({
+            id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          })))
+        }
+      } else if (msg.role === 'tool') {
+        const rawContent = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? '')
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
+        allContent += (allContent ? '\n\n' : '') + toolProfile.formatToolResult({
+          toolCallId: msg.tool_call_id || '',
+          content: truncated,
+        })
       }
     }
     
-    // If system prompt exists, prepend it to user content
-    if (systemContent) {
-      userContent = `${systemContent}\n\nUser: ${userContent}`
-    }
+    // If system prompt exists, prepend to content
+    let userContent = systemContent ? `${systemContent}\n\n${allContent}` : allContent
 
     const fid = uuid()
     const childId = uuid()
@@ -363,6 +402,153 @@ export class QwenAiAdapter {
     }
   }
 
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{
+    response: AxiosResponse
+    chatId: string
+    parentId: string | null
+  }> {
+    const token = this.getToken()
+    if (!token) {
+      throw new Error('Qwen AI token not configured, please add token in account settings')
+    }
+
+    const modelId = this.mapModel(request.model)
+
+    const modelForThinking = request.originalModel || request.model
+    const modelLower = modelForThinking.toLowerCase()
+    let forceThinking: boolean | undefined
+    if (modelForThinking.endsWith('-thinking')) {
+      forceThinking = true
+    } else if (modelForThinking.endsWith('-fast')) {
+      forceThinking = false
+    } else if (modelLower.includes('think') || modelLower.includes('r1')) {
+      forceThinking = true
+      console.log('[QwenAI] Thinking mode enabled (from model name keyword)')
+    } else {
+      forceThinking = (this as any)._forceThinking
+    }
+
+    // Always create a new chat (single-turn mode only)
+    const chatId = await this.createChat(modelId, 'OpenAI_API_Chat')
+    console.log('[QwenAI] Created new chat:', chatId)
+
+    // === NEW: Build from assembly, not from embedded strings in messages ===
+    let systemContent = ''
+    let userContent = ''
+
+    // Extract system text from assembly.messages (these are base instructions, NOT tool contracts)
+    for (const msg of assembly.messages) {
+      if (msg.role === 'system') {
+        systemContent += (systemContent ? '\n\n' : '') + (typeof msg.content === 'string' ? msg.content : '')
+      } else if (msg.role === 'user') {
+        userContent = typeof msg.content === 'string' ? msg.content : ''
+      }
+    }
+
+    // Enhanced system text with summary and tool contract
+    let enhancedSystem = systemContent
+
+    // Summary text (non-authoritative) goes before tool contract
+    if (assembly.summaryText) {
+      enhancedSystem = enhancedSystem
+        ? `${enhancedSystem}\n\n${assembly.summaryText}`
+        : assembly.summaryText
+    }
+
+    // Tool contract (authoritative, injected AFTER summary to take precedence)
+    if (assembly.toolManifest) {
+      const toolContractText = assembly.toolManifest.renderedPrompt
+      enhancedSystem = enhancedSystem
+        ? `${enhancedSystem}\n\n${toolContractText}`
+        : toolContractText
+    }
+
+    // If enhanced system prompt exists, prepend it to user content
+    if (enhancedSystem && userContent) {
+      userContent = `${enhancedSystem}\n\nUser: ${userContent}`
+    } else if (enhancedSystem) {
+      userContent = enhancedSystem
+    }
+
+    const fid = uuid()
+    const childId = uuid()
+    const ts = Math.floor(Date.now() / 1000)
+
+    const shouldEnableThinking = forceThinking !== undefined
+      ? forceThinking
+      : request.enable_thinking === true
+
+    const featureConfig: Record<string, any> = {
+      thinking_enabled: shouldEnableThinking,
+      output_schema: 'phase',
+      research_mode: 'normal',
+      auto_thinking: shouldEnableThinking,
+      thinking_format: 'summary',
+      auto_search: false,
+    }
+
+    if (request.thinking_budget) {
+      featureConfig.thinking_budget = request.thinking_budget
+    }
+
+    const payload = {
+      stream: true,
+      version: '2.1',
+      incremental_output: true,
+      chat_id: chatId,
+      chat_mode: 'normal',
+      model: modelId,
+      parent_id: null,
+      messages: [
+        {
+          fid,
+          parentId: null,
+          childrenIds: [childId],
+          role: 'user',
+          content: userContent,
+          user_action: 'chat',
+          files: [],
+          timestamp: ts,
+          models: [modelId],
+          chat_type: 't2t',
+          feature_config: featureConfig,
+          extra: { meta: { subChatType: 't2t' } },
+          sub_chat_type: 't2t',
+          parent_id: null,
+        },
+      ],
+      timestamp: ts + 1,
+    }
+
+    const url = `${QWEN_AI_BASE}/api/v2/chat/completions?chat_id=${chatId}`
+
+    console.log('[QwenAI] Sending request to /api/v2/chat/completions...')
+    console.log('[QwenAI] Request URL:', url)
+    console.log('[QwenAI] Request payload:', JSON.stringify(payload, null, 2))
+    console.log('[QwenAI] Request headers:', JSON.stringify(this.getHeaders(chatId), null, 2))
+
+    const response = await this.axiosInstance.post(url, payload, {
+      headers: {
+        ...this.getHeaders(chatId),
+        'x-accel-buffering': 'no',
+      },
+      responseType: 'stream',
+      timeout: 120000,
+    })
+
+    console.log('[QwenAI] Response status:', response.status)
+    console.log('[QwenAI] Response headers:', JSON.stringify(response.headers, null, 2))
+
+    return {
+      response,
+      chatId,
+      parentId: null,
+    }
+  }
+
   static isQwenAiProvider(provider: Provider): boolean {
     return provider.id === 'qwen-ai' || provider.apiEndpoint.includes('chat.qwen.ai')
   }
@@ -377,11 +563,14 @@ export class QwenAiStreamHandler {
   private content: string = ''
   private toolCallsSent: boolean = false
   private toolStreamParser?: ToolStreamParser
+  private toolCallingPlan?: ToolCallingPlan
+  private finalized = false
 
   constructor(model: string, onEnd?: (chatId: string) => void, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
     this.created = Math.floor(Date.now() / 1000)
     this.onEnd = onEnd
+    this.toolCallingPlan = toolCallingPlan
     this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
   }
 
@@ -448,6 +637,70 @@ export class QwenAiStreamHandler {
       if (this.onEnd && this.chatId) {
         this.onEnd(this.chatId)
       }
+    }
+  }
+
+  private finalizeStream(transStream: PassThrough, initialChunkSent: boolean): void {
+    if (this.finalized) return
+    this.finalized = true
+
+    const baseChunk = this.createBaseChunk()
+    const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
+    for (const chunk of flushChunks) {
+      transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
+    }
+
+    if (this.toolStreamParser?.hasEmittedToolCall()) {
+      const finalChunk = {
+        ...baseChunk,
+        choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+      }
+      transStream.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
+      transStream.end('data: [DONE]\n\n')
+      if (this.onEnd && this.chatId) {
+        this.onEnd(this.chatId)
+      }
+      return
+    }
+
+    if (!this.toolStreamParser && hasToolUse(this.content)) {
+      console.log('[QwenAI] Found tool_use in stream, sending tool_calls')
+      this.sendToolCalls(transStream)
+      return
+    }
+
+    const inspection = this.toolCallingPlan && this.toolStreamParser
+      ? inspectStreamAssistantOutput({
+          plan: this.toolCallingPlan,
+          observation: this.toolStreamParser.getObservation(),
+          finishReason: 'stop',
+        })
+      : { ok: true as const, outcome: 'content' as const }
+
+    if (!inspection.ok) {
+      const errorChunk = {
+        ...baseChunk,
+        choices: [{
+          index: 0,
+          delta: {
+            ...(!initialChunkSent ? { role: 'assistant' } : {}),
+            content: `Error: ${inspection.error}`,
+          },
+          finish_reason: null,
+        }],
+      }
+      transStream.write(`data: ${JSON.stringify(errorChunk)}\n\n`)
+    }
+
+    const finalChunk = {
+      ...baseChunk,
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+    }
+    transStream.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
+    transStream.end('data: [DONE]\n\n')
+
+    if (this.onEnd && this.chatId) {
+      this.onEnd(this.chatId)
     }
   }
 
@@ -611,47 +864,7 @@ export class QwenAiStreamHandler {
             }
 
             if (status === 'finished' && (phase === 'answer' || phase === null)) {
-              const baseChunk = this.createBaseChunk()
-              const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-              for (const chunk of flushChunks) {
-                transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
-              }
-
-              if (this.toolStreamParser?.hasEmittedToolCall()) {
-                const finalChunk = {
-                  ...baseChunk,
-                  choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
-                }
-                transStream.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
-                transStream.end('data: [DONE]\n\n')
-
-                if (this.onEnd && this.chatId) {
-                  this.onEnd(this.chatId)
-                }
-                return
-              }
-
-              // Check for tool calls before sending stop
-              if (!this.toolStreamParser && hasToolUse(this.content)) {
-                console.log('[QwenAI] Found tool_use in stream, sending tool_calls')
-                this.sendToolCalls(transStream)
-                return
-              }
-              
-              const finishReason = delta.finish_reason || 'stop'
-              const finalChunk = {
-                id: this.responseId || this.chatId,
-                model: this.model,
-                object: 'chat.completion.chunk',
-                choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-                created: this.created,
-              }
-              transStream.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
-              transStream.end('data: [DONE]\n\n')
-
-              if (this.onEnd && this.chatId) {
-                this.onEnd(this.chatId)
-              }
+              this.finalizeStream(transStream, initialChunkSent)
             }
           }
         } catch (err) {
@@ -671,7 +884,7 @@ export class QwenAiStreamHandler {
     })
     stream.once('close', () => {
       console.log('[QwenAI] Stream closed')
-      transStream.end('data: [DONE]\n\n')
+      this.finalizeStream(transStream, initialChunkSent)
     })
 
     return transStream

@@ -1,0 +1,24 @@
+{
+  "date": "2026-07-11",
+  "model": "qwen/Qwen3.7-Max",
+  "promptPath": "tests/agent-capability/long-conversation-contamination.md",
+  "runsPerVariant": 3,
+  "variants": [
+    {
+      "shape": "system-isolated",
+      "passes": 3,
+      "failures": 0,
+      "summaryContaminationMentions": 0,
+      "fabricatedToolMentions": 0
+    },
+    {
+      "shape": "user-wrapper",
+      "passes": 3,
+      "failures": 0,
+      "summaryContaminationMentions": 0,
+      "fabricatedToolMentions": 0
+    }
+  ],
+  "winner": "system-isolated",
+  "decisionRationale": "Both variants were 3/3 PASS with zero contamination and zero fabricated tool mentions. We kept the incumbent system-isolated shape to avoid unnecessary role-semantics churn while removing the extra toggle and losing branch."
+}

@@ -7,7 +7,15 @@ import type { NormalizedToolDefinition } from '../../src/main/proxy/toolCalling/
 const tools: NormalizedToolDefinition[] = [{
   name: 'weather-test:get_weather',
   description: 'Get weather',
-  parameters: { type: 'object' },
+  parameters: {
+    type: 'object',
+    properties: {
+      city: { type: 'string' },
+      units: { type: 'string', enum: ['celsius', 'fahrenheit'] },
+    },
+    required: ['city'],
+    additionalProperties: false,
+  },
   source: 'mcp',
 }]
 
@@ -109,4 +117,269 @@ test('forced missing tool name is rejected before provider call', () => {
       diagnostics: { rawToolCount: 1, normalizedToolNames: ['weather-test:get_weather'] },
     },
   }), /Forced tool missing_tool is not declared/)
+})
+
+test('existing catalog is reused when a later turn omits request tools', () => {
+  const first = buildToolCallingRuntimePlan({
+    requestId: 'r5',
+    providerId: 'qwen',
+    actualModel: 'qwen3-coder',
+    config: {
+      enabled: true,
+      mode: 'force',
+      clientAdapterId: 'standard-openai-tools',
+      diagnosticsEnabled: false,
+      advanced: { promptPreviewEnabled: false },
+    },
+    clientRequest: {
+      clientAdapterId: 'standard-openai-tools',
+      toolSource: 'openai',
+      tools,
+      toolChoice: { mode: 'auto' },
+      diagnostics: { rawToolCount: 1, normalizedToolNames: ['weather-test:get_weather'] },
+    },
+    toolSessionKey: 'runtime-plan-reuse',
+    messages: [{ role: 'user', content: 'first turn' }],
+  })
+
+  const second = buildToolCallingRuntimePlan({
+    requestId: 'r6',
+    providerId: 'qwen',
+    actualModel: 'qwen3-coder',
+    config: {
+      enabled: true,
+      mode: 'force',
+      clientAdapterId: 'standard-openai-tools',
+      diagnosticsEnabled: false,
+      advanced: { promptPreviewEnabled: false },
+    },
+    clientRequest: {
+      clientAdapterId: 'standard-openai-tools',
+      toolSource: 'openai',
+      tools: [],
+      toolChoice: { mode: 'auto' },
+      diagnostics: { rawToolCount: 0, normalizedToolNames: [] },
+    },
+    toolSessionKey: 'runtime-plan-reuse',
+    messages: [
+      {
+        role: 'assistant',
+        content: null as any,
+        tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'weather-test:get_weather', arguments: '{}' } }],
+      },
+      { role: 'tool', tool_call_id: 'call_1', content: 'sunny' },
+      { role: 'user', content: 'next turn' },
+    ],
+  })
+
+  assert.equal(first.catalogSnapshot?.fingerprint, second.catalogSnapshot?.fingerprint)
+  assert.equal(second.catalogDiagnostics.source, 'session_catalog')
+  assert.deepEqual(second.tools.map((tool) => tool.name), ['weather-test:get_weather'])
+  assert.deepEqual(second.tools[0]?.parameters, tools[0]?.parameters)
+  assert.notEqual(second.tools[0]?.parameters, tools[0]?.parameters)
+  assert.equal(second.contract.toolSourceChain.includes('message_history'), false)
+})
+
+test('forced tool selection uses session catalog when the current turn omits tools', () => {
+  buildToolCallingRuntimePlan({
+    requestId: 'r6-seed',
+    providerId: 'qwen',
+    actualModel: 'qwen3-coder',
+    config: {
+      enabled: true,
+      mode: 'force',
+      clientAdapterId: 'standard-openai-tools',
+      diagnosticsEnabled: false,
+      advanced: { promptPreviewEnabled: false },
+    },
+    clientRequest: {
+      clientAdapterId: 'standard-openai-tools',
+      toolSource: 'openai',
+      tools,
+      toolChoice: { mode: 'auto' },
+      diagnostics: { rawToolCount: 1, normalizedToolNames: ['weather-test:get_weather'] },
+    },
+    toolSessionKey: 'runtime-plan-forced-reuse',
+    messages: [{ role: 'user', content: 'first turn' }],
+  })
+
+  const forcedPlan = buildToolCallingRuntimePlan({
+    requestId: 'r6-forced',
+    providerId: 'qwen',
+    actualModel: 'qwen3-coder',
+    config: {
+      enabled: true,
+      mode: 'force',
+      clientAdapterId: 'standard-openai-tools',
+      diagnosticsEnabled: false,
+      advanced: { promptPreviewEnabled: false },
+    },
+    clientRequest: {
+      clientAdapterId: 'standard-openai-tools',
+      toolSource: 'openai',
+      tools: [],
+      toolChoice: { mode: 'forced', forcedName: 'weather-test:get_weather' },
+      diagnostics: { rawToolCount: 0, normalizedToolNames: [] },
+    },
+    toolSessionKey: 'runtime-plan-forced-reuse',
+    messages: [
+      {
+        role: 'assistant',
+        content: null as any,
+        tool_calls: [{ id: 'call_forced', type: 'function', function: { name: 'weather-test:get_weather', arguments: '{}' } }],
+      },
+      { role: 'tool', tool_call_id: 'call_forced', content: 'sunny' },
+      { role: 'user', content: 'next turn' },
+    ],
+  })
+
+  assert.equal(forcedPlan.mode, 'managed')
+  assert.equal(forcedPlan.catalogDiagnostics.source, 'session_catalog')
+  assert.deepEqual([...forcedPlan.allowedToolNames], ['weather-test:get_weather'])
+  assert.deepEqual(forcedPlan.tools.map((tool) => tool.name), ['weather-test:get_weather'])
+})
+
+test('managed history without catalog restores tools from history and proceeds in managed mode', () => {
+  const plan = buildToolCallingRuntimePlan({
+    requestId: 'r7',
+    providerId: 'qwen',
+    actualModel: 'qwen3-coder',
+    config: {
+      enabled: true,
+      mode: 'force',
+      clientAdapterId: 'standard-openai-tools',
+      diagnosticsEnabled: false,
+      advanced: { promptPreviewEnabled: false },
+    },
+    clientRequest: {
+      clientAdapterId: 'standard-openai-tools',
+      toolSource: 'openai',
+      tools: [],
+      toolChoice: { mode: 'auto' },
+      diagnostics: { rawToolCount: 0, normalizedToolNames: [] },
+    },
+    messages: [
+      {
+        role: 'assistant',
+        content: null as any,
+        tool_calls: [{ id: 'call_legacy', type: 'function', function: { name: 'weather-test:get_weather', arguments: '{}' } }],
+      },
+      { role: 'tool', tool_call_id: 'call_legacy', content: 'legacy result' },
+      { role: 'user', content: 'continue' },
+    ],
+  })
+
+  assert.equal(plan.mode, 'managed')
+  assert.equal(plan.catalogDiagnostics.source, 'restored_from_history')
+  assert.deepEqual([...plan.allowedToolNames], ['weather-test:get_weather'])
+  assert.deepEqual(plan.tools[0]?.parameters, { type: 'object', additionalProperties: true })
+  assert.ok(plan.catalogDiagnostics.driftKinds.includes('restored_from_history'))
+})
+
+test('assistant managed xml content without a catalog restores bash tool from history', () => {
+  const plan = buildToolCallingRuntimePlan({
+    requestId: 'r8',
+    providerId: 'qwen',
+    actualModel: 'qwen3-coder',
+    config: {
+      enabled: true,
+      mode: 'force',
+      clientAdapterId: 'standard-openai-tools',
+      diagnosticsEnabled: false,
+      advanced: { promptPreviewEnabled: false },
+    },
+    clientRequest: {
+      clientAdapterId: 'standard-openai-tools',
+      toolSource: 'none',
+      tools: [],
+      toolChoice: { mode: 'auto' },
+      diagnostics: { rawToolCount: 0, normalizedToolNames: [] },
+    },
+    messages: [{
+      role: 'assistant',
+      content: '<|CHAT2API|tool_calls><|CHAT2API|invoke name="bash"></|CHAT2API|tool_calls>' as any,
+    }],
+  })
+
+  assert.equal(plan.mode, 'managed')
+  assert.equal(plan.catalogDiagnostics.source, 'restored_from_history')
+  assert.deepEqual([...plan.allowedToolNames], ['bash'])
+})
+
+test('managed runtime plan exposes immutable per-turn contract facts', () => {
+  const plan = buildToolCallingRuntimePlan({
+    requestId: 'contract-r1',
+    providerId: 'qwen',
+    actualModel: 'qwen3-coder',
+    model: 'qwen/qwen3-coder',
+    config: {
+      enabled: true,
+      mode: 'force',
+      clientAdapterId: 'standard-openai-tools',
+      diagnosticsEnabled: false,
+      advanced: { promptPreviewEnabled: false },
+    },
+    clientRequest: {
+      clientAdapterId: 'standard-openai-tools',
+      toolSource: 'openai',
+      tools,
+      toolChoice: { mode: 'auto' },
+      diagnostics: { rawToolCount: 1, normalizedToolNames: ['weather-test:get_weather'] },
+    },
+    toolSessionKey: 'contract-session',
+    messages: [{ role: 'user', content: 'weather' }],
+  })
+
+  assert.equal(plan.contract.turnId, 'contract-r1')
+  assert.equal(plan.contract.sessionId, 'contract-session')
+  assert.equal(plan.contract.providerId, 'qwen')
+  assert.equal(plan.contract.model, 'qwen/qwen3-coder')
+  assert.equal(plan.contract.protocol, 'managed_xml')
+  assert.equal(plan.contract.snapshotFingerprint, plan.catalogSnapshot?.fingerprint)
+  assert.deepEqual([...plan.contract.allowedToolNames], ['weather-test:get_weather'])
+  assert.equal(plan.contract.shouldInjectPrompt, true)
+  assert.equal(plan.contract.shouldParseResponse, true)
+  assert.equal(plan.contract.historyMode, 'managed_protocol')
+  assert.equal(plan.contract.emptyOutputPolicy, 'diagnose_and_fail')
+  assert.deepEqual(plan.contract.toolSourceChain, ['current_request'])
+  assert.equal(plan.contract.allowedToolNames.size, 1)
+  assert.throws(() => {
+    ;(plan.contract.allowedToolNames as Set<string>).add('other')
+  }, /Cannot mutate readonly set/)
+  assert.throws(() => {
+    ;(plan.contract.tools as any).push(tools[0])
+  }, /object is not extensible|Cannot add property/)
+  assert.throws(() => {
+    ;((plan.contract.tools[0].parameters as any).properties).city = { type: 'number' }
+  }, /Cannot add property|Cannot assign to read only property|object is not extensible/)
+})
+
+test('safe empty fallback is visible in contract source chain', () => {
+  const plan = buildToolCallingRuntimePlan({
+    requestId: 'contract-empty',
+    providerId: 'qwen',
+    actualModel: 'qwen3-coder',
+    config: {
+      enabled: true,
+      mode: 'force',
+      clientAdapterId: 'standard-openai-tools',
+      diagnosticsEnabled: false,
+      advanced: { promptPreviewEnabled: false },
+    },
+    clientRequest: {
+      clientAdapterId: 'standard-openai-tools',
+      toolSource: 'none',
+      tools: [],
+      toolChoice: { mode: 'auto' },
+      diagnostics: { rawToolCount: 0, normalizedToolNames: [] },
+    },
+    toolSessionKey: 'contract-empty-session',
+    messages: [{ role: 'user', content: 'hello' }],
+  })
+
+  assert.equal(plan.mode, 'disabled')
+  assert.equal(plan.contract.snapshotFingerprint, null)
+  assert.deepEqual(plan.contract.toolSourceChain, ['current_request', 'session_catalog', 'message_history', 'safe_empty'])
+  assert.equal(plan.contract.emptyOutputPolicy, 'diagnose_and_fail')
+  assert.equal(plan.diagnostics.catalogSource, 'none')
 })

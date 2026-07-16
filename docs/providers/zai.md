@@ -13,6 +13,7 @@
 
 | 显示名称 | 实际模型 ID |
 | --- | --- |
+| GLM-5.2 | GLM-5.2 |
 | GLM-5.1 | GLM-5.1 |
 | GLM-5-Turbo | GLM-5-Turbo |
 | GLM-5V-Turbo | GLM-5v-Turbo |

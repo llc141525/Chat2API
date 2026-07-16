@@ -25,8 +25,8 @@ export function StatsCard({ title, value, icon: Icon, trend, className }: StatsC
 
   const getTrendColor = () => {
     if (!trend) return ''
-    if (trend.value > 0) return 'text-green-500'
-    if (trend.value < 0) return 'text-red-500'
+    if (trend.value > 0) return 'text-[var(--accent-primary)]'
+    if (trend.value < 0) return 'text-[var(--error)]'
     return 'text-muted-foreground'
   }
 

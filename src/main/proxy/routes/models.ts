@@ -5,17 +5,31 @@
 
 import Router from '@koa/router'
 import type { Context } from 'koa'
-import { ModelsResponse, ModelInfo } from '../types'
-import { loadBalancer } from '../loadbalancer'
-import { storeManager } from '../../store/store'
-import { modelMapper } from '../modelMapper'
+import { ModelsResponse, ModelInfo } from '../types.ts'
+import { storeManager } from '../../store/store.ts'
+import { resolveQualifiedModel } from '../modelMapper.ts'
 
-const router = new Router({ prefix: '/v1' })
+const router = new Router()
 
-/**
- * Get all available models
- */
-router.get('/models', async (ctx: Context) => {
+function createModelInfo(id: string, created: number, ownedBy: string): ModelInfo {
+  return {
+    id,
+    object: 'model',
+    created,
+    owned_by: ownedBy,
+  }
+}
+
+function isModelSupported(modelId: string, supportedId: string): boolean {
+  const normalizedModelId = modelId.toLowerCase()
+  const normalizedSupported = supportedId.toLowerCase()
+  if (normalizedSupported.endsWith('*')) {
+    return normalizedModelId.startsWith(normalizedSupported.slice(0, -1))
+  }
+  return normalizedSupported === normalizedModelId
+}
+
+async function handleListModels(ctx: Context): Promise<void> {
   const providers = storeManager.getProviders().filter(p => p.enabled)
   const models: ModelInfo[] = []
   const addedModels = new Set<string>()
@@ -32,27 +46,25 @@ router.get('/models', async (ctx: Context) => {
     for (const model of effectiveModels) {
       if (!addedModels.has(model.displayName)) {
         addedModels.add(model.displayName)
-        models.push({
-          id: model.displayName,
-          object: 'model',
-          created: Math.floor(provider.createdAt / 1000),
-          owned_by: provider.name,
-        })
+        models.push(createModelInfo(
+          model.displayName,
+          Math.floor(provider.createdAt / 1000),
+          provider.name,
+        ))
       }
     }
   }
 
   const config = storeManager.getConfig()
   const mappings = config.modelMappings || {}
-  for (const [requestModel, mapping] of Object.entries(mappings)) {
+  for (const [requestModel] of Object.entries(mappings)) {
     if (!addedModels.has(requestModel)) {
       addedModels.add(requestModel)
-      models.push({
-        id: requestModel,
-        object: 'model',
-        created: Math.floor(Date.now() / 1000),
-        owned_by: 'model-mapping',
-      })
+      models.push(createModelInfo(
+        requestModel,
+        Math.floor(Date.now() / 1000),
+        'model-mapping',
+      ))
     }
   }
 
@@ -63,30 +75,43 @@ router.get('/models', async (ctx: Context) => {
 
   ctx.set('Content-Type', 'application/json')
   ctx.body = response
-})
+}
 
-/**
- * Get specified model info
- */
-router.get('/models/:model', async (ctx: Context) => {
+async function handleGetModel(ctx: Context): Promise<void> {
   const modelId = ctx.params.model
+  const qualified = resolveQualifiedModel(modelId)
+  const normalizedModelId = qualified.model
+  const preferredProviderId = qualified.providerId
 
   const config = storeManager.getConfig()
   const mappings = config.modelMappings || {}
   if (mappings[modelId]) {
     ctx.set('Content-Type', 'application/json')
-    ctx.body = {
-      id: modelId,
-      object: 'model',
-      created: Math.floor(Date.now() / 1000),
-      owned_by: 'model-mapping',
-    }
+    ctx.body = createModelInfo(
+      modelId,
+      Math.floor(Date.now() / 1000),
+      'model-mapping',
+    )
+    return
+  }
+
+  if (normalizedModelId !== modelId && mappings[normalizedModelId]) {
+    ctx.set('Content-Type', 'application/json')
+    ctx.body = createModelInfo(
+      modelId,
+      Math.floor(Date.now() / 1000),
+      preferredProviderId || 'model-mapping',
+    )
     return
   }
 
   const providers = storeManager.getProviders().filter(p => p.enabled)
 
   for (const provider of providers) {
+    if (preferredProviderId && provider.id !== preferredProviderId) {
+      continue
+    }
+
     const accounts = storeManager.getAccountsByProviderId(provider.id)
       .filter(account => account.status === 'active')
 
@@ -95,23 +120,15 @@ router.get('/models/:model', async (ctx: Context) => {
     }
 
     const effectiveModels = storeManager.getEffectiveModels(provider.id)
-    const normalizedModelId = modelId.toLowerCase()
-    const found = effectiveModels.some(m => {
-      const normalizedSupported = m.displayName.toLowerCase()
-      if (normalizedSupported.endsWith('*')) {
-        return normalizedModelId.startsWith(normalizedSupported.slice(0, -1))
-      }
-      return normalizedSupported === normalizedModelId
-    })
+    const found = effectiveModels.some(m => isModelSupported(normalizedModelId, m.displayName))
 
     if (found) {
       ctx.set('Content-Type', 'application/json')
-      ctx.body = {
-        id: modelId,
-        object: 'model',
-        created: Math.floor(provider.createdAt / 1000),
-        owned_by: provider.name,
-      }
+      ctx.body = createModelInfo(
+        modelId,
+        Math.floor(provider.createdAt / 1000),
+        provider.name,
+      )
       return
     }
   }
@@ -125,6 +142,20 @@ router.get('/models/:model', async (ctx: Context) => {
       code: 'model_not_found',
     },
   }
-})
+}
+
+/**
+ * Get all available models
+ */
+router.get('/v1/models', handleListModels)
+router.get('/anthropic/v1/models', handleListModels)
+router.get('/v1/v1/models', handleListModels)
+
+/**
+ * Get specified model info
+ */
+router.get('/v1/models/:model', handleGetModel)
+router.get('/anthropic/v1/models/:model', handleGetModel)
+router.get('/v1/v1/models/:model', handleGetModel)
 
 export default router

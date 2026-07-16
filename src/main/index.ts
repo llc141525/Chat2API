@@ -3,6 +3,7 @@ import { join } from 'path'
 import { createWindow, getMainWindow, loadUrl, loadFile, openDevTools } from './window/manager'
 import { createTrayManager, TrayManager } from './tray/TrayManager'
 import { registerIpcHandlers } from './ipc/handlers'
+import { initPersistedCatalogStore } from './proxy/toolCalling/catalog.ts'
 import { UpdaterManager } from './updater'
 import { storeManager } from './store/store'
 
@@ -96,6 +97,8 @@ async function setupApp(): Promise<void> {
   })
 
   await registerIpcHandlers(mainWindow)
+
+  initPersistedCatalogStore(app.getPath('userData'))
 
   trayManager = createTrayManager(mainWindow)
 

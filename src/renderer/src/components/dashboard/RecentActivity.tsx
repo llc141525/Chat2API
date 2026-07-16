@@ -38,26 +38,26 @@ export function RecentActivity({
   const getTypeColor = (type: ActivityItem['type']) => {
     switch (type) {
       case 'success':
-        return 'bg-green-500'
+        return 'status-dot-online'
       case 'error':
-        return 'bg-red-500'
+        return 'status-dot-error'
       case 'warning':
-        return 'bg-yellow-500'
+        return 'status-dot-warning'
       default:
-        return 'bg-blue-500'
+        return 'status-dot-neutral'
     }
   }
 
   const getTypeBadge = (type: ActivityItem['type']) => {
     switch (type) {
       case 'success':
-        return 'default'
+        return 'status-online'
       case 'error':
-        return 'destructive'
+        return 'status-error'
       case 'warning':
-        return 'secondary'
+        return 'status-warning'
       default:
-        return 'outline'
+        return 'status-neutral'
     }
   }
 
@@ -125,8 +125,8 @@ export function RecentActivity({
                     <div className="flex items-center gap-2">
                       {item.statusCode && (
                         <Badge
-                          variant={getTypeBadge(item.type) as "default" | "secondary" | "destructive" | "outline"}
-                          className="text-xs"
+                          variant="outline"
+                          className={cn('text-xs status-chip', getTypeBadge(item.type))}
                         >
                           {item.statusCode}
                         </Badge>

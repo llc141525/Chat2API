@@ -1,4 +1,9 @@
 /**
+ * ADR-001: Tool prompt injection is owned by ToolCallingEngine.
+ * This file is a Provider Adapter — it must NEVER import
+ * hasToolPromptInjected, toolsToSystemPrompt, TOOL_WRAP_HINT,
+ * or shouldInjectToolPrompt.
+ *
  * MiniMax Adapter
  * Based on MiniMax-Free-API implementation
  * https://github.com/LLM-Red-Team/MiniMax-Free-API
@@ -10,18 +15,20 @@ import axios, { AxiosResponse } from 'axios'
 import crypto from 'crypto'
 import { createParser, EventSourceMessage } from 'eventsource-parser'
 import FormData from 'form-data'
-import { Account, Provider } from '../../store/types'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected, shouldInjectToolPrompt } from '../utils/tools'
-import { parseToolCallsFromText } from '../utils/toolParser'
+import { Account, Provider } from '../../store/types.ts'
+
+import { parseToolCallsFromText } from '../utils/toolParser.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import {
   createToolCallState,
   processStreamContent,
   flushToolCallBuffer,
   createBaseChunk,
   ToolCallState
-} from '../utils/streamToolHandler'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
+} from '../utils/streamToolHandler.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const AGENT_BASE_URL = 'https://agent.minimaxi.com'
 
@@ -81,6 +88,17 @@ interface ChatCompletionRequest {
   tool_choice?: any
   chatId?: string
   toolCallingPlan?: ToolCallingPlan
+}
+
+function extractMiniMaxTextContent(content: any): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: any) => c.type === 'text')
+      .map((c: any) => c.text)
+      .join('\n')
+  }
+  return String(content || '')
 }
 
 interface DeviceInfo {
@@ -428,113 +446,43 @@ export class MiniMaxAdapter {
     return { session, stream }
   }
 
-  private messagesPrepare(messages: MiniMaxMessage[], toolsPrompt?: string, isMultiTurn: boolean = false): any {
-    // Process messages including tool calls and tool responses
-    const processedMessages = messages.map(msg => {
-      // Handle tool calls in assistant message
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        const toolCallsText = msg.tool_calls.map(tc => {
-          return `[call:${tc.function.name}]${tc.function.arguments}[/call]`
-        }).join('\n')
-        return { ...msg, content: `[function_calls]\n${toolCallsText}\n[/function_calls]` }
-      }
-      // Handle tool response message
-      if (msg.role === 'tool' && msg.tool_call_id) {
-        return {
-          ...msg,
-          role: 'user' as const,
-          content: `[TOOL_RESULT for ${msg.tool_call_id}] ${msg.content || ''}`
-        }
-      }
-      return msg
-    })
+  private messagesPrepare(messages: MiniMaxMessage[], toolsPrompt?: string): any {
+    const toolProfile = getProviderToolProfile('minimax')
+    const conversationParts: string[] = []
+    let systemPrompt = ''
 
-    // Extract system message first
-    let systemContent = ''
-    const otherMessages = processedMessages.filter(msg => {
+    for (const msg of messages) {
       if (msg.role === 'system') {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        systemContent = text
-        return false
-      }
-      return true
-    })
-
-    let content = ''
-
-    // Prepend system message if exists
-    if (systemContent) {
-      content = `system:${systemContent}\n`
-    }
-
-    // For multi-turn with existing session, only send the last user message
-    if (isMultiTurn) {
-      // Find last user message index manually (ES2021 compatible)
-      let lastUserIdx = -1
-      for (let i = otherMessages.length - 1; i >= 0; i--) {
-        if (otherMessages[i].role === 'user') {
-          lastUserIdx = i
-          break
-        }
-      }
-
-      if (lastUserIdx !== -1) {
-        const lastUserMsg = otherMessages[lastUserIdx]
-        const text = typeof lastUserMsg.content === 'string' ? lastUserMsg.content : ''
-        content += `user:${text}\n`
-
-        // Include any tool results after the last user message
-        for (let i = lastUserIdx + 1; i < otherMessages.length; i++) {
-          if (otherMessages[i].role === 'user') {
-            const toolText = typeof otherMessages[i].content === 'string' ? otherMessages[i].content : ''
-            content += `user:${toolText}\n`
-          }
-        }
-
-        if (toolsPrompt) {
-          content = content.trim() + '\n\n' + toolsPrompt
-        }
-        return {
-          msg_type: 1,
-          text: content,
-          chat_type: 1,
-          attachments: [],
-          selected_mcp_tools: [],
-          backend_config: {},
-          sub_agent_ids: [],
-        }
+        systemPrompt = extractMiniMaxTextContent(msg.content)
+      } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        conversationParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
+          id: tc.id,
+          name: tc.function.name,
+          arguments: tc.function.arguments,
+        }))))
+      } else if (msg.role === 'tool' && msg.tool_call_id) {
+        const rawContent = extractMiniMaxTextContent(msg.content)
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
+        conversationParts.push(toolProfile.formatToolResult({
+          toolCallId: msg.tool_call_id,
+          content: truncated,
+        }))
+      } else if (msg.role === 'assistant') {
+        conversationParts.push(`Assistant: ${extractMiniMaxTextContent(msg.content)}`)
+      } else if (msg.role === 'user') {
+        conversationParts.push(extractMiniMaxTextContent(msg.content))
       }
     }
 
-    if (otherMessages.length < 2) {
-      content += otherMessages.reduce((acc, msg) => {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        return acc + `${msg.role}:${text}\n`
-      }, '')
-    } else {
-      const latestMessage = otherMessages[otherMessages.length - 1]
-      const hasFileOrImage = Array.isArray(latestMessage.content) &&
-        latestMessage.content.some((v: any) => typeof v === 'object' && ['file', 'image_url'].includes(v.type))
+    const userContent = conversationParts.join('\n\n')
+    let content = systemPrompt
+      ? `${systemPrompt}\n\nUser: ${userContent}`
+      : userContent
 
-      if (hasFileOrImage) {
-        const newFileMessage: MiniMaxMessage = {
-          content: '关注用户最新发送文件和消息',
-          role: 'system',
-        }
-        otherMessages.push(newFileMessage)
-      }
-
-      content += otherMessages.reduce((acc, msg) => {
-        const text = typeof msg.content === 'string' ? msg.content : ''
-        return acc + `${msg.role}:${text}\n`
-      }, '') + 'assistant:\n'
-
-      content = content.trim().replace(/\!\[.+\]\(.+\)/g, '')
-    }
-
-    // Append tools prompt at the end if provided
     if (toolsPrompt) {
-      content = content.trim() + '\n\n' + toolsPrompt
+      content = content.trimEnd() + '\n\n' + toolsPrompt
     }
 
     return {
@@ -558,24 +506,7 @@ export class MiniMaxAdapter {
 
     const messages = [...request.messages]
 
-    let toolsPrompt = ''
-    // Only inject if tools are provided and not already injected by client
-    if (request.tools && request.tools.length > 0 && !hasToolPromptInjected(request.messages)) {
-      toolsPrompt = toolsToSystemPrompt(request.tools)
-
-      // Find and update the last user message
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') {
-          const currentContent = messages[i].content
-          if (typeof currentContent === 'string') {
-            messages[i] = { ...messages[i], content: currentContent + TOOL_WRAP_HINT }
-          }
-          break
-        }
-      }
-    }
-
-    const requestBody = this.messagesPrepare(messages, toolsPrompt, false)
+    const requestBody = this.messagesPrepare(messages)
 
     let msgId: string = ''
     let chatId: string = request.chatId || ''
@@ -641,6 +572,147 @@ export class MiniMaxAdapter {
     const aiMessage = await this.pollForResponse(chatId, deviceInfo)
 
     // Delete chat after response if in single-turn mode with deleteAfterChat enabled
+    const shouldDeleteSession = () => {
+      const config = (global as any).storeManager?.getConfig()
+      return config?.mode === 'single' && config?.deleteAfterTimeout
+    }
+
+    if (shouldDeleteSession()) {
+      await this.deleteChat(chatId).catch(err => console.error('[MiniMax] Failed to delete chat:', err))
+    }
+
+    const content = aiMessage?.msg_content || ''
+    const thinkingContent = aiMessage?.extra_info?.thinking_content || ''
+    let cleanContent: string
+    let toolCalls: any[]
+    if (request.toolCallingPlan?.shouldParseResponse) {
+      const protocol = getToolProtocol(request.toolCallingPlan.protocol)
+      const parsed = protocol.parse(content, { tools: request.toolCallingPlan.tools, protocol: request.toolCallingPlan.protocol })
+      cleanContent = parsed.content || content
+      toolCalls = parsed.toolCalls || []
+    } else {
+      const result = parseToolCallsFromText(content, 'minimax')
+      cleanContent = result.content
+      toolCalls = result.toolCalls
+    }
+
+    const response = {
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      config: {} as any,
+      data: {
+        id: String(chatId),
+        model: this.model,
+        object: 'chat.completion',
+        choices: [{
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: toolCalls.length > 0 ? null : cleanContent,
+            ...(thinkingContent ? { reasoning_content: thinkingContent } : {}),
+            ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
+          },
+          finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+        }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        created: this.created,
+      },
+    }
+
+    return { response, stream: null, chatId }
+  }
+
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{ response: AxiosResponse | null; stream: { session: ClientHttp2Session; stream: ClientHttp2Stream } | null; chatId: string }> {
+    console.log('[MiniMax] chatCompletionWithAssembly called with model:', request.model, 'stream:', request.stream)
+
+    this.model = request.model || 'MiniMax-M2.7'
+    this.created = unixTimestamp()
+
+    const deviceInfo = await this.requestDeviceInfo()
+
+    // === NEW: Build from assembly, not from embedded strings in messages ===
+    let toolsPrompt = ''
+
+    // Summary text (non-authoritative) goes before tool contract
+    if (assembly.summaryText) {
+      toolsPrompt = assembly.summaryText
+    }
+
+    // Tool contract (authoritative, injected AFTER summary to take precedence)
+    if (assembly.toolManifest) {
+      const toolContractText = assembly.toolManifest.renderedPrompt
+      toolsPrompt = toolsPrompt
+        ? `${toolsPrompt}\n\n${toolContractText}`
+        : toolContractText
+    }
+
+    const requestBody = this.messagesPrepare([...assembly.messages] as MiniMaxMessage[], toolsPrompt, false)
+
+    let msgId: string = ''
+    let chatId: string = request.chatId || ''
+
+    if (chatId) {
+      console.log('[MiniMax] Using existing chat:', chatId)
+      const sendResponse = await this.request('POST', '/matrix/api/v1/chat/send_msg', {
+        ...requestBody,
+        chat_id: chatId,
+      }, deviceInfo)
+
+      if (sendResponse.status !== 200) {
+        throw new Error(`MiniMax API error: HTTP ${sendResponse.status}`)
+      }
+
+      const { msg_id, base_resp } = sendResponse.data
+      if (base_resp?.status_code !== 0) {
+        throw new Error(`Send message failed: ${base_resp?.status_msg || 'Unknown error'}`)
+      }
+      msgId = msg_id
+    } else {
+      const sendResponse = await this.request('POST', '/matrix/api/v1/chat/send_msg', requestBody, deviceInfo)
+
+      console.log('[MiniMax] Send response status:', sendResponse.status)
+
+      if (sendResponse.status !== 200) {
+        console.error('[MiniMax] Error response:', JSON.stringify(sendResponse.data))
+        throw new Error(`MiniMax API error: HTTP ${sendResponse.status} - ${JSON.stringify(sendResponse.data)}`)
+      }
+
+      const result = sendResponse.data
+      const base_resp = result.base_resp
+
+      if (base_resp?.status_code !== 0) {
+        throw new Error(`Send message failed: ${base_resp?.status_msg || 'Unknown error'}`)
+      }
+
+      chatId = result.chat_id
+      msgId = result.msg_id
+      console.log('[MiniMax] Message sent, chat_id:', chatId, 'msg_id:', msgId)
+    }
+
+    if (request.stream === true) {
+      const shouldDeleteSession = () => {
+        const config = (global as any).storeManager?.getConfig()
+        return config?.mode === 'single' && config?.deleteAfterTimeout
+      }
+
+      const onEnd = shouldDeleteSession() ? async (chatId: string) => {
+        await this.deleteChat(chatId)
+      } : undefined
+
+      const transStream = this.createPollingStream(chatId, deviceInfo, this.model, onEnd, request.toolCallingPlan)
+      return {
+        response: null,
+        stream: { session: null as any, stream: transStream as any },
+        chatId
+      }
+    }
+
+    const aiMessage = await this.pollForResponse(chatId, deviceInfo)
+
     const shouldDeleteSession = () => {
       const config = (global as any).storeManager?.getConfig()
       return config?.mode === 'single' && config?.deleteAfterTimeout

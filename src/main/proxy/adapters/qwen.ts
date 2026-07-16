@@ -1,29 +1,31 @@
 /**
+ * ADR-001: Tool prompt injection is owned by ToolCallingEngine.
+ * This file is a Provider Adapter — it must NEVER import
+ * hasToolPromptInjected, toolsToSystemPrompt, TOOL_WRAP_HINT,
+ * or shouldInjectToolPrompt.
+ *
  * Qwen Adapter
  * Implements Qwen (Tongyi Qianwen) web API protocol
  * Based on new chat2.qianwen.com API
  */
 
-import axios, { AxiosResponse } from 'axios'
+import axios from 'axios'
+import type { AxiosResponse } from 'axios'
 import { PassThrough } from 'stream'
 import { createGunzip, createInflate, createBrotliDecompress } from 'zlib'
 import * as ZstdCodec from 'zstd-codec'
 import { createParser } from 'eventsource-parser'
-import { Account, Provider } from '../../store/types'
-import { hasToolUse, parseToolUse, ToolCall } from '../promptToolUse'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected, shouldInjectToolPrompt } from '../utils/tools'
-import { parseToolCallsFromText } from '../utils/toolParser'
-import { createBaseChunk } from '../utils/streamToolHandler'
-import { getProviderToolProfile } from '../toolCalling/providerProfiles'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
-
-/**
- * Check if content contains tool calls (both bracket and XML formats)
- */
-function hasToolCalls(content: string): boolean {
-  return content.includes('[function_calls]') || hasToolUse(content)
-}
+import type { Account, Provider } from '../../store/types.ts'
+import { parseToolCallsFromText, type ParsedToolCall } from '../utils/toolParser.ts'
+import { createBaseChunk } from '../utils/streamToolHandler.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import { getToolProtocol } from '../toolCalling/protocols/index.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
+import { renderFinalPrompt } from './renderFinalPrompt.ts'
+import { selectProviderMessagesForAssembly, type RequestAssembly } from '../RequestAssembly.ts'
+import type { PromptRefreshMode } from '../promptBudgetPolicy.ts'
 
 const QWEN_API_BASE = 'https://chat2.qianwen.com'
 const QWEN_CHAT2_API_BASE = 'https://chat2-api.qianwen.com'
@@ -38,7 +40,7 @@ const MODEL_MAP: Record<string, string> = {
   'Qwen3-Coder': 'Qwen3-Coder',
 }
 
-const DEFAULT_HEADERS = {
+export const DEFAULT_HEADERS = {
   Accept: 'application/json, text/event-stream, text/plain, */*',
   'Accept-Language': 'zh-CN,zh;q=0.9',
   'Cache-Control': 'no-cache',
@@ -63,6 +65,7 @@ interface QwenMessage {
 
 interface ChatCompletionRequest {
   model: string
+  originalModel?: string
   messages: QwenMessage[]
   tools?: any[]
   stream?: boolean
@@ -71,6 +74,9 @@ interface ChatCompletionRequest {
   reasoning_effort?: 'low' | 'medium' | 'high'
   enableThinking?: boolean
   enableWebSearch?: boolean
+  sessionId?: string
+  parentReqId?: string
+  promptRefreshMode?: PromptRefreshMode
 }
 
 interface QwenSessionListPage {
@@ -106,6 +112,358 @@ function extractTextContent(content: string | any[]): string {
       .filter((item) => item.type === 'text')
       .map((item) => item.text || '')
       .join('\n')
+  }
+  return ''
+}
+
+interface QwenChatRequestBodyInput {
+  request: ChatCompletionRequest
+  actualModel: string
+  sessionId: string
+  reqId: string
+  parentReqId?: string
+  timestamp: number
+  enableThinking: boolean
+  enableWebSearch: boolean
+}
+
+interface QwenContentDeltaDecision {
+  shouldEmit: boolean
+  chunk: string
+  resetParser: boolean
+}
+
+interface QwenAssemblyRequestBodyInput {
+  assembly: RequestAssembly
+  request: ChatCompletionRequest
+  actualModel: string
+  sessionId: string
+  reqId: string
+  parentReqId?: string
+  timestamp: number
+  enableThinking: boolean
+  enableWebSearch: boolean
+}
+
+function selectQwenDeltaMessages(messages: Array<QwenMessage | import('../types.ts').ChatMessage>, hasProviderSession: boolean) {
+  if (!hasProviderSession) {
+    return messages
+  }
+
+  let lastAssistantToolCallIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index] as QwenMessage
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+      lastAssistantToolCallIndex = index
+      break
+    }
+  }
+
+  if (lastAssistantToolCallIndex === -1) {
+    return messages
+  }
+
+  return messages.slice(lastAssistantToolCallIndex)
+}
+
+function buildQwenChatRequestBody(input: QwenChatRequestBodyInput): any {
+  const {
+    request,
+    actualModel,
+    sessionId,
+    reqId,
+    parentReqId,
+    timestamp,
+    enableThinking,
+    enableWebSearch,
+  } = input
+  const toolProfile = getProviderToolProfile('qwen')
+  const isContinuation = Boolean(parentReqId)
+
+  const systemPrompts: string[] = []
+  const conversationParts: string[] = []
+  const lastUserText = extractLastUserText(request.messages)
+
+  for (const msg of request.messages) {
+    if (msg.role === 'system') {
+      const content = extractTextContent(msg.content)
+      if (content.trim().length > 0) {
+        systemPrompts.push(content)
+      }
+    } else if (msg.role === 'user') {
+      conversationParts.push(extractTextContent(msg.content))
+    } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      conversationParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
+        id: tc.id,
+        name: tc.function.name,
+        arguments: tc.function.arguments,
+      }))))
+    } else if (msg.role === 'assistant') {
+      conversationParts.push(`Assistant: ${extractTextContent(msg.content)}`)
+    } else if (msg.role === 'tool' && msg.tool_call_id) {
+      conversationParts.push(toolProfile.formatToolResult({
+        toolCallId: msg.tool_call_id,
+        content: extractTextContent(msg.content),
+      }))
+    }
+  }
+
+  const systemPrompt = systemPrompts.join('\n\n')
+  const userContent = conversationParts.join('\n\n')
+  const finalContent = systemPrompt
+    ? `${systemPrompt}\n\nUser: ${userContent}`
+    : userContent
+  traceQwenRequestAssembly({
+    model: actualModel,
+    messageCount: request.messages.length,
+    systemMessageCount: systemPrompts.length,
+    conversationPartCount: conversationParts.length,
+    hasManagedToolContract: systemPrompt.includes('catalog_fingerprint:') || systemPrompt.includes('<|CHAT2API|tool_calls>'),
+    hasSummaryIsolationHeader: systemPrompt.includes('[Prior conversation summary'),
+    finalContentLength: finalContent.length,
+  })
+
+  return {
+    deep_search: (enableWebSearch || enableThinking) ? '1' : '0',
+    req_id: reqId,
+    model: actualModel,
+    scene: 'chat',
+    session_id: sessionId,
+    sub_scene: 'chat',
+    temporary: false,
+    messages: [
+      {
+        content: finalContent,
+        mime_type: 'text/plain',
+        meta_data: {
+          ori_query: lastUserText || userContent || finalContent,
+        },
+      },
+    ],
+    from: 'default',
+    parent_req_id: parentReqId || '0',
+    enable_search: enableWebSearch,
+    biz_data: '{"entryPoint":"tongyigw"}',
+    scene_param: isContinuation ? 'chat' : 'first_turn',
+    chat_client: 'h5',
+    client_tm: timestamp.toString(),
+    protocol_version: 'v2',
+    biz_id: 'ai_qwen',
+  }
+}
+
+function traceQwenRequestAssembly(input: {
+  model: string
+  messageCount: number
+  systemMessageCount: number
+  conversationPartCount: number
+  hasManagedToolContract: boolean
+  hasSummaryIsolationHeader: boolean
+  finalContentLength: number
+  promptRefreshMode?: PromptRefreshMode
+}): void {
+  console.log('[Qwen] Request assembly trace:', JSON.stringify(input))
+}
+
+function hasManagedToolContractMarker(value: string | null | undefined): boolean {
+  if (!value) {
+    return false
+  }
+
+  return value.includes('catalog_fingerprint:')
+    || value.includes('Tool Contract Header')
+    || value.includes('<|CHAT2API|tool_calls>')
+    || value.includes('<|CHAT2API|invoke')
+    || value.includes('<tool_calls>')
+}
+
+export function buildQwenChatRequestBodyForTest(input: QwenChatRequestBodyInput): any {
+  return buildQwenChatRequestBody(input)
+}
+
+function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any {
+  const {
+    assembly,
+    request,
+    actualModel,
+    sessionId,
+    reqId,
+    parentReqId,
+    timestamp,
+    enableThinking,
+    enableWebSearch,
+  } = input
+
+  const toolProfile = getProviderToolProfile('qwen')
+  const baseSystemPrompts: string[] = []
+  const summaryPrompts: string[] = []
+  const conversationParts: string[] = []
+  const activeSkillCheckpointPrompts: string[] = []
+  const providerMessages = selectProviderMessagesForAssembly(assembly) as QwenMessage[]
+  const lastUserText = extractLastUserText(providerMessages)
+  const explicitSummaryText = assembly.summaryText?.trim() || null
+  const promptRefreshMode = request.promptRefreshMode
+
+  // Only use delta mode when the provider already tracks the conversation server-side.
+  // tool_ready without a provider session must send the full context so the model
+  // sees earlier instructions, not just the latest assistant/tool delta.
+  const useDeltaMessages = Boolean(request.sessionId)
+  let conversationMessages = selectQwenDeltaMessages(providerMessages, useDeltaMessages)
+
+  // Apply mode-based conversation filtering on top of delta selection
+  conversationMessages = filterConversationForMode(conversationMessages, promptRefreshMode)
+
+  const MAX_TOOL_RESULT_LENGTH = 2000
+  for (const msg of providerMessages) {
+    if (msg.role === 'system') {
+      const content = extractTextContent(msg.content as any)
+      const trimmedContent = content.trim()
+      if (trimmedContent.length === 0) {
+        continue
+      }
+      const isSummaryMessage = trimmedContent.includes('[Prior conversation summary')
+
+      if (isSummaryMessage) {
+        if (!explicitSummaryText || trimmedContent !== explicitSummaryText) {
+          summaryPrompts.push(content)
+        }
+      } else {
+        baseSystemPrompts.push(content)
+        if (trimmedContent.includes('[Active skill workflow state checkpoint]')) {
+          activeSkillCheckpointPrompts.push(content)
+        }
+      }
+      continue
+    }
+  }
+
+  for (const msg of conversationMessages) {
+    if (msg.role === 'system') {
+      continue
+    }
+
+    if (msg.role === 'user') {
+      conversationParts.push(extractTextContent(msg.content as any))
+    } else if (msg.role === 'assistant' && msg.tool_calls && (msg.tool_calls as any[]).length > 0) {
+      const calls = (msg.tool_calls as any[]).map(tc => ({
+        id: tc.id,
+        name: tc.function.name,
+        arguments: tc.function.arguments,
+      }))
+      conversationParts.push(toolProfile.formatAssistantToolCalls(calls))
+    } else if (msg.role === 'assistant') {
+      conversationParts.push(`Assistant: ${extractTextContent(msg.content as any)}`)
+    } else if (msg.role === 'tool' && msg.tool_call_id) {
+      const rawContent = extractTextContent(msg.content as any)
+      const truncated = rawContent.length > MAX_TOOL_RESULT_LENGTH
+        ? rawContent.slice(0, MAX_TOOL_RESULT_LENGTH) + '\n...(truncated)'
+        : rawContent
+      conversationParts.push(toolProfile.formatToolResult({
+        toolCallId: msg.tool_call_id as string,
+        content: truncated,
+      }))
+    }
+  }
+
+  if (promptRefreshMode === 'tool_ready' && activeSkillCheckpointPrompts.length > 0) {
+    conversationParts.push(activeSkillCheckpointPrompts[activeSkillCheckpointPrompts.length - 1])
+  }
+
+  const effectiveSummaryText = explicitSummaryText || (summaryPrompts.length > 0 ? summaryPrompts.join('\n\n') : null)
+
+  // Mode-based section inclusion:
+  // - digest: fresh compact session receives the bounded digest plus re-derived current contract
+  // - minimal: stable provider session omits summary replay but MUST keep tool contract
+  //            because Qwen uses managed XML protocol — tools are embedded in the prompt,
+  //            not natively supported by the provider API.
+  // - full/repair/tool_ready/undefined: keep all sections
+  const includeToolContract = true
+  const includeSummary = promptRefreshMode !== 'minimal'
+
+  const finalContent = renderFinalPrompt({
+    systemText: baseSystemPrompts.join('\n\n') || null,
+    summaryText: includeSummary ? effectiveSummaryText : null,
+    toolContractText: includeToolContract ? (assembly.toolManifest?.renderedPrompt ?? null) : null,
+    infrastructurePrompt: assembly.infrastructurePrompt ?? null,
+    conversationText: conversationParts.length > 0 ? `User: ${conversationParts.join('\n\n')}` : '',
+    template: 'prefix',
+  })
+  const renderedToolContract = includeToolContract ? (assembly.toolManifest?.renderedPrompt ?? null) : null
+  traceQwenRequestAssembly({
+    model: actualModel,
+    messageCount: providerMessages.length,
+    systemMessageCount: baseSystemPrompts.length + summaryPrompts.length,
+    conversationPartCount: conversationParts.length,
+    hasManagedToolContract: hasManagedToolContractMarker(renderedToolContract)
+      || hasManagedToolContractMarker(finalContent),
+    hasSummaryIsolationHeader: Boolean(effectiveSummaryText?.includes('[Prior conversation summary')),
+    finalContentLength: finalContent.length,
+    promptRefreshMode,
+  })
+
+  return {
+    deep_search: (enableWebSearch || enableThinking) ? '1' : '0',
+    req_id: reqId,
+    model: actualModel,
+    scene: 'chat',
+    session_id: sessionId,
+    sub_scene: 'chat',
+    temporary: false,
+    messages: [
+      {
+        content: finalContent,
+        mime_type: 'text/plain',
+        meta_data: {
+          ori_query: lastUserText || finalContent,
+        },
+      },
+    ],
+    from: 'default',
+    parent_req_id: parentReqId || '0',
+    enable_search: enableWebSearch,
+    biz_data: '{"entryPoint":"tongyigw"}',
+    scene_param: request.sessionId ? 'chat' : 'first_turn',
+    chat_client: 'h5',
+    client_tm: timestamp.toString(),
+    protocol_version: 'v2',
+    biz_id: 'ai_qwen',
+  }
+}
+
+export function buildQwenAssemblyRequestBodyForTest(input: QwenAssemblyRequestBodyInput): any {
+  return buildQwenAssemblyRequestBody(input)
+}
+
+function filterConversationForMode(
+  messages: QwenMessage[],
+  mode?: PromptRefreshMode
+): QwenMessage[] {
+  if (mode === 'digest') {
+    const nonSystem = messages.filter((m) => m.role !== 'system')
+    return nonSystem.slice(-4)
+  }
+
+  if (mode === 'minimal') {
+    const nonSystem = messages.filter((m) => m.role !== 'system')
+    return nonSystem.slice(-4)
+  }
+
+  return messages
+}
+
+function findLastIndexOfRole(messages: QwenMessage[], role: string): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === role) return i
+  }
+  return -1
+}
+
+function extractLastUserText(messages: QwenMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role === 'user') {
+      return extractTextContent(message.content)
+    }
   }
   return ''
 }
@@ -287,152 +645,6 @@ export class QwenAdapter {
     return true
   }
 
-  async chatCompletion(request: ChatCompletionRequest): Promise<{
-    response: AxiosResponse
-    sessionId: string
-    reqId: string
-  }> {
-    const ticket = this.getTicket()
-    if (!ticket) {
-      throw new Error('Qwen ticket not configured, please add ticket in account settings')
-    }
-
-    const reqId = uuid(false)
-    const sessionId = uuid(false)
-    
-    let actualModel = this.mapModel(request.model)
-    
-    // Determine if thinking and web search should be enabled
-    // Priority: explicit parameters > model name detection
-    // Use originalModel for feature detection (preserves user's intent before mapping)
-    const modelForDetection = request.originalModel || request.model
-    const modelLower = modelForDetection.toLowerCase()
-    
-    let enableThinking = request.enableThinking ?? false
-    let enableWebSearch = request.enableWebSearch ?? false
-    
-    // Auto-enable based on model name (if not explicitly set)
-    if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
-      enableThinking = true
-      console.log('[Qwen] Thinking mode enabled (from model name)')
-    }
-    if (!enableWebSearch && modelLower.includes('search')) {
-      enableWebSearch = true
-      console.log('[Qwen] Web search enabled (from model name)')
-    }
-
-    // Map thinking mode to model
-    if (enableThinking) {
-      // Use thinking model if available
-      if (actualModel === 'Qwen3-Max') {
-        actualModel = 'Qwen3-Max-Thinking-Preview'
-        console.log('[Qwen] Using thinking model:', actualModel)
-      }
-    }
-    
-    console.log('[Qwen] Session info:', {
-      sessionId,
-      reqId,
-    })
-    console.log('[Qwen] Using model:', actualModel)
-
-    const toolProfile = getProviderToolProfile('qwen')
-
-    // Build prompt content from conversation messages
-    let systemPrompt = ''
-    const conversationParts: string[] = []
-    
-    for (const msg of request.messages) {
-      if (msg.role === 'system') {
-        systemPrompt = extractTextContent(msg.content)
-      } else if (msg.role === 'user') {
-        conversationParts.push(extractTextContent(msg.content))
-      } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        conversationParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
-          id: tc.id,
-          name: tc.function.name,
-          arguments: tc.function.arguments,
-        }))))
-      } else if (msg.role === 'assistant') {
-        conversationParts.push(`Assistant: ${extractTextContent(msg.content)}`)
-      } else if (msg.role === 'tool' && msg.tool_call_id) {
-        conversationParts.push(toolProfile.formatToolResult({
-          toolCallId: msg.tool_call_id,
-          content: extractTextContent(msg.content),
-        }))
-      }
-    }
-
-    let userContent = conversationParts.join('\n\n')
-
-    // Inject tools prompt if tools are provided and not already injected by client
-    if (request.tools && request.tools.length > 0 && !hasToolPromptInjected(request.messages)) {
-      const toolsPrompt = toolsToSystemPrompt(request.tools)
-      systemPrompt = systemPrompt 
-        ? systemPrompt + '\n\n' + toolsPrompt 
-        : toolsPrompt
-      // Add tool wrap hint to user content
-      userContent = userContent + TOOL_WRAP_HINT
-    }
-
-    // If system prompt exists, prepend it to user content
-    const finalContent = systemPrompt 
-      ? `${systemPrompt}\n\nUser: ${userContent}`
-      : userContent
-
-    const timestamp = Date.now()
-    const nonce = generateNonce()
-
-    const requestBody = {
-      deep_search: (enableWebSearch || enableThinking) ? '1' : '0',
-      req_id: reqId,
-      model: actualModel,
-      scene: 'chat',
-      session_id: sessionId,
-      sub_scene: 'chat',
-      temporary: false,
-      messages: [
-        {
-          content: finalContent,
-          mime_type: 'text/plain',
-          meta_data: {
-            ori_query: finalContent
-          }
-        }
-      ],
-      from: 'default',
-      parent_req_id: '0',
-      enable_search: enableWebSearch,
-      biz_data: '{"entryPoint":"tongyigw"}',
-      scene_param: 'first_turn',
-      chat_client: 'h5',
-      client_tm: timestamp.toString(),
-      protocol_version: 'v2',
-      biz_id: 'ai_qwen'
-    }
-
-    const queryString = `biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen&ut=${uuid(false)}&nonce=${nonce}&timestamp=${timestamp}`
-    const url = `${QWEN_API_BASE}/api/v2/chat?${queryString}`
-
-    console.log('[Qwen] Sending request to /api/v2/chat...')
-
-    const response = await this.axiosInstance.post(url, requestBody, {
-      headers: {
-        ...DEFAULT_HEADERS,
-        'Content-Type': 'application/json',
-        Cookie: `tongyi_sso_ticket=${ticket}`,
-      },
-      responseType: 'stream',
-      timeout: 120000,
-      decompress: false,
-    })
-
-    console.log('[Qwen] Response status:', response.status)
-    console.log('[Qwen] Response headers:', JSON.stringify(response.headers, null, 2))
-
-    return { response, sessionId, reqId }
-  }
-
   async deleteSession(sessionId: string): Promise<boolean> {
     try {
       if (!sessionId) {
@@ -513,6 +725,22 @@ export class QwenStreamHandler {
   private sentRole: boolean = false
   private thinkingContent: string = ''
   private sentThinkingRole: boolean = false
+  private finalized = false
+  private finalAssistantResponseForHandoff?: {
+    message: {
+      role: 'assistant'
+      content: string | null
+      tool_calls?: Array<{
+        id: string
+        type: 'function'
+        function: {
+          name: string
+          arguments: string
+        }
+      }>
+    }
+    finish_reason: 'stop' | 'tool_calls'
+  }
 
   constructor(model: string, onEnd?: (sessionId: string) => void, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
@@ -577,6 +805,70 @@ export class QwenStreamHandler {
       transStream.end('data: [DONE]\n\n')
       this.onEnd?.(this.sessionId)
     }
+  }
+
+  private finalizeStream(transStream: PassThrough, safeEnd: (data?: string) => void): void {
+    if (this.finalized) return
+    this.finalized = true
+
+    const baseChunk = createBaseChunk(this.responseId || this.sessionId, this.model, this.created)
+    const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
+    for (const outChunk of flushChunks) {
+      transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+    }
+
+    const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
+    const inspection = this.toolCallingPlan && this.toolStreamParser
+      ? inspectStreamAssistantOutput({
+          plan: this.toolCallingPlan,
+          observation: this.toolStreamParser.getObservation(),
+          finishReason,
+        })
+      : { ok: true as const, outcome: finishReason === 'tool_calls' ? 'tool_calls' : 'content' }
+    this.finalAssistantResponseForHandoff = {
+      message: {
+        role: 'assistant',
+        content: finishReason === 'tool_calls' || inspection.outcome === 'malformed_tool_output' ? null : this.content.trim(),
+        ...(finishReason === 'tool_calls'
+          ? {
+              tool_calls: parseToolCallsFromText(this.content, 'default').toolCalls,
+            }
+          : {}),
+      },
+      finish_reason: finishReason,
+    }
+
+    if (!inspection.ok && inspection.outcome === 'malformed_tool_output') {
+      console.warn('[Qwen] Suppressed managed stream inspection failure:', JSON.stringify({
+        outcome: inspection.outcome,
+        error: inspection.error,
+      }))
+    } else if (!inspection.ok) {
+      transStream.write(
+        `data: ${JSON.stringify({
+          ...baseChunk,
+          choices: [{
+            index: 0,
+            delta: {
+              ...(!this.sentRole && !this.sentThinkingRole ? { role: 'assistant' } : {}),
+              content: `Error: ${inspection.error}`,
+            },
+            finish_reason: null,
+          }],
+        })}\n\n`
+      )
+      this.sentRole = true
+    }
+
+    transStream.write(
+      `data: ${JSON.stringify({
+        ...baseChunk,
+        choices: [{ index: 0, delta: {}, finish_reason: inspection.ok ? finishReason : 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      })}\n\n`
+    )
+    safeEnd('data: [DONE]\n\n')
+    this.onEnd?.(this.sessionId)
   }
 
   handleStream(stream: any, response?: AxiosResponse): PassThrough {
@@ -730,13 +1022,22 @@ export class QwenStreamHandler {
                   }
                   
                   console.log('[Qwen] newContent.length:', newContent.length, 'this.content.length:', this.content.length)
-                  if (newContent.length > this.content.length) {
-                    const chunk = newContent.substring(this.content.length)
+                  const deltaDecision = resolveQwenContentDelta({
+                    previousContent: this.content,
+                    nextContent: newContent,
+                    toolCallingPlan: this.toolCallingPlan,
+                    toolStreamParser: this.toolStreamParser,
+                  })
+                  if (deltaDecision.shouldEmit) {
+                    const chunk = deltaDecision.chunk
                     this.content = newContent
                     console.log('[Qwen] Writing chunk, length:', chunk.length)
 
                     // Process tool call interception
                     const baseChunk = createBaseChunk(this.responseId || this.sessionId, this.model, this.created)
+                    if (deltaDecision.resetParser && this.toolCallingPlan) {
+                      this.toolStreamParser = new ToolStreamParser(this.toolCallingPlan)
+                    }
                     const outputChunks = this.toolStreamParser?.push(chunk, baseChunk, !this.sentRole) ?? [{
                       ...baseChunk,
                       choices: [{ index: 0, delta: { ...(!this.sentRole ? { role: 'assistant' } : {}), content: chunk }, finish_reason: null }],
@@ -758,30 +1059,7 @@ export class QwenStreamHandler {
                   if (msg.mime_type === 'multi_load/iframe' && !this.stopSent) {
                     this.stopSent = true
                     console.log('[Qwen] Sending stop for multi_load/iframe, content so far:', this.content.length)
-                    
-                    // Flush any remaining tool calls
-                    const baseChunk = createBaseChunk(this.responseId || this.sessionId, this.model, this.created)
-                    const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-                    
-                    for (const outChunk of flushChunks) {
-                      transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
-                    }
-                    
-                    // Check if we emitted tool calls
-                    const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-                    
-                    transStream.write(
-                      `data: ${JSON.stringify({
-                        id: this.responseId || this.sessionId,
-                        model: this.model,
-                        object: 'chat.completion.chunk',
-                        choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-                        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                        created: this.created,
-                      })}\n\n`
-                    )
-                    safeEnd('data: [DONE]\n\n')
-                    this.onEnd?.(this.sessionId)
+                    this.finalizeStream(transStream, safeEnd)
                   }
                 }
               }
@@ -792,11 +1070,10 @@ export class QwenStreamHandler {
               this.hasError = true
               transStream.write(
                 `data: ${JSON.stringify({
-                  id: this.responseId || this.sessionId,
-                  model: this.model,
-                  object: 'chat.completion.chunk',
-                  choices: [{ index: 0, delta: { content: `\n[Error: ${result.error_msg || result.error_code}]` }, finish_reason: 'stop' }],
-                  created: this.created,
+                  error: {
+                    code: String(result.error_code),
+                    message: result.error_msg || String(result.error_code),
+                  },
                 })}\n\n`
               )
               safeEnd('data: [DONE]\n\n')
@@ -810,29 +1087,7 @@ export class QwenStreamHandler {
           console.log('[Qwen] Received complete event')
           if (!streamEnded && !this.stopSent) {
             this.stopSent = true
-            
-            // Flush any remaining tool calls
-            const baseChunk = createBaseChunk(this.responseId || this.sessionId, this.model, this.created)
-            const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-            
-            for (const outChunk of flushChunks) {
-              transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
-            }
-            
-            // Check if we emitted tool calls
-            const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-            
-            transStream.write(
-              `data: ${JSON.stringify({
-                id: this.responseId || this.sessionId,
-                model: this.model,
-                object: 'chat.completion.chunk',
-                choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                created: this.created,
-              })}\n\n`
-            )
-            safeEnd('data: [DONE]\n\n')
+            this.finalizeStream(transStream, safeEnd)
           }
         }
       }
@@ -863,7 +1118,10 @@ export class QwenStreamHandler {
             const decompressedStr = Buffer.from(decompressed).toString('utf8')
             buffer = decompressedStr
             processBuffer()
-            safeEnd('data: [DONE]\n\n')
+            if (!this.stopSent) {
+              this.stopSent = true
+              this.finalizeStream(transStream, safeEnd)
+            }
           })
         } catch (err) {
           console.error('[Qwen] Zstd decompression error:', err)
@@ -890,7 +1148,10 @@ export class QwenStreamHandler {
       console.log('[Qwen] Stream closed')
       if (streamEnded) return
       processBuffer()
-      safeEnd('data: [DONE]\n\n')
+      if (!this.stopSent) {
+        this.stopSent = true
+        this.finalizeStream(transStream, safeEnd)
+      }
     })
 
     return transStream
@@ -932,9 +1193,18 @@ export class QwenStreamHandler {
       let resolved = false
 
       const finalizeWithData = (content: string) => {
-        const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-          ? { content, toolCalls: [] }
-          : parseToolCallsFromText(content, 'qwen')
+        let cleanContent: string
+        let toolCalls: ParsedToolCall[]
+        if (this.toolCallingPlan?.shouldParseResponse) {
+          const protocol = getToolProtocol(this.toolCallingPlan.protocol)
+          const parsed = protocol.parse(content, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
+          cleanContent = parsed.content || content
+          toolCalls = parsed.toolCalls || []
+        } else {
+          const result = parseToolCallsFromText(content, 'qwen')
+          cleanContent = result.content
+          toolCalls = result.toolCalls
+        }
         if (toolCalls.length > 0) {
           data.choices[0].message.content = null
           data.choices[0].message.tool_calls = toolCalls
@@ -1039,10 +1309,19 @@ export class QwenStreamHandler {
                       this.content = contentAccumulator
                       
                       // Parse tool calls from content
-                      const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-                        ? { content: contentAccumulator, toolCalls: [] }
-                        : parseToolCallsFromText(contentAccumulator, 'qwen')
-                      
+                      let cleanContent: string
+                      let toolCalls: ParsedToolCall[]
+                      if (this.toolCallingPlan?.shouldParseResponse) {
+                        const protocol = getToolProtocol(this.toolCallingPlan.protocol)
+                        const parsed = protocol.parse(contentAccumulator, { tools: this.toolCallingPlan.tools, protocol: this.toolCallingPlan.protocol })
+                        cleanContent = parsed.content || contentAccumulator
+                        toolCalls = parsed.toolCalls || []
+                      } else {
+                        const result = parseToolCallsFromText(contentAccumulator, 'qwen')
+                        cleanContent = result.content
+                        toolCalls = result.toolCalls
+                      }
+
                       if (toolCalls.length > 0) {
                         data.choices[0].message.content = null
                         ;(data.choices[0].message as any).tool_calls = toolCalls
@@ -1172,6 +1451,82 @@ export class QwenStreamHandler {
   getSessionId(): string {
     return this.sessionId
   }
+
+  getResponseId(): string {
+    return this.responseId
+  }
+
+  getFinalAssistantResponseForHandoff():
+    | {
+        message: {
+          role: 'assistant'
+          content: string | null
+          tool_calls?: Array<{
+            id: string
+            type: 'function'
+            function: {
+              name: string
+              arguments: string
+            }
+          }>
+        }
+        finish_reason: 'stop' | 'tool_calls'
+      }
+    | undefined {
+    return this.finalAssistantResponseForHandoff
+  }
+}
+
+function resolveQwenContentDelta(input: {
+  previousContent: string
+  nextContent: string
+  toolCallingPlan?: ToolCallingPlan
+  toolStreamParser?: ToolStreamParser
+}): QwenContentDeltaDecision {
+  const { previousContent, nextContent, toolCallingPlan, toolStreamParser } = input
+  if (nextContent === previousContent) {
+    return { shouldEmit: false, chunk: '', resetParser: false }
+  }
+
+  if (nextContent.startsWith(previousContent)) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent.slice(previousContent.length),
+      resetParser: false,
+    }
+  }
+
+  const isManagedToolRewrite = Boolean(
+    toolCallingPlan
+    && toolStreamParser
+    && (
+      toolStreamParser.isBuffering()
+      || containsManagedToolMarker(previousContent)
+      || containsManagedToolMarker(nextContent)
+    ),
+  )
+
+  if (isManagedToolRewrite) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent,
+      resetParser: true,
+    }
+  }
+
+  if (nextContent.length > previousContent.length) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent.substring(previousContent.length),
+      resetParser: false,
+    }
+  }
+
+  return { shouldEmit: false, chunk: '', resetParser: false }
+}
+
+function containsManagedToolMarker(value: string): boolean {
+  return value.includes('<|CHAT2API|') || value.includes('<tool_calls>')
 }
 
 export const qwenAdapter = {

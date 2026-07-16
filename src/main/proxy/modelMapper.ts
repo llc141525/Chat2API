@@ -3,8 +3,16 @@
  * Supports mapping request models to actual models
  */
 
-import { storeManager } from '../store/store'
-import { ModelMapping, Provider } from '../store/types'
+import { storeManager } from '../store/store.ts'
+import { ModelMapping, Provider } from '../store/types.ts'
+import { splitProviderQualifiedModel, type QualifiedModelRef } from './modelQualifier.ts'
+
+function resolveQualifiedModel(requestedModel: string): QualifiedModelRef {
+  return splitProviderQualifiedModel(
+    requestedModel,
+    storeManager.getProviders().map((provider) => provider.id),
+  )
+}
 
 /**
  * Model mapper
@@ -29,6 +37,28 @@ export class ModelMapper {
     const wildcardMapping = this.findWildcardMapping(requestedModel, mappings, provider)
     if (wildcardMapping) {
       return wildcardMapping.actualModel
+    }
+
+    const qualified = resolveQualifiedModel(requestedModel)
+    if (
+      qualified.providerId
+      && (!provider || qualified.providerId === provider.id)
+      && qualified.model !== requestedModel
+    ) {
+      const qualifiedDirectMapping = mappings[qualified.model]
+      if (
+        qualifiedDirectMapping
+        && (!provider || !qualifiedDirectMapping.preferredProviderId || qualifiedDirectMapping.preferredProviderId === provider.id)
+      ) {
+        return qualifiedDirectMapping.actualModel
+      }
+
+      const qualifiedWildcardMapping = this.findWildcardMapping(qualified.model, mappings, provider)
+      if (qualifiedWildcardMapping) {
+        return qualifiedWildcardMapping.actualModel
+      }
+
+      return qualified.model
     }
 
     return requestedModel
@@ -96,6 +126,23 @@ export class ModelMapper {
       }
     }
 
+    const qualified = resolveQualifiedModel(requestedModel)
+    if (
+      qualified.providerId
+      && (!providerId || qualified.providerId === providerId)
+      && qualified.model !== requestedModel
+    ) {
+      const qualifiedMapping = config.modelMappings[qualified.model]
+      if (
+        qualifiedMapping
+        && (!providerId || !qualifiedMapping.preferredProviderId || qualifiedMapping.preferredProviderId === providerId)
+      ) {
+        return qualifiedMapping.actualModel
+      }
+
+      return qualified.model
+    }
+
     return requestedModel
   }
 
@@ -106,7 +153,11 @@ export class ModelMapper {
     const config = storeManager.getConfig()
     const mapping = config.modelMappings[requestedModel]
 
-    return mapping?.preferredProviderId
+    if (mapping?.preferredProviderId) {
+      return mapping.preferredProviderId
+    }
+
+    return resolveQualifiedModel(requestedModel).providerId
   }
 
   /**
@@ -159,7 +210,9 @@ export class ModelMapper {
    */
   getProvidersForModel(model: string): Provider[] {
     const providers = storeManager.getProviders().filter(p => p.enabled)
+    const qualified = resolveQualifiedModel(model)
     const preferredProviderId = this.getPreferredProvider(model)
+    const targetModel = qualified.model
 
     if (preferredProviderId) {
       const preferred = providers.find(p => p.id === preferredProviderId)
@@ -174,7 +227,7 @@ export class ModelMapper {
         return true
       }
 
-      const normalizedModel = model.toLowerCase()
+      const normalizedModel = targetModel.toLowerCase()
       return effectiveModels.some(m => {
         const normalizedSupported = m.displayName.toLowerCase()
         if (normalizedSupported.endsWith('*')) {
@@ -188,3 +241,4 @@ export class ModelMapper {
 
 export const modelMapper = new ModelMapper()
 export default modelMapper
+export { resolveQualifiedModel }

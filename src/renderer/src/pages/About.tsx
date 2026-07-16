@@ -13,6 +13,8 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import logoIcon from '@/assets/icons/icons.png'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 
 type UpdatePhase = 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
 
@@ -339,64 +341,62 @@ export function About() {
                 </div>
               ) : updateInfo.phase === 'downloaded' ? (
                 <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[var(--success)]/10 shadow-[0_0_8px_var(--success)]">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-[var(--success)]" />
-                    <span className="text-xs font-medium text-[var(--success)]">
+                  <Badge variant="outline" className="status-chip status-running px-3 py-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>
                       {t('settings.updateDownloaded')}
                     </span>
-                  </div>
-                  <button
+                  </Badge>
+                  <Button
                     onClick={handleInstallUpdate}
-                    className="px-4 py-2 bg-[var(--accent-primary)] hover:bg-[var(--accent-primary)]/90 text-white text-sm font-medium rounded-full transition-colors flex items-center gap-2 shadow-lg shadow-[var(--accent-primary)]/20"
                   >
                     <RefreshCw className="w-4 h-4" />
                     {t('settings.restartAndInstall')}
-                  </button>
+                  </Button>
                 </div>
               ) : updateInfo.phase === 'error' ? (
                 <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[var(--accent-error)]/10">
-                    <AlertCircle className="w-3.5 h-3.5 text-[var(--accent-error)]" />
-                    <span className="text-xs font-medium text-[var(--accent-error)]">
+                  <Badge variant="outline" className="status-chip status-error px-3 py-1.5">
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    <span>
                       {t('settings.updateCheckFailed')}
                     </span>
-                  </div>
-                  <button
+                  </Badge>
+                  <Button
+                    variant="outline"
                     onClick={handleCheckAppUpdate}
-                    className="px-4 py-2 bg-[var(--glass-bg)] hover:bg-[var(--glass-bg-hover)] border border-[var(--glass-border)] hover:border-[var(--glass-border-hover)] rounded-full text-sm text-[var(--text-primary)] font-medium transition-all duration-200 flex items-center gap-2"
                   >
                     <RefreshCw className="h-4 w-4 text-[var(--text-muted)]" />
                     {t('settings.retry')}
-                  </button>
+                  </Button>
                 </div>
               ) : updateInfo.phase === 'available' ? (
                 <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[var(--success)]/10 shadow-[0_0_8px_var(--success)]">
+                  <Badge variant="outline" className="status-chip status-running px-3 py-1.5">
                     <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--success)] opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--success)]"></span>
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--accent-primary)] opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--accent-primary)]"></span>
                     </span>
-                    <span className="text-xs font-medium text-[var(--success)]">
+                    <span>
                       {t('settings.updateAvailable')}
                       {updateInfo.latestVersion ? ` v${updateInfo.latestVersion}` : ''}
                     </span>
-                  </div>
-                  <button
+                  </Badge>
+                  <Button
                     onClick={handleDownloadUpdate}
-                    className="px-4 py-2 bg-[var(--accent-primary)] hover:bg-[var(--accent-primary)]/90 text-white text-sm font-medium rounded-full transition-colors flex items-center gap-2 shadow-lg shadow-[var(--accent-primary)]/20"
                   >
                     <Download className="w-4 h-4" />
                     {t('settings.downloadUpdate')}
-                  </button>
+                  </Button>
                 </div>
               ) : (
-                <button
+                <Button
+                  variant="outline"
                   onClick={handleCheckAppUpdate}
-                  className="px-4 py-2 bg-[var(--glass-bg)] hover:bg-[var(--glass-bg-hover)] border border-[var(--glass-border)] hover:border-[var(--glass-border-hover)] rounded-full text-sm text-[var(--text-primary)] font-medium transition-all duration-200 flex items-center gap-2"
                 >
                   <Globe className="h-4 w-4 text-[var(--text-muted)]" />
                   {t('settings.checkUpdates')}
-                </button>
+                </Button>
               )}
             </div>
           </div>

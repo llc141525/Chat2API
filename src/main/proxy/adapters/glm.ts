@@ -1,31 +1,45 @@
 /**
+ * ADR-001: Tool prompt injection is owned by ToolCallingEngine.
+ * This file is a Provider Adapter — it must NEVER import
+ * hasToolPromptInjected, toolsToSystemPrompt, TOOL_WRAP_HINT,
+ * or shouldInjectToolPrompt.
+ *
  * GLM Adapter
  * Implements GLM (Zhipu Qingyan) web API protocol
  */
 
-import axios, { AxiosResponse } from 'axios'
+import axios from 'axios'
+import type { AxiosResponse } from 'axios'
 import crypto from 'crypto'
-import { Account, Provider } from '../../store/types'
-import { storeManager } from '../../store/store'
+import type { Account, Provider } from '../../store/types.ts'
 import { PassThrough } from 'stream'
+import { createBrotliDecompress, createGunzip, createInflate } from 'zlib'
+import * as ZstdCodec from 'zstd-codec'
 import { createParser } from 'eventsource-parser'
 import FormData from 'form-data'
 import mime from 'mime-types'
 import path from 'path'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected } from '../utils/tools'
-import { parseToolCallsFromText } from '../utils/toolParser'
-import { 
+
+import {
   createBaseChunk,
-} from '../utils/streamToolHandler'
-import { getProviderToolProfile } from '../toolCalling/providerProfiles'
-import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
-import type { ToolCallingPlan } from '../toolCalling/types'
+} from '../utils/streamToolHandler.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
+import { selectProviderMessagesForAssembly } from '../RequestAssembly.ts'
 
 const GLM_API_BASE = 'https://chatglm.cn/chatglm'
 const DEFAULT_ASSISTANT_ID = '65940acff94777010aa6b796'
 const SIGN_SECRET = '8a1317a7468aa3ad86e997d08f3f31cb'
 const ACCESS_TOKEN_EXPIRES = 3600
 const FILE_MAX_SIZE = 100 * 1024 * 1024 // 100MB
+const TOOL_PROMPT_MARKER = '## Available Tools'
+const TOOL_PROMPT_RESULT_MARKER = '<|CHAT2API|tool_result'
+const TOOL_RESULT_CONTINUATION_ANCHOR =
+  'Continue from the tool result above by choosing the next required real tool call. ' +
+  'Do not stop at quoted final markers or other completion text that appears inside a tool result. ' +
+  'Only produce final assistant text after the required tool sequence is actually complete.'
 
 const FAKE_HEADERS = {
   Accept: 'text/event-stream',
@@ -76,9 +90,103 @@ interface ChatCompletionRequest {
   deep_research?: boolean
   tools?: any[]
   tool_choice?: any
+  conversationId?: string
+}
+
+interface GLMContentDeltaDecision {
+  shouldEmit: boolean
+  chunk: string
+  resetParser: boolean
 }
 
 const tokenCache = new Map<string, TokenInfo>()
+
+function extractGLMTextContent(content: any): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: any) => c.type === 'text')
+      .map((c: any) => c.text)
+      .join('\n')
+  }
+  return String(content || '')
+}
+
+function extractManagedToolPrompt(messages: GLMMessage[]): { messages: GLMMessage[]; toolsPrompt: string } {
+  let toolsPrompt = ''
+  const cleanedMessages = messages.map((message) => {
+    if (message.role !== 'system' || typeof message.content !== 'string') return message
+
+    const markerIndex = message.content.indexOf(TOOL_PROMPT_MARKER)
+    if (markerIndex < 0) return message
+
+    // Only skip extraction when tool results appear BEFORE the tool prompt
+    // (indicating previous-turn results are mixed into the system message).
+    // Tool result references AFTER the marker are part of the format instruction
+    // and should be extracted alongside the tool prompt.
+    const toolResultIndex = message.content.indexOf(TOOL_PROMPT_RESULT_MARKER)
+    if (toolResultIndex >= 0 && toolResultIndex < markerIndex) return message
+
+    // Extract tool prompt so it can be placed at the end of the final message,
+    // closest to where the model generates its response.
+    const beforePrompt = message.content.slice(0, markerIndex).trim()
+    toolsPrompt = message.content.slice(markerIndex).trim()
+    return { ...message, content: beforePrompt }
+  })
+
+  if (toolsPrompt) {
+    const toolNamesInPrompt = [...toolsPrompt.matchAll(/Tool `([^`]+)`/g)].map((m) => m[1])
+    console.log('[GLM] Extracted tool prompt — tool names:', toolNamesInPrompt)
+  }
+
+  return { messages: cleanedMessages, toolsPrompt }
+}
+
+export function buildGLMPromptMessagesForTest(
+  messages: GLMMessage[],
+  refs: any[] = [],
+  isMultiTurn: boolean = false,
+): { role: string; content: any[] }[] {
+  const adapter = Object.create(GLMAdapter.prototype) as GLMAdapter
+  const managedToolPrompt = extractManagedToolPrompt(messages)
+  return (adapter as any).messagesToPrompt(managedToolPrompt.messages, refs, managedToolPrompt.toolsPrompt, isMultiTurn)
+}
+
+export function buildGLMAssemblyPromptMessagesForTest(
+  assembly: import('../RequestAssembly.ts').RequestAssembly,
+  refs: any[] = [],
+  isMultiTurn: boolean = false,
+  includeToolPrompt: boolean = true,
+): { role: string; content: any[] }[] {
+  const adapter = Object.create(GLMAdapter.prototype) as GLMAdapter
+  const messages = [...selectProviderMessagesForAssembly(assembly, {
+    stripRuntimeConfig: true,
+    stripToolContractHistory: true,
+    dropRuntimeConfig: true,
+  })] as GLMMessage[]
+  let toolsPrompt = [assembly.infrastructurePrompt, assembly.summaryText]
+    .filter((part): part is string => Boolean(part?.trim()))
+    .join('\n\n')
+
+  if (includeToolPrompt && assembly.toolManifest) {
+    toolsPrompt = toolsPrompt
+      ? `${toolsPrompt}\n\n${assembly.toolManifest.renderedPrompt}`
+      : assembly.toolManifest.renderedPrompt
+  }
+
+  return (adapter as any).messagesToPrompt(messages, refs, toolsPrompt, isMultiTurn)
+}
+
+function shouldLogPromptPreview(messages: GLMMessage[]): boolean {
+  return process.env.CHAT2API_DEBUG_RAW_PROMPTS === '1' && messages.some((message) =>
+    typeof message.content === 'string' &&
+    (
+      message.content.includes('agent-capability-probe') ||
+      message.content.includes('CAPABILITY_PROBE_DONE') ||
+      message.content.includes('tests/agent-capability/input.txt')
+    ),
+  )
+}
 
 function uuid(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -119,7 +227,7 @@ export class GLMAdapter {
     return credentials.refresh_token || credentials.token || ''
   }
 
-  private async acquireToken(): Promise<string> {
+  async acquireToken(): Promise<string> {
     const refreshToken = this.getRefreshToken()
     const cached = tokenCache.get(refreshToken)
     if (cached && Date.now() < cached.expiresAt) {
@@ -167,6 +275,7 @@ export class GLMAdapter {
       const decryptedCredentials = {
         refresh_token,
       }
+      const { storeManager } = await import('../../store/store.ts')
       await storeManager.updateAccount(this.account.id, {
         credentials: decryptedCredentials,
       })
@@ -307,267 +416,110 @@ export class GLMAdapter {
       })
     }
 
-    // Process messages including tool calls and tool responses
-    const processedMessages = messages.map(msg => {
-      // Handle tool calls in assistant message
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        return {
-          ...msg,
-          content: toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
-            id: tc.id,
-            name: tc.function.name,
-            arguments: tc.function.arguments,
-          }))),
-        }
-      }
-      // Handle tool response message
-      if (msg.role === 'tool' && msg.tool_call_id) {
-        return { 
-          ...msg, 
-          role: 'user' as const,
-          content: toolProfile.formatToolResult({
-            toolCallId: msg.tool_call_id,
-            content: String(msg.content || ''),
-          }),
-        }
-      }
-      return msg
-    })
+    const conversationParts: string[] = []
+    let systemPrompt = ''
 
-    // For multi-turn mode, only send the last user message
     if (isMultiTurn) {
-      let lastUserIdx = -1
-      for (let i = processedMessages.length - 1; i >= 0; i--) {
-        if (processedMessages[i].role === 'user') {
-          lastUserIdx = i
+      // Find the last assistant message with tool_calls in ORIGINAL messages,
+      // then only include the delta from there onward (server holds conversation context)
+      let lastAssistantToolIdx = -1
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'assistant' && messages[i].tool_calls && messages[i].tool_calls.length > 0) {
+          lastAssistantToolIdx = i
           break
         }
       }
-      
-      if (lastUserIdx !== -1) {
-        const lastUserMsg = processedMessages[lastUserIdx]
-        let textContent = ''
-        if (typeof lastUserMsg.content === 'string') {
-          textContent = lastUserMsg.content
-        } else if (Array.isArray(lastUserMsg.content)) {
-          textContent = lastUserMsg.content.filter((c) => c.type === 'text').map((c) => c.text).join('')
-        }
-        
-        // Include any tool results after the last user message
-        for (let i = lastUserIdx + 1; i < processedMessages.length; i++) {
-          if (processedMessages[i].role === 'user') {
-            const toolText = typeof processedMessages[i].content === 'string' 
-              ? processedMessages[i].content 
-              : ''
-            textContent += '\n' + toolText
+
+      if (lastAssistantToolIdx !== -1) {
+        const deltaParts: string[] = []
+        for (let i = lastAssistantToolIdx; i < messages.length; i++) {
+          const msg = messages[i]
+          if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+            deltaParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
+              id: tc.id,
+              name: tc.function.name,
+              arguments: tc.function.arguments,
+            }))))
+          } else if (msg.role === 'tool' && msg.tool_call_id) {
+            const rawContent = extractGLMTextContent(msg.content)
+            const truncated = rawContent.length > 2000
+              ? rawContent.slice(0, 2000) + '\n...(truncated)'
+              : rawContent
+            deltaParts.push(toolProfile.formatToolResult({
+              toolCallId: msg.tool_call_id,
+              content: truncated,
+            }))
+          } else if (msg.role === 'assistant') {
+            deltaParts.push(`Assistant: ${extractGLMTextContent(msg.content)}`)
+          } else if (msg.role === 'user') {
+            deltaParts.push(extractGLMTextContent(msg.content))
+          } else if (msg.role === 'system') {
+            systemPrompt = extractGLMTextContent(msg.content)
           }
         }
-        
+
+        const userContent = appendToolResultContinuationAnchor(
+          deltaParts.join('\n\n'),
+          messages.slice(lastAssistantToolIdx),
+        )
+        let textContent = systemPrompt
+          ? `${systemPrompt}\n\nUser: ${userContent}`
+          : userContent
+
         if (toolsPrompt) {
-          textContent = textContent.trim() + "\n\n" + toolsPrompt
+          textContent = textContent.trimEnd() + '\n\n' + toolsPrompt
         }
-        
+
+        if (shouldLogPromptPreview(messages)) {
+          console.log('[GLM] Final prompt preview:', textContent)
+        }
+
         content.push({ type: 'text', text: textContent })
         return [{ role: 'user', content }]
       }
+      // No assistant tool_call found — fall through to full prompt
     }
 
-    // Extract text from messages
-    if (processedMessages.length < 2) {
-      let textContent = processedMessages.reduce((acc, msg) => {
-        if (typeof msg.content === 'string') {
-          return acc + msg.content + '\n'
-        } else if (Array.isArray(msg.content)) {
-          const textParts = msg.content.filter((c) => c.type === 'text').map((c) => c.text)
-          return acc + textParts.join('') + '\n'
-        }
-        return acc
-      }, '')
-
-      // Inject tools prompt at the VERY END
-      if (toolsPrompt) {
-        textContent = textContent.trim() + "\n\n" + toolsPrompt
+    for (const msg of messages) {
+      if (msg.role === 'system') {
+        systemPrompt = extractGLMTextContent(msg.content)
+      } else if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        conversationParts.push(toolProfile.formatAssistantToolCalls(msg.tool_calls.map(tc => ({
+          id: tc.id,
+          name: tc.function.name,
+          arguments: tc.function.arguments,
+        }))))
+      } else if (msg.role === 'tool' && msg.tool_call_id) {
+        const rawContent = extractGLMTextContent(msg.content)
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
+        conversationParts.push(toolProfile.formatToolResult({
+          toolCallId: msg.tool_call_id,
+          content: truncated,
+        }))
+      } else if (msg.role === 'assistant') {
+        conversationParts.push(`Assistant: ${extractGLMTextContent(msg.content)}`)
+      } else if (msg.role === 'user') {
+        conversationParts.push(extractGLMTextContent(msg.content))
       }
-
-      content.push({ type: 'text', text: textContent })
-      return [{ role: 'user', content }]
     }
 
-    let textContent = processedMessages.reduce((acc, msg) => {
-      const role = msg.role
-        .replace('system', 'System')
-        .replace('assistant', 'Assistant')
-        .replace('user', 'User')
-        .replace('tool', 'User')
-      if (typeof msg.content === 'string') {
-        return acc + `${role}: ${msg.content}\n\n`
-      } else if (Array.isArray(msg.content)) {
-        const text = msg.content.filter((c) => c.type === 'text').map((c) => c.text).join('')
-        return acc + `${role}: ${text}\n\n`
-      }
-      return acc
-    }, '')
+    const userContent = conversationParts.join('\n\n')
+    let textContent = systemPrompt
+      ? `${systemPrompt}\n\nUser: ${userContent}`
+      : userContent
 
-    // Inject tools prompt at the VERY END
     if (toolsPrompt) {
-      textContent = textContent.trim() + "\n\n" + toolsPrompt
+      textContent = textContent.trimEnd() + '\n\n' + toolsPrompt
     }
 
-    content.push({ type: 'text', text: textContent + 'Assistant: ' })
+    if (shouldLogPromptPreview(messages)) {
+      console.log('[GLM] Final prompt preview:', textContent)
+    }
+
+    content.push({ type: 'text', text: textContent })
     return [{ role: 'user', content }]
-  }
-
-  async chatCompletion(request: ChatCompletionRequest): Promise<{ response: AxiosResponse; conversationId: string }> {
-    const token = await this.acquireToken()
-    const sign = generateSign()
-
-    // Clone messages to avoid modifying original request
-    const messages = [...request.messages]
-
-    // Check if tool prompt has already been injected by client
-    const toolPromptExists = hasToolPromptInjected(messages)
-
-    // Inject tools definition into prompt if tools are provided and not already injected
-    let toolsPrompt = ''
-    if (request.tools && request.tools.length > 0 && !toolPromptExists) {
-      const glmStrictHint = `
-
-GLM STRICT RULES:
-- If user asks to create/modify code or files, you MUST call tools instead of replying with plain text.
-- You MUST output ONLY one [function_calls] block when calling tools.
-- Use exact tool names from list, case-sensitive, do not rename.`
-      toolsPrompt = toolsToSystemPrompt(request.tools) + glmStrictHint
-
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') {
-          const currentContent = messages[i].content
-          if (typeof currentContent === 'string') {
-            messages[i] = { ...messages[i], content: currentContent + TOOL_WRAP_HINT }
-          } else if (Array.isArray(currentContent)) {
-            messages[i] = {
-              ...messages[i],
-              content: [...currentContent, { type: 'text', text: TOOL_WRAP_HINT }],
-            }
-          }
-          break
-        }
-      }
-    }
-
-    // Extract and upload files
-    const { fileUrls, imageUrls } = this.extractFileUrls(messages)
-    const refs: any[] = []
-
-    // Upload files
-    for (const fileUrl of fileUrls) {
-      try {
-        const result = await this.uploadFile(fileUrl)
-        refs.push({
-          source_id: result.source_id,
-          file_url: result.file_url || fileUrl,
-        })
-      } catch (error) {
-        console.error('[GLM] Failed to upload file:', error)
-      }
-    }
-
-    // Upload images
-    for (const imageUrl of imageUrls) {
-      try {
-        const result = await this.uploadFile(imageUrl)
-        refs.push({
-          source_id: result.source_id,
-          image_url: result.file_url || imageUrl,
-          width: 0,
-          height: 0,
-        })
-      } catch (error) {
-        console.error('[GLM] Failed to upload image:', error)
-      }
-    }
-
-    const preparedMessages = this.messagesToPrompt(messages, refs, toolsPrompt, false)
-
-    let assistantId = DEFAULT_ASSISTANT_ID
-    let chatMode = ''
-    let isNetworking = false
-
-    // Use request parameters for mode control (OpenAI compatible)
-    if (request.reasoning_effort) {
-      chatMode = 'zero'
-      console.log('[GLM] Using reasoning mode, effort:', request.reasoning_effort)
-    }
-    
-    if (request.web_search) {
-      isNetworking = true
-      console.log('[GLM] Web search enabled')
-    }
-    
-    if (request.deep_research) {
-      chatMode = 'deep_research'
-      console.log('[GLM] Using deep research mode')
-    }
-
-    // Fallback: check model name for backward compatibility
-    // Use originalModel for feature detection (preserves user's intent before mapping)
-    const modelForDetection = request.originalModel || request.model
-    const modelLower = modelForDetection.toLowerCase()
-    if (!chatMode && (modelLower.includes('think') || modelLower.includes('zero'))) {
-      chatMode = 'zero'
-      console.log('[GLM] Using reasoning mode (from model name)')
-    }
-    if (!chatMode && modelLower.includes('deepresearch')) {
-      chatMode = 'deep_research'
-      console.log('[GLM] Using deep research mode (from model name)')
-    }
-    
-    // Check if model is an assistant ID (24+ alphanumeric characters)
-    if (/^[a-z0-9]{24,}$/.test(request.model)) {
-      assistantId = request.model
-    }
-
-    console.log('[GLM] Sending chat request...')
-    
-    const response = await axios.post(
-      `${GLM_API_BASE}/backend-api/assistant/stream`,
-      {
-        assistant_id: assistantId,
-        conversation_id: '',
-        project_id: '',
-        chat_type: 'user_chat',
-        messages: preparedMessages,
-        meta_data: {
-          channel: '',
-          chat_mode: chatMode || undefined,
-          draft_id: '',
-          if_plus_model: true,
-          input_question_type: 'xxxx',
-          is_networking: isNetworking,
-          is_test: false,
-          platform: 'pc',
-          quote_log_id: '',
-          cogview: {
-            rm_label_watermark: false,
-          },
-        },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...FAKE_HEADERS,
-          'X-Device-Id': uuid(),
-          'X-Request-Id': uuid(),
-          'X-Sign': sign.sign,
-          'X-Timestamp': sign.timestamp,
-          'X-Nonce': sign.nonce,
-        },
-        timeout: 120000,
-        validateStatus: () => true,
-        responseType: 'stream',
-      }
-    )
-
-    return { response, conversationId: '' }
   }
 
   async deleteConversation(conversationId: string): Promise<boolean> {
@@ -701,6 +653,49 @@ GLM STRICT RULES:
   }
 }
 
+function convertNativeToolCallsToXml(toolCalls: any[]): string {
+  const invokes = toolCalls.map((tc) => {
+    const fn = tc.function || tc
+    const name = fn.name || tc.name || ''
+    if (!name) {
+      console.warn('[GLM] Native tool_call without name:', JSON.stringify(tc).substring(0, 200))
+      return ''
+    }
+    const args = typeof fn.arguments === 'string' ? safeParseJson(fn.arguments) : (fn.arguments || {})
+    const params = Object.entries(args as Record<string, unknown>)
+      .map(([key, value]) => {
+        const text = typeof value === 'string' ? value : JSON.stringify(value)
+        return `<|CHAT2API|parameter name="${key}"><![CDATA[${text}]]></|CHAT2API|parameter>`
+      })
+      .join('')
+    return `<|CHAT2API|invoke name="${name}">${params}</|CHAT2API|invoke>`
+  }).filter(Boolean).join('')
+
+  return invokes ? `<|CHAT2API|tool_calls>${invokes}</|CHAT2API|tool_calls>` : ''
+}
+
+function safeParseJson(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function convertNativeToolCallsFromParts(cachedParts: any[]): string {
+  const xmlParts: string[] = []
+  for (const part of cachedParts) {
+    if (!Array.isArray(part.content)) continue
+    for (const item of part.content) {
+      if (item.type === 'tool_calls' && Array.isArray(item.tool_calls) && item.tool_calls.length > 0) {
+        xmlParts.push(convertNativeToolCallsToXml(item.tool_calls))
+      }
+    }
+  }
+  return xmlParts.join('')
+}
+
 export class GLMStreamHandler {
   private conversationId: string = ''
   private model: string
@@ -708,6 +703,7 @@ export class GLMStreamHandler {
   private onEnd?: () => void
   private toolStreamParser?: ToolStreamParser
   private toolCallingPlan?: ToolCallingPlan
+  private emittedNativeToolCallIds = new Set<string>()
 
   constructor(model: string, onEnd?: () => void, initialConversationId?: string, toolCallingPlan?: ToolCallingPlan) {
     this.model = model
@@ -720,12 +716,13 @@ export class GLMStreamHandler {
     }
   }
 
-  async handleStream(stream: any): Promise<PassThrough> {
+  async handleStream(stream: any, response?: AxiosResponse): Promise<PassThrough> {
     const transStream = new PassThrough()
     const cachedParts: any[] = []
     let sentContent = ''
     let sentReasoning = ''
     let sentRole = false
+    let finished = false
 
     transStream.write(
       `data: ${JSON.stringify({
@@ -737,6 +734,56 @@ export class GLMStreamHandler {
       })}\n\n`
     )
 
+    const finishStream = (delta: Record<string, unknown> = {}, includeUsage: boolean = false): void => {
+      if (finished) return
+      finished = true
+
+      const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
+      const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
+      for (const outChunk of flushChunks) {
+        transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+      }
+
+      const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
+      const inspection = this.toolCallingPlan && this.toolStreamParser
+        ? inspectStreamAssistantOutput({
+            plan: this.toolCallingPlan,
+            observation: this.toolStreamParser.getObservation(),
+            finishReason,
+          })
+        : { ok: true as const, outcome: finishReason === 'tool_calls' ? 'tool_calls' : 'content' }
+
+      if (!inspection.ok) {
+        transStream.write(
+          `data: ${JSON.stringify({
+            ...baseChunk,
+            choices: [{
+              index: 0,
+              delta: {
+                content: `Error: ${inspection.error}`,
+              },
+              finish_reason: null,
+            }],
+            created: this.created,
+          })}\n\n`
+        )
+        delta = {}
+      }
+
+      transStream.write(
+        `data: ${JSON.stringify({
+          id: this.conversationId,
+          model: this.model,
+          object: 'chat.completion.chunk',
+          choices: [{ index: 0, delta, finish_reason: inspection.ok ? finishReason : 'stop' }],
+          ...(includeUsage ? { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } : {}),
+          created: this.created,
+        })}\n\n`
+      )
+      transStream.end('data: [DONE]\n\n')
+      this.onEnd?.()
+    }
+
     const parser = createParser({
       onEvent: (event: any) => {
         try {
@@ -746,17 +793,18 @@ export class GLMStreamHandler {
             this.conversationId = result.conversation_id
           }
 
-          if (result.status !== 'finish' && result.status !== 'intervene') {
-            if (result.parts) {
-              result.parts.forEach((part: any) => {
-                const index = cachedParts.findIndex((p) => p.logic_id === part.logic_id)
-                if (index !== -1) {
-                  cachedParts[index] = part
-                } else {
-                  cachedParts.push(part)
-                }
-              })
-            }
+          if (result.parts) {
+            result.parts.forEach((part: any) => {
+              const index = cachedParts.findIndex((p) => p.logic_id === part.logic_id)
+              if (index !== -1) {
+                cachedParts[index] = mergeGLMPart(cachedParts[index], part)
+              } else {
+                cachedParts.push(part)
+              }
+            })
+          }
+
+          if (result.status !== 'intervene') {
 
             const searchMap = new Map<string, any>()
             cachedParts.forEach((part) => {
@@ -834,17 +882,58 @@ export class GLMStreamHandler {
               )
             }
 
-            const chunk = fullText.substring(sentContent.length)
-            if (chunk) {
-              sentContent += chunk
+            const deltaDecision = resolveGLMContentDelta({
+              previousContent: sentContent,
+              nextContent: fullText,
+              toolCallingPlan: this.toolCallingPlan,
+              toolStreamParser: this.toolStreamParser,
+            })
+            const chunk = deltaDecision.shouldEmit ? deltaDecision.chunk : ''
+            if (deltaDecision.shouldEmit) {
+              sentContent = fullText
             }
-            
+            if (chunk) {
+              if (chunk.includes('<|CHAT2API|') || chunk.includes('<tool_calls>')) {
+                console.log('[GLM] Tool call marker detected in chunk:', chunk.substring(0, 200))
+              }
+            }
+
+            // Log unhandled content types and convert native GLM tool_calls to CHAT2API XML
+            let nativeToolCallsXml = ''
+            for (const part of cachedParts) {
+              if (!Array.isArray(part.content)) continue
+              for (const item of part.content) {
+                if (item.type === 'tool_calls' && Array.isArray(item.tool_calls)) {
+                  const newCalls = item.tool_calls.filter(
+                    (tc: any) => !this.emittedNativeToolCallIds.has(tc.id || tc.call_id || '')
+                  )
+                  if (newCalls.length > 0) {
+                    console.log('[GLM] Native tool_calls detected:', JSON.stringify(newCalls).substring(0, 300))
+                    for (const tc of newCalls) {
+                      const id = tc.id || tc.call_id || ''
+                      if (id) this.emittedNativeToolCallIds.add(id)
+                    }
+                    nativeToolCallsXml += convertNativeToolCallsToXml(newCalls)
+                  }
+                } else if (!['text', 'think', 'image', 'code', 'execution_output', 'tool_result', 'tool_calls'].includes(item.type)) {
+                  console.log('[GLM] Unhandled content type:', item.type, 'keys:', Object.keys(item).join(', '))
+                }
+              }
+            }
+
+            // Append native tool_calls XML to chunk for ToolStreamParser processing.
+            // Prepend \n so the marker satisfies isProtocolBoundary (requires preceding whitespace).
+            const effectiveChunk = chunk + (nativeToolCallsXml ? '\n' + nativeToolCallsXml : '')
+
             // Process tool call interception with shared parser buffering.
             const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
-            const outputChunks = this.toolStreamParser?.push(chunk, baseChunk, !sentRole) ?? (
-              chunk ? [{
+            if (deltaDecision.resetParser && this.toolCallingPlan) {
+              this.toolStreamParser = new ToolStreamParser(this.toolCallingPlan)
+            }
+            const outputChunks = this.toolStreamParser?.push(effectiveChunk, baseChunk, !sentRole) ?? (
+              effectiveChunk ? [{
                 ...baseChunk,
-                choices: [{ index: 0, delta: { ...(!sentRole ? { role: 'assistant' } : {}), content: chunk }, finish_reason: null }],
+                choices: [{ index: 0, delta: { ...(!sentRole ? { role: 'assistant' } : {}), content: effectiveChunk }, finish_reason: null }],
               }] : []
             )
 
@@ -853,38 +942,16 @@ export class GLMStreamHandler {
             }
 
             if (outputChunks.length > 0) sentRole = true
-          } else {
-            // Flush any remaining tool call buffer before finishing
-            const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
-            const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-            for (const outChunk of flushChunks) {
-              transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+            if (result.status === 'finish') {
+              finishStream({}, true)
             }
-
-            // Determine finish_reason based on whether we had tool calls
-            const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-
-            transStream.write(
-              `data: ${JSON.stringify({
-                id: this.conversationId,
-                model: this.model,
-                object: 'chat.completion.chunk',
-                choices: [
-                  {
-                    index: 0,
-                    delta:
-                      result.status === 'intervene' && result.last_error?.intervene_text
-                        ? { content: '\n\n' + result.last_error.intervene_text }
-                        : {},
-                    finish_reason: finishReason,
-                  },
-                ],
-                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-                created: this.created,
-              })}\n\n`
+          } else {
+            finishStream(
+              result.status === 'intervene' && result.last_error?.intervene_text
+                ? { content: '\n\n' + result.last_error.intervene_text }
+                : {},
+              true,
             )
-            transStream.end('data: [DONE]\n\n')
-            this.onEnd?.()
           }
         } catch (err) {
           console.error('[GLM] Stream parse error:', err)
@@ -892,61 +959,28 @@ export class GLMStreamHandler {
       },
     })
 
+    const inputStream = this.createDecodedStream(stream, response, (text) => parser.feed(text), finishStream)
+    if (!inputStream) return transStream
+
     const decoder = new TextDecoder('utf-8')
-    stream.on('data', (buffer: Buffer) => parser.feed(decoder.decode(buffer, { stream: true })))
+    inputStream.on('data', (buffer: Buffer) => parser.feed(decoder.decode(buffer, { stream: true })))
 
     // Handle stream errors - ensure proper cleanup
-    stream.once('error', (err: Error) => {
+    inputStream.once('error', (err: Error) => {
       console.error('[GLM] Stream error:', err.message)
-      // Flush any remaining tool call buffer
-      const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
-      const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-      for (const outChunk of flushChunks) {
-        transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
-      }
-      const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-      transStream.write(
-        `data: ${JSON.stringify({
-          id: this.conversationId,
-          model: this.model,
-          object: 'chat.completion.chunk',
-          choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-          created: this.created,
-        })}\n\n`
-      )
-      transStream.end('data: [DONE]\n\n')
-      this.onEnd?.()
+      finishStream()
     })
 
     // Handle stream close - ensure proper cleanup if not already finished
-    stream.once('close', () => {
+    inputStream.once('close', () => {
       console.log('[GLM] Stream closed')
-      // Only send finish if we haven't already
-      if (!transStream.closed) {
-        const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
-        const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
-        for (const outChunk of flushChunks) {
-          transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
-        }
-        const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-        transStream.write(
-          `data: ${JSON.stringify({
-            id: this.conversationId,
-            model: this.model,
-            object: 'chat.completion.chunk',
-            choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-            created: this.created,
-          })}\n\n`
-        )
-        transStream.end('data: [DONE]\n\n')
-        this.onEnd?.()
-      }
+      finishStream()
     })
 
     return transStream
   }
 
-  async handleNonStream(stream: any): Promise<any> {
+  async handleNonStream(stream: any, response?: AxiosResponse): Promise<any> {
     return new Promise((resolve, reject) => {
       const cachedParts: any[] = []
 
@@ -959,20 +993,20 @@ export class GLMStreamHandler {
               this.conversationId = result.conversation_id
             }
 
-            if (result.status !== 'finish') {
-              if (result.parts) {
-                // Accumulate parts (same as handleStream), don't replace
-                // GLM sends incremental parts, each event only contains new content
-                result.parts.forEach((part: any) => {
-                  const index = cachedParts.findIndex((p) => p.logic_id === part.logic_id)
-                  if (index !== -1) {
-                    cachedParts[index] = part
-                  } else {
-                    cachedParts.push(part)
-                  }
-                })
-              }
-            } else {
+            if (result.parts) {
+              // Accumulate parts (same as handleStream), including terminal events.
+              // GLM may put the final text/tool payload on status=finish.
+              result.parts.forEach((part: any) => {
+                const index = cachedParts.findIndex((p) => p.logic_id === part.logic_id)
+                if (index !== -1) {
+                  cachedParts[index] = mergeGLMPart(cachedParts[index], part)
+                } else {
+                  cachedParts.push(part)
+                }
+              })
+            }
+
+            if (result.status === 'finish') {
               const searchMap = new Map<string, any>()
               cachedParts.forEach((part) => {
                 if (!part.content || !Array.isArray(part.content)) return
@@ -1035,9 +1069,9 @@ export class GLMStreamHandler {
                 if (partReasoning) fullReasoning += (fullReasoning.length > 0 ? '\n' : '') + partReasoning
               })
 
-              const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-                ? { content: fullText, toolCalls: [] }
-                : parseToolCallsFromText(fullText, 'glm')
+              const cleanContent = fullText.trim()
+              const nonStreamNativeXml = convertNativeToolCallsFromParts(cachedParts)
+              const combinedContent = [cleanContent, nonStreamNativeXml].filter(Boolean).join('\n\n')
 
               resolve({
                 id: this.conversationId,
@@ -1048,11 +1082,10 @@ export class GLMStreamHandler {
                     index: 0,
                     message: {
                       role: 'assistant',
-                      content: toolCalls.length > 0 ? null : cleanContent.trim(),
+                      content: combinedContent,
                       reasoning_content: fullReasoning || null,
-                      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
                     },
-                    finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+                    finish_reason: 'stop',
                   },
                 ],
                 usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
@@ -1065,9 +1098,32 @@ export class GLMStreamHandler {
         },
       })
 
-      stream.on('data', (buffer: Buffer) => parser.feed(buffer.toString()))
-      stream.once('error', reject)
-      stream.once('close', () => {
+      const inputStream = this.createDecodedStream(
+        stream,
+        response,
+        (text) => parser.feed(text),
+        () => {
+          resolve({
+            id: this.conversationId,
+            model: this.model,
+            object: 'chat.completion',
+            choices: [
+              {
+                index: 0,
+                message: { role: 'assistant', content: '', reasoning_content: null },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+            created: Math.floor(Date.now() / 1000),
+          })
+        },
+      )
+      if (!inputStream) return
+
+      inputStream.on('data', (buffer: Buffer) => parser.feed(buffer.toString()))
+      inputStream.once('error', reject)
+      inputStream.once('close', () => {
         resolve({
           id: this.conversationId,
           model: this.model,
@@ -1086,6 +1142,53 @@ export class GLMStreamHandler {
     })
   }
 
+  private createDecodedStream(
+    stream: any,
+    response: AxiosResponse | undefined,
+    onDecodedZstd: (text: string) => void,
+    onZstdEnd?: () => void,
+  ): any | null {
+    const contentEncoding = String(response?.headers?.['content-encoding'] || '').toLowerCase()
+    if (contentEncoding === 'gzip') {
+      console.log('[GLM] Decompressing gzip stream...')
+      return stream.pipe(createGunzip())
+    }
+    if (contentEncoding === 'deflate') {
+      console.log('[GLM] Decompressing deflate stream...')
+      return stream.pipe(createInflate())
+    }
+    if (contentEncoding === 'br') {
+      console.log('[GLM] Decompressing brotli stream...')
+      return stream.pipe(createBrotliDecompress())
+    }
+    if (contentEncoding === 'zstd') {
+      console.log('[GLM] Decompressing zstd stream...')
+      const chunks: Buffer[] = []
+      stream.on('data', (chunk: Buffer) => chunks.push(chunk))
+      stream.once('end', () => {
+        try {
+          const compressedData = Buffer.concat(chunks)
+          ZstdCodec.run((zstd) => {
+            const simple = new zstd.Simple()
+            const decompressed = simple.decompress(compressedData)
+            onDecodedZstd(Buffer.from(decompressed).toString('utf8'))
+            onZstdEnd?.()
+          })
+        } catch (err) {
+          console.error('[GLM] Zstd decompression error:', err)
+          onZstdEnd?.()
+        }
+      })
+      stream.once('error', (err: Error) => {
+        console.error('[GLM] Stream error:', err)
+        onZstdEnd?.()
+      })
+      return null
+    }
+
+    return stream
+  }
+
   getConversationId(): string {
     return this.conversationId
   }
@@ -1094,4 +1197,167 @@ export class GLMStreamHandler {
 export const glmAdapter = {
   GLMAdapter,
   GLMStreamHandler,
+}
+
+function resolveGLMContentDelta(input: {
+  previousContent: string
+  nextContent: string
+  toolCallingPlan?: ToolCallingPlan
+  toolStreamParser?: ToolStreamParser
+}): GLMContentDeltaDecision {
+  const { previousContent, nextContent, toolCallingPlan, toolStreamParser } = input
+  if (nextContent === previousContent) {
+    return { shouldEmit: false, chunk: '', resetParser: false }
+  }
+
+  if (nextContent.startsWith(previousContent)) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent.slice(previousContent.length),
+      resetParser: false,
+    }
+  }
+
+  const isManagedToolRewrite = Boolean(
+    toolCallingPlan
+    && toolStreamParser
+    && (
+      toolStreamParser.isBuffering()
+      || containsManagedToolMarker(previousContent)
+      || containsManagedToolMarker(nextContent)
+    ),
+  )
+
+  if (isManagedToolRewrite) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent,
+      resetParser: true,
+    }
+  }
+
+  if (nextContent.length > previousContent.length) {
+    return {
+      shouldEmit: true,
+      chunk: nextContent.substring(previousContent.length),
+      resetParser: false,
+    }
+  }
+
+  return { shouldEmit: false, chunk: '', resetParser: false }
+}
+
+function containsManagedToolMarker(value: string): boolean {
+  return value.includes('<|CHAT2API|') || value.includes('<tool_calls>')
+}
+
+function appendToolResultContinuationAnchor(content: string, deltaMessages: GLMMessage[]): string {
+  if (deltaMessages.length === 0) return content
+
+  const lastMessage = deltaMessages[deltaMessages.length - 1]
+  const hasTrailingToolResult = lastMessage.role === 'tool' && typeof lastMessage.tool_call_id === 'string'
+  const hasFreshUserTurn = deltaMessages.some((message, index) => index > 0 && message.role === 'user')
+
+  if (!hasTrailingToolResult || hasFreshUserTurn) {
+    return content
+  }
+
+  return `${content}\n\n${TOOL_RESULT_CONTINUATION_ANCHOR}`
+}
+
+function mergeGLMPart(existingPart: any, incomingPart: any): any {
+  const merged = {
+    ...existingPart,
+    ...incomingPart,
+  }
+
+  if (existingPart?.meta_data || incomingPart?.meta_data) {
+    merged.meta_data = {
+      ...(existingPart?.meta_data ?? {}),
+      ...(incomingPart?.meta_data ?? {}),
+    }
+  }
+
+  if (Array.isArray(existingPart?.content) && Array.isArray(incomingPart?.content)) {
+    merged.content = mergeGLMContentItems(existingPart.content, incomingPart.content)
+  }
+
+  return merged
+}
+
+function mergeGLMContentItems(existingItems: any[], incomingItems: any[]): any[] {
+  if (incomingItems.length === 0) return existingItems
+  if (existingItems.length === 0) return incomingItems
+
+  if (canMergeSingleIncrementalTextItem(existingItems, incomingItems, 'text', 'text')) {
+    return [mergeSingleIncrementalTextItem(existingItems[0], incomingItems[0], 'text')]
+  }
+
+  if (canMergeSingleIncrementalTextItem(existingItems, incomingItems, 'think', 'think')) {
+    return [mergeSingleIncrementalTextItem(existingItems[0], incomingItems[0], 'think')]
+  }
+
+  if (canMergeSingleIncrementalTextItem(existingItems, incomingItems, 'code', 'code')) {
+    return [mergeSingleIncrementalTextItem(existingItems[0], incomingItems[0], 'code')]
+  }
+
+  if (canMergeSingleIncrementalTextItem(existingItems, incomingItems, 'execution_output', 'content')) {
+    return [mergeSingleIncrementalTextItem(existingItems[0], incomingItems[0], 'content')]
+  }
+
+  if (isExactContentSuffix(existingItems, incomingItems)) {
+    return existingItems
+  }
+
+  return [...existingItems, ...incomingItems]
+}
+
+function canMergeSingleIncrementalTextItem(
+  existingItems: any[],
+  incomingItems: any[],
+  type: string,
+  valueKey: 'text' | 'think' | 'code' | 'content',
+): boolean {
+  return existingItems.length === 1
+    && incomingItems.length === 1
+    && existingItems[0]?.type === type
+    && incomingItems[0]?.type === type
+    && typeof existingItems[0]?.[valueKey] === 'string'
+    && typeof incomingItems[0]?.[valueKey] === 'string'
+}
+
+function mergeSingleIncrementalTextItem(
+  existingItem: any,
+  incomingItem: any,
+  valueKey: 'text' | 'think' | 'code' | 'content',
+): any {
+  const previousValue = existingItem[valueKey] as string
+  const nextValue = incomingItem[valueKey] as string
+
+  if (nextValue.startsWith(previousValue) || previousValue.startsWith(nextValue)) {
+    return {
+      ...existingItem,
+      ...incomingItem,
+      [valueKey]: nextValue,
+    }
+  }
+
+  return {
+    ...existingItem,
+    ...incomingItem,
+    [valueKey]: previousValue + nextValue,
+  }
+}
+
+function isExactContentSuffix(existingItems: any[], incomingItems: any[]): boolean {
+  if (incomingItems.length > existingItems.length) return false
+
+  const offset = existingItems.length - incomingItems.length
+  for (let index = 0; index < incomingItems.length; index += 1) {
+    if (JSON.stringify(existingItems[offset + index]) !== JSON.stringify(incomingItems[index])) {
+      return false
+    }
+  }
+
+  return true
 }

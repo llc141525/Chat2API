@@ -4,6 +4,7 @@ import type { AppConfig } from '@/types/electron'
 import i18n from '@/i18n'
 
 export type Theme = 'light' | 'dark' | 'system'
+export type AccentColor = 'sage' | 'lavender' | 'sand' | 'rose' | 'slate' | 'amber'
 export type Language = 'zh-CN' | 'en-US'
 export type CloseBehavior = 'minimize' | 'close' | 'ask'
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -12,6 +13,8 @@ export type OAuthProxyMode = 'system' | 'none'
 interface SettingsState {
   theme: Theme
   setTheme: (theme: Theme) => void
+  accentColor: AccentColor
+  setAccentColor: (color: AccentColor) => void
   sidebarCollapsed: boolean
   toggleSidebar: () => void
   setSidebarCollapsed: (collapsed: boolean) => void
@@ -52,6 +55,8 @@ export const useSettingsStore = create<SettingsState>()(
     (set, get) => ({
       theme: 'system',
       setTheme: (theme) => set({ theme }),
+      accentColor: 'sage',
+      setAccentColor: (accentColor) => set({ accentColor }),
       sidebarCollapsed: false,
       toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
       setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),

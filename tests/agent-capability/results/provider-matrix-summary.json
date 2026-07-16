@@ -1,0 +1,16 @@
+{
+    "provider":  "qwen",
+    "model":  "qwen/Qwen3.7-Max",
+    "run":  1,
+    "exitCode":  0,
+    "classification":  "accepted",
+    "accepted":  true,
+    "probeScript":  ".\\tests\\agent-capability\\verify-opencode-capability.ps1",
+    "artifacts":  {
+                      "stdout":  ".\\tests\\agent-capability\\results\\qwen\\qwen_Qwen3.7-Max__run1\\probe-stdout.txt",
+                      "stderr":  ".\\tests\\agent-capability\\results\\qwen\\qwen_Qwen3.7-Max__run1\\probe-stderr.txt",
+                      "result":  ".\\tests\\agent-capability\\results\\qwen\\qwen_Qwen3.7-Max__run1\\result.json",
+                      "events":  ".\\tests\\agent-capability\\results\\qwen\\qwen_Qwen3.7-Max__run1\\opencode-events.ndjson",
+                      "devLog":  ".\\tests\\agent-capability\\results\\qwen\\qwen_Qwen3.7-Max__run1\\redacted-dev-log.txt"
+                  }
+}

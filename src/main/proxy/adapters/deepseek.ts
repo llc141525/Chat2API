@@ -1,4 +1,9 @@
 /**
+ * ADR-001: Tool prompt injection is owned by ToolCallingEngine.
+ * This file is a Provider Adapter — it must NEVER import
+ * hasToolPromptInjected, toolsToSystemPrompt, TOOL_WRAP_HINT,
+ * or shouldInjectToolPrompt.
+ *
  * DeepSeek Adapter
  * Implements DeepSeek web API protocol
  * 
@@ -7,10 +12,10 @@
  */
 
 import axios, { AxiosResponse } from 'axios'
-import { getDeepSeekHash } from '../../lib/challenge'
-import type { Account, Provider } from '../../store/types'
-import { resolveDeepSeekChatOptions } from './providerModelOptions'
-import { getProviderToolProfile } from '../toolCalling/providerProfiles'
+import { getDeepSeekHash } from '../../lib/challenge.ts'
+import type { Account, Provider } from '../../store/types.ts'
+import { resolveDeepSeekChatOptions } from './providerModelOptions.ts'
+import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
 
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api'
 
@@ -65,6 +70,7 @@ interface ChatCompletionRequest {
   reasoning_effort?: 'low' | 'medium' | 'high'
   tools?: any[]
   tool_choice?: any
+  parentMessageId?: string
 }
 
 const tokenCache = new Map<string, TokenInfo>()
@@ -300,9 +306,13 @@ export class DeepSeekAdapter {
       }
       // Handle tool response message
       else if (message.role === 'tool' && message.tool_call_id) {
+        const rawContent = String(message.content || '')
+        const truncated = rawContent.length > 2000
+          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+          : rawContent
         text = toolProfile.formatToolResult({
           toolCallId: message.tool_call_id,
-          content: String(message.content || ''),
+          content: truncated,
         })
       }
       else if (Array.isArray(message.content)) {
@@ -318,8 +328,26 @@ export class DeepSeekAdapter {
 
     if (processedMessages.length === 0) return ''
 
-    // For multi-turn mode, only send the last user message
+    // For multi-turn mode, find the last assistant tool_call in ORIGINAL messages
+    // and send everything from there as delta (preserving assistant tool_call metadata)
     if (isMultiTurn) {
+      let lastAssistantToolIdx = -1
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'assistant' && messages[i].tool_calls && messages[i].tool_calls.length > 0) {
+          lastAssistantToolIdx = i
+          break
+        }
+      }
+
+      if (lastAssistantToolIdx !== -1) {
+        const parts: string[] = []
+        for (let i = lastAssistantToolIdx; i < processedMessages.length; i++) {
+          parts.push(processedMessages[i].text)
+        }
+        return `<｜User｜>${parts.join('\n\n')}`
+      }
+
+      // Fallback: only send the last user message + tool results
       let lastUserIdx = -1
       for (let i = processedMessages.length - 1; i >= 0; i--) {
         if (processedMessages[i].role === 'user') {
@@ -327,7 +355,7 @@ export class DeepSeekAdapter {
           break
         }
       }
-      
+
       if (lastUserIdx !== -1) {
         const lastUserMsg = processedMessages[lastUserIdx]
         let text = lastUserMsg.text
@@ -367,7 +395,9 @@ export class DeepSeekAdapter {
         }
         return block.text
       })
-      .join('')
+      // Keep DeepSeek role markers adjacent to their own content, but separate
+      // consecutive turns so the managed tool contract does not run into the next user block.
+      .join('\n\n')
       .replace(/!\[.+\]\(.+\)/g, '')
   }
 
@@ -384,7 +414,71 @@ export class DeepSeekAdapter {
     // Note: Tool prompt injection is already handled by Forwarder.transformRequestForPromptToolUse()
     const messages = [...request.messages]
 
+    let prompt = this.messagesToPrompt(messages, !!request.parentMessageId)
+
+    const { modelType, searchEnabled, thinkingEnabled } = resolveDeepSeekChatOptions(request, prompt)
+
+    if (request.web_search || request.model.toLowerCase().includes('search')) {
+      console.log('[DeepSeek] Web search enabled')
+    }
+
+    if (request.reasoning_effort || thinkingEnabled) {
+      console.log('[DeepSeek] Reasoning mode enabled, effort:', request.reasoning_effort)
+    }
+
+    const response = await axios.post(
+      `${DEEPSEEK_API_BASE}/v0/chat/completion`,
+      {
+        chat_session_id: sessionId,
+        parent_message_id: request.parentMessageId || null,
+        prompt,
+        model_type: modelType,
+        ref_file_ids: [],
+        search_enabled: searchEnabled,
+        thinking_enabled: thinkingEnabled,
+        preempt: false,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...FAKE_HEADERS,
+          Referer: `https://chat.deepseek.com/a/chat/s/${sessionId}`,
+          Cookie: generateCookie(),
+          'X-Ds-Pow-Response': challengeAnswer,
+        },
+        timeout: 120000,
+        validateStatus: () => true,
+        responseType: 'stream',
+      }
+    )
+
+    return { response, sessionId }
+  }
+
+  async chatCompletionWithAssembly(
+    assembly: import('../RequestAssembly.ts').RequestAssembly,
+    request: ChatCompletionRequest
+  ): Promise<{ response: import('axios').AxiosResponse; sessionId: string }> {
+    const token = await this.acquireToken()
+
+    const sessionId = await this.createSession()
+    console.log('[DeepSeek] Created new session:', sessionId)
+
+    const challenge = await this.getChallenge('/api/v0/chat/completion')
+    const challengeAnswer = await this.calculateChallengeAnswer(challenge)
+
+    // Build messages from assembly (already clean, no embedded tool contracts)
+    const messages = [...assembly.messages] as DeepSeekMessage[]
+
     let prompt = this.messagesToPrompt(messages, false)
+
+    // Enhance prompt with summary at the start and tool contract at the end
+    if (assembly.summaryText) {
+      prompt = `${assembly.summaryText}\n\n${prompt}`
+    }
+    if (assembly.toolManifest) {
+      prompt = `${prompt}\n\n${assembly.toolManifest.renderedPrompt}`
+    }
 
     const { modelType, searchEnabled, thinkingEnabled } = resolveDeepSeekChatOptions(request, prompt)
 

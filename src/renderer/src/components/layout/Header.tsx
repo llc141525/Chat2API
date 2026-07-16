@@ -12,7 +12,7 @@ export function Header() {
   const { language, setLanguage } = useSettingsStore()
   const [proxyEnabled, setProxyEnabled] = useState(false)
   const [proxyLoading, setProxyLoading] = useState(false)
-  const [port, setPort] = useState(8080)
+  const [port, setPort] = useState(0)
   const [host, setHost] = useState('127.0.0.1')
 
   useEffect(() => {
@@ -32,12 +32,12 @@ export function Header() {
 
     window.electronAPI.config?.get?.().then((config) => {
       if (!config) return
-      setPort(config.proxyPort || 8080)
+      setPort(config.proxyPort ?? 0)
       setHost(config.proxyHost || '127.0.0.1')
     })
 
     const unsubscribeConfig = window.electronAPI.config?.onConfigChanged?.((config) => {
-      setPort(config.proxyPort || 8080)
+      setPort(config.proxyPort ?? 0)
       setHost(config.proxyHost || '127.0.0.1')
     })
     
@@ -68,7 +68,7 @@ export function Header() {
   }
 
   return (
-    <header className="glass-topbar flex items-center justify-between px-4 drag-region h-12">
+    <header className="glass-topbar relative z-10 flex items-center justify-between px-4 drag-region h-12">
       <div className="flex items-center gap-3 no-drag">
         <div className="sidebar-logo-icon">
           <img 

@@ -12,6 +12,7 @@ export interface ProviderStats {
   status: ProviderStatus
   requestCount: number
   successCount: number
+  totalTokens?: number
   quotaUsed?: number
   quotaTotal?: number
   latency?: number
@@ -42,22 +43,22 @@ export function ProviderStatusCard({ providers, className }: ProviderStatusCardP
   const getStatusColor = (status: ProviderStatus) => {
     switch (status) {
       case 'online':
-        return 'bg-green-500'
+        return 'status-dot-online'
       case 'offline':
-        return 'bg-red-500'
+        return 'status-dot-offline'
       default:
-        return 'bg-yellow-500'
+        return 'status-dot-unknown'
     }
   }
 
-  const getStatusBadge = (status: ProviderStatus) => {
+  const getStatusClass = (status: ProviderStatus) => {
     switch (status) {
       case 'online':
-        return 'default'
+        return 'status-online'
       case 'offline':
-        return 'destructive'
+        return 'status-offline'
       default:
-        return 'secondary'
+        return 'status-unknown'
     }
   }
 
@@ -70,11 +71,6 @@ export function ProviderStatusCard({ providers, className }: ProviderStatusCardP
       default:
         return t('providers.unknown')
     }
-  }
-
-  const getSuccessRate = (success: number, total: number) => {
-    if (total === 0) return 0
-    return Math.round((success / total) * 100)
   }
 
   const scrollHeight = ITEM_HEIGHT * 7 + GAP * 6
@@ -98,11 +94,6 @@ export function ProviderStatusCard({ providers, className }: ProviderStatusCardP
           <ScrollArea className="pr-2" style={{ height: scrollHeight }}>
             <div className="space-y-2">
               {providers.map((provider) => {
-                const successRate = getSuccessRate(
-                  provider.successCount,
-                  provider.requestCount
-                )
-
                 return (
                   <div
                     key={provider.id}
@@ -118,7 +109,7 @@ export function ProviderStatusCard({ providers, className }: ProviderStatusCardP
                         />
                         <span className="font-medium text-sm">{provider.name}</span>
                       </div>
-                      <Badge variant={getStatusBadge(provider.status) as "default" | "secondary" | "destructive"} className="text-xs">
+                      <Badge variant="outline" className={cn('text-xs status-chip', getStatusClass(provider.status))}>
                         {getStatusIcon(provider.status)}
                         <span className="ml-1">{getStatusText(provider.status)}</span>
                       </Badge>
@@ -129,8 +120,8 @@ export function ProviderStatusCard({ providers, className }: ProviderStatusCardP
                         <p className="font-medium">{provider.requestCount.toLocaleString()}</p>
                       </div>
                       <div>
-                        <span className="text-muted-foreground">{t('dashboard.successRate')}</span>
-                        <p className="font-medium text-green-500">{successRate}%</p>
+                        <span className="text-muted-foreground">{t('dashboard.totalTokens')}</span>
+                        <p className="font-medium">{(provider.totalTokens || 0).toLocaleString()}</p>
                       </div>
                       <div>
                         <span className="text-muted-foreground">{t('providers.latency')}</span>

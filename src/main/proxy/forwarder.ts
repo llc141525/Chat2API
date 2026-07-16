@@ -4,46 +4,156 @@
  */
 
 import axios, { AxiosRequestConfig, AxiosResponse, AxiosError } from 'axios'
-import http2 from 'http2'
-import { PassThrough } from 'stream'
 import { Account, Provider } from '../store/types'
 import { ForwardResult, ChatCompletionRequest, ProxyContext } from './types'
 import { proxyStatusManager } from './status'
 import { storeManager } from '../store/store'
-import { DeepSeekAdapter } from './adapters/deepseek'
-import { DeepSeekStreamHandler } from './adapters/deepseek-stream'
-import { GLMAdapter, GLMStreamHandler } from './adapters/glm'
-import { KimiAdapter, KimiStreamHandler } from './adapters/kimi'
-import { MimoAdapter, MimoStreamHandler } from './adapters/mimo'
-import { QwenAdapter, QwenStreamHandler } from './adapters/qwen'
-import { QwenAiAdapter, QwenAiStreamHandler } from './adapters/qwen-ai'
-import { ZaiAdapter, ZaiStreamHandler } from './adapters/zai'
-import { MiniMaxAdapter, MiniMaxStreamHandler } from './adapters/minimax'
-import { PerplexityAdapter } from './adapters/perplexity'
-import { PerplexityStreamHandler } from './adapters/perplexity-stream'
 import { ToolCallingEngine } from './toolCalling/ToolCallingEngine'
+import { buildRequestAssembly, type RequestAssembly } from './RequestAssembly.ts'
 import type { ToolCallingTransformResult } from './toolCalling/types'
 import { sessionManager } from './sessionManager'
 import {
   createContextManagementService,
   SummaryGenerator,
   type ChatMessage as ContextChatMessage,
-} from './services/contextManagementService'
+} from './services/contextManagementService.ts'
+import { preserveContextManagedMessageMetadata } from './contextMessageMetadata.ts'
+import { sanitizeMessagesForSummary, detectSummaryContamination } from './services/summarySanitizer.ts'
+import { evaluateSummaryInputQuality } from './services/summaryInputQuality.ts'
+import { ProviderRuntime } from './services/ProviderRuntime.ts'
+import {
+  buildServerSummaryEpochSource,
+  forkProviderConversationContext,
+} from './sessionBoundary.ts'
+import {
+  getConversationState,
+  getProviderConversationState,
+  setConversationState,
+  setProviderConversationState,
+  shouldUseProviderConversationFallback,
+  type ConversationState,
+} from './services/providerConversationState.ts'
+import {
+  buildPromptBudgetPolicyInput as buildPromptBudgetPolicyInputBase,
+  decidePromptBudgetPolicy,
+  getPromptBudgetSnapshot,
+  recordPromptBudgetSnapshot,
+  type PromptBudgetPolicyDecision,
+  type PromptBudgetPolicyInput,
+  type PromptBudgetPolicySnapshot,
+  type PromptRefreshMode,
+} from './promptBudgetPolicy.ts'
+import type { ContextProcessResult } from './services/contextManagementService.ts'
+
+export {
+  CONVERSATION_STATE_TTL,
+  conversationStateCache,
+  getConversationState,
+  getProviderConversationState,
+  setConversationState,
+  setProviderConversationState,
+  shouldUseProviderConversationFallback,
+  type ConversationState,
+} from './services/providerConversationState.ts'
 
 function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()
 }
 
-type ProviderForwarder = {
-  name: string
-  matches: (provider: Provider) => boolean
-  forward: (
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ) => Promise<ForwardResult>
+function getSummaryTextContent(content: ContextChatMessage['content']): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+
+  return content
+    .filter(part => part?.type === 'text' && typeof part.text === 'string')
+    .map(part => part.text)
+    .join('\n')
+}
+
+function hasSummarizableSummaryInput(messages: ContextChatMessage[]): boolean {
+  return messages.some((message) => {
+    if (message.role === 'system') return false
+    if (message.role === 'tool') return false
+    if (message.role === 'assistant' && !getSummaryTextContent(message.content).trim() && (message as any).tool_calls?.length) return false
+    return getSummaryTextContent(message.content).trim().length > 0
+  })
+}
+
+const REGISTERED_PROVIDER_RUNTIME_PLUGIN_IDS = new Set([
+  'deepseek',
+  'glm',
+  'kimi',
+  'mimo',
+  'minimax',
+  'perplexity',
+  'qwen',
+  'qwen-ai',
+  'zai',
+])
+
+export function buildPromptBudgetPolicyInput(input: {
+  request: ChatCompletionRequest
+  context: ProxyContext
+  provider: Provider
+  account: Account
+  actualModel: string
+  toolSessionKey: string
+  providerConversationStateKey: string
+  transformed: ToolCallingTransformResult
+  previousSnapshot?: PromptBudgetPolicySnapshot
+  skillFingerprint?: string
+}): PromptBudgetPolicyInput {
+  return buildPromptBudgetPolicyInputBase({
+    requestMessages: input.request.messages,
+    sessionBoundaryReason: input.context.sessionBoundaryReason,
+    providerId: input.provider.id,
+    accountId: input.account.id,
+    actualModel: input.actualModel,
+    toolSessionKey: input.toolSessionKey,
+    providerConversationSessionKey: input.providerConversationStateKey,
+    toolCatalogFingerprint: input.transformed.plan.catalogSnapshot?.fingerprint,
+    hasActiveTools: input.transformed.plan.tools.length > 0,
+    hasManagedToolCapableTurn: input.transformed.plan.mode === 'managed' || input.transformed.plan.shouldParseResponse,
+    previousSnapshot: input.previousSnapshot,
+    skillFingerprint: input.skillFingerprint,
+  })
+}
+
+export function computeQwenPromptBudgetDiagnostics(input: {
+  request: ChatCompletionRequest
+  context: ProxyContext
+  provider: Provider
+  account: Account
+  actualModel: string
+  toolSessionKey: string
+  providerConversationStateKey: string
+  transformed: ToolCallingTransformResult
+  skillFingerprint?: string
+}): { policyInput: PromptBudgetPolicyInput; decision: PromptBudgetPolicyDecision } {
+  const previousSnapshot = getPromptBudgetSnapshot(input.providerConversationStateKey)
+  const policyInput = buildPromptBudgetPolicyInput({
+    ...input,
+    previousSnapshot,
+  })
+  const decision = decidePromptBudgetPolicy(policyInput)
+  recordPromptBudgetSnapshot(input.providerConversationStateKey, {
+    providerId: input.provider.id,
+    modelId: input.actualModel,
+    accountId: input.account.id,
+    toolCatalogFingerprint: input.transformed.plan.catalogSnapshot?.fingerprint,
+    skillFingerprint: input.skillFingerprint,
+  })
+  return { policyInput, decision }
+}
+
+/**
+ * Compact messages for retry after malformed tool output.
+ * Keeps all system messages + last 20 non-system messages to reduce context size.
+ */
+function compactMessagesForRetry(messages: ChatCompletionRequest['messages']): ChatCompletionRequest['messages'] {
+  const systemMessages = messages.filter((m) => m.role === 'system')
+  const nonSystemMessages = messages.filter((m) => m.role !== 'system')
+  return [...systemMessages, ...nonSystemMessages.slice(-20)]
 }
 
 /**
@@ -56,62 +166,51 @@ export class RequestForwarder {
     maxContentLength: Infinity,
   })
 
-  private readonly providerForwarders: ProviderForwarder[] = [
-    {
-      name: 'deepseek',
-      matches: DeepSeekAdapter.isDeepSeekProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardDeepSeek(request, account, provider, actualModel, startTime),
-    },
-    {
-      name: 'glm',
-      matches: GLMAdapter.isGLMProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardGLM(request, account, provider, actualModel, startTime),
-    },
-    {
-      name: 'kimi',
-      matches: KimiAdapter.isKimiProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardKimi(request, account, provider, actualModel, startTime),
-    },
-    {
-      name: 'qwen',
-      matches: QwenAdapter.isQwenProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardQwen(request, account, provider, actualModel, startTime),
-    },
-    {
-      name: 'qwen-ai',
-      matches: QwenAiAdapter.isQwenAiProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardQwenAi(request, account, provider, actualModel, startTime),
-    },
-    {
-      name: 'zai',
-      matches: ZaiAdapter.isZaiProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardZai(request, account, provider, actualModel, startTime),
-    },
-    {
-      name: 'minimax',
-      matches: MiniMaxAdapter.isMiniMaxProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardMiniMax(request, account, provider, actualModel, startTime),
-    },
-    {
-      name: 'mimo',
-      matches: MimoAdapter.isMimoProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardMimo(request, account, provider, actualModel, startTime),
-    },
-    {
-      name: 'perplexity',
-      matches: PerplexityAdapter.isPerplexityProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardPerplexity(request, account, provider, actualModel, startTime),
-    },
-  ]
+  private providerRuntime = new ProviderRuntime()
+
+  /**
+   * Transform request for prompt-based tool calling
+   */
+  private prepareRequest(
+    request: ChatCompletionRequest,
+    provider?: Provider,
+    context?: ProxyContext,
+    contextResult?: ContextProcessResult,
+    toolSessionKey?: string | null
+  ): { assembly: RequestAssembly; transformed: ToolCallingTransformResult } {
+    const transformed = this.transformRequestForPromptToolUse(request, provider, toolSessionKey)
+    return {
+      assembly: buildRequestAssembly({
+        messages: request.messages,
+        toolManifest: transformed.toolManifest ?? null,
+        sessionBoundaryReason: context?.sessionBoundaryReason,
+        contextResult,
+      }),
+      transformed,
+    }
+  }
+
+  private shouldUseProviderRuntimePilot(provider: Provider): boolean {
+    const providerId = provider.id.toLowerCase()
+    if (!REGISTERED_PROVIDER_RUNTIME_PLUGIN_IDS.has(providerId)) {
+      return false
+    }
+
+    const emergencyFallback = String(process.env.CHAT2API_DEDICATED_PROVIDER_FALLBACK ?? '').toLowerCase()
+    if (['1', 'true', 'yes', 'on', 'all', '*'].includes(emergencyFallback)) {
+      return false
+    }
+    if (new Set(emergencyFallback.split(',').map(value => value.trim()).filter(Boolean)).has(providerId)) {
+      return false
+    }
+
+    return true
+  }
+
+  private shouldConsumeParentChildSessionHandoff(context: ProxyContext): boolean {
+    const boundary = context.sessionBoundaryReason ?? 'normal'
+    return boundary !== 'tool_child' && boundary !== 'subagent_child'
+  }
 
   /**
    * Transform request for prompt-based tool calling
@@ -120,12 +219,13 @@ export class RequestForwarder {
    */
   private transformRequestForPromptToolUse(
     request: ChatCompletionRequest,
-    provider?: Provider
+    provider?: Provider,
+    toolSessionKey?: string | null
   ): ToolCallingTransformResult {
     const config = storeManager.getConfig().toolCallingConfig
     const engine = new ToolCallingEngine(config)
 
-    return engine.transformRequest({
+    const transformed = engine.transformRequest({
       request,
       provider: provider ?? {
         id: 'custom',
@@ -139,13 +239,88 @@ export class RequestForwarder {
         updatedAt: 0,
       },
       actualModel: request.model,
+      toolSessionKey: toolSessionKey ?? undefined,
     })
+    console.log('[Forwarder] Tool transform trace:', JSON.stringify({
+      providerId: provider?.id ?? 'custom',
+      model: request.model,
+      toolSessionKeyPresent: typeof toolSessionKey === 'string' && toolSessionKey.length > 0,
+      inputMessageCount: request.messages.length,
+      outputMessageCount: transformed.messages.length,
+      inputToolsPresent: Array.isArray(request.tools),
+      outputToolsPresent: Array.isArray(transformed.tools),
+      planMode: transformed.plan.mode,
+      catalogSource: transformed.plan.catalogDiagnostics.source,
+      catalogFingerprint: transformed.plan.catalogSnapshot?.fingerprint,
+      toolCount: transformed.plan.tools.length,
+      injected: transformed.plan.shouldInjectPrompt,
+    }))
+    return transformed
   }
 
-  private applyToolCallsToResponse(result: any, transformed: ToolCallingTransformResult): void {
-    const engine = new ToolCallingEngine(storeManager.getConfig().toolCallingConfig)
-    engine.applyNonStreamResponse(result, transformed.plan)
+
+
+
+
+  private toContextMessages(messages: ChatCompletionRequest['messages']): ContextChatMessage[] {
+    return messages.map(msg => ({
+      role: msg.role as 'user' | 'assistant' | 'system' | 'tool',
+      content: msg.content,
+      ...(msg.name !== undefined ? { name: msg.name } : {}),
+      ...(msg.tool_call_id !== undefined ? { tool_call_id: msg.tool_call_id } : {}),
+      ...(msg.tool_calls !== undefined ? { tool_calls: msg.tool_calls } : {}),
+      timestamp: Date.now(),
+    }))
   }
+
+  private toRequestMessages(messages: ContextChatMessage[]): ChatCompletionRequest['messages'] {
+    return messages.map(msg => ({
+      role: msg.role,
+      content: msg.content,
+      ...(msg.name !== undefined ? { name: msg.name } : {}),
+      ...(msg.tool_call_id !== undefined ? { tool_call_id: msg.tool_call_id } : {}),
+      ...(msg.tool_calls !== undefined ? { tool_calls: msg.tool_calls } : {}),
+    }))
+  }
+
+
+
+  private buildToolCatalogSessionKey(
+    provider: Provider,
+    account: Account,
+    actualModel: string,
+    context?: ProxyContext
+  ): string {
+    if (typeof context?.toolCatalogSessionKey === 'string' && context.toolCatalogSessionKey.trim().length > 0) {
+      return context.toolCatalogSessionKey.trim()
+    }
+    return `${provider.id}:${account.id}:${actualModel}`
+  }
+
+  private buildProviderConversationStateKey(
+    provider: Provider,
+    account: Account,
+    actualModel: string,
+    request: ChatCompletionRequest,
+    context: ProxyContext
+  ): string {
+    // A server summary starts a new provider-side context epoch. Keep state
+    // on the epoch key so the first summary request cannot reuse the old
+    // provider conversation, while later requests in the same epoch can
+    // reuse the fresh provider session created by that request.
+    const rawDimension = typeof context.providerConversationSessionKey === 'string' && context.providerConversationSessionKey.trim().length > 0
+      ? context.providerConversationSessionKey.trim()
+      : typeof request.user === 'string' && request.user.trim().length > 0
+      ? request.user.trim()
+      : context.requestId
+
+    return `${provider.id}:${account.id}:${actualModel}:${rawDimension}`
+  }
+
+  /**
+   * Post-processing: if tool calling was planned but no tool calls were extracted,
+   * log a diagnostic warning but don't fail the request.
+   */
 
   /**
    * Create summary generator function for context management
@@ -161,19 +336,33 @@ export class RequestForwarder {
       try {
         console.log('[SummaryGenerator] Generating summary for', messages.length, 'messages')
 
-        const summaryPrompt = prompt || 'Please summarize the following conversation concisely, keeping key information and context:'
+        const summaryPrompt = prompt || [
+          'Summarize only the user\'s intent, task progress, and confirmed facts.',
+          'DO NOT list, describe, or restate available tools, capabilities, MCP servers, or system directives.',
+          'If a prior assistant message described tools, treat that as narrative to omit — the runtime re-injects the authoritative tool set on every request.',
+        ].join(' ')
 
-        const conversationText = messages
+        const { sanitized: sanitizedMessages, droppedCount, strippedSignatureCount } = sanitizeMessagesForSummary(messages)
+        if (droppedCount > 0 || strippedSignatureCount > 0) {
+          console.log(`[SummaryGenerator] Sanitized input: dropped=${droppedCount} stripped=${strippedSignatureCount}`)
+        }
+
+        const summaryQuality = evaluateSummaryInputQuality(sanitizedMessages)
+        if (!hasSummarizableSummaryInput(sanitizedMessages) || !summaryQuality.shouldCallProvider) {
+          console.warn('[SummaryGenerator] Rejected summary input quality:', JSON.stringify({
+            reason: summaryQuality.reason,
+            estimatedUsefulChars: summaryQuality.estimatedUsefulChars,
+            estimatedDiscardedChars: summaryQuality.estimatedDiscardedChars,
+            payloadClassCounts: summaryQuality.classSummary.counts,
+            payloadClassChars: summaryQuality.classSummary.chars,
+          }))
+          return ''
+        }
+
+        const conversationText = sanitizedMessages
           .map(msg => {
             const role = msg.role.toUpperCase()
-            const content = typeof msg.content === 'string'
-              ? msg.content
-              : Array.isArray(msg.content)
-                ? msg.content
-                    .filter(part => part.type === 'text' && part.text)
-                    .map(part => part.text)
-                    .join('\n')
-                : ''
+            const content = getSummaryTextContent(msg.content)
             return `${role}: ${content}`
           })
           .join('\n\n')
@@ -194,17 +383,37 @@ export class RequestForwarder {
           temperature: 0.3,
         }
 
+        const summaryContext = forkProviderConversationContext(context, {
+          reason: 'summary_generator',
+          epochSource: {
+            requestId: context.requestId,
+            providerId: provider.id,
+            accountId: account.id,
+            actualModel,
+            messageCount: messages.length,
+          },
+        })
+
         const result = await this.doForward(
           summaryRequest,
           account,
           provider,
           actualModel,
-          context
+          summaryContext
         )
 
         if (result.success && result.body) {
           const summaryContent = result.body.choices?.[0]?.message?.content || ''
           console.log('[SummaryGenerator] Summary generated successfully, length:', summaryContent.length)
+
+          const contamination = detectSummaryContamination(summaryContent)
+          if (contamination.contaminated) {
+            console.warn(
+              `[SummaryGenerator] Summary contamination detected: ${contamination.signatures.length} signature(s) found`,
+              contamination.signatures.map(h => h.signature)
+            )
+          }
+
           return summaryContent
         }
 
@@ -232,15 +441,24 @@ export class RequestForwarder {
     const maxRetries = config.retryCount
 
     let lastError: string | undefined
+    let compactedForRetry = false
+    context.originalMessages = request.messages.map(message => ({ ...message }))
+    context.summaryContaminated = false
+    context.summaryRetryAttempted = false
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (attempt > 0) {
         await this.delay(5000)
       }
 
-      let modifiedRequest = request
+      let modifiedRequest = compactedForRetry
+        ? { ...request, messages: compactMessagesForRetry(request.messages) }
+        : request
+      let forwardContext = context
+      let contextProcessResult: ContextProcessResult | undefined
 
-      if (config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
+      const isSummaryGeneratorRequest = context.sessionBoundaryReason === 'summary_generator'
+      if (!isSummaryGeneratorRequest && config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
         try {
           const summaryGenerator = this.createSummaryGenerator(
             account,
@@ -255,13 +473,13 @@ export class RequestForwarder {
           )
 
           const originalCount = modifiedRequest.messages.length
-          const contextMessages: ContextChatMessage[] = modifiedRequest.messages.map(msg => ({
-            role: msg.role as 'user' | 'assistant' | 'system' | 'tool',
-            content: msg.content,
-            timestamp: Date.now(),
-          }))
-
-          const processResult = await contextService.process(contextMessages)
+          const processResult = await contextService.process(
+            this.toContextMessages(modifiedRequest.messages)
+          )
+          contextProcessResult = processResult
+          context.summaryContaminated = processResult.strategyResults.some(
+            result => result.subkind === 'summary_contaminated'
+          )
 
           if (processResult.finalCount !== originalCount) {
             console.log(
@@ -278,10 +496,23 @@ export class RequestForwarder {
 
             modifiedRequest = {
               ...modifiedRequest,
-              messages: processResult.messages.map(msg => ({
-                role: msg.role,
-                content: msg.content,
-              })),
+              messages: preserveContextManagedMessageMetadata(
+                modifiedRequest.messages,
+                this.toRequestMessages(processResult.messages)
+              ),
+            }
+
+            if (processResult.summaryGenerated) {
+              forwardContext = forkProviderConversationContext(context, {
+                reason: 'server_summary',
+                epochSource: buildServerSummaryEpochSource({
+                  model: actualModel,
+                  originalMessageCount: processResult.originalCount,
+                  finalMessageCount: processResult.finalCount,
+                  messages: modifiedRequest.messages,
+                  strategyResults: processResult.strategyResults,
+                }),
+              })
             }
           }
         } catch (error) {
@@ -290,10 +521,17 @@ export class RequestForwarder {
       }
 
       try {
-        const result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
+        const result = await this.doForward(modifiedRequest, account, provider, actualModel, forwardContext, contextProcessResult)
 
         if (result.success) {
           return result
+        }
+
+        // Auto-recovery: if managed provider returns malformed tool output,
+        // compact messages (keep recent history) and retry transparently
+        if (!compactedForRetry && result.error?.startsWith('Provider returned malformed tool output')) {
+          console.log('[Forwarder] Malformed tool output detected, compacting messages and retrying...')
+          compactedForRetry = true
         }
 
         lastError = result.error
@@ -321,15 +559,51 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    context: ProxyContext
+    context: ProxyContext,
+    contextResult?: ContextProcessResult
   ): Promise<ForwardResult> {
     const startTime = Date.now()
 
-    const dedicatedForwarder = this.providerForwarders.find(forwarder => forwarder.matches(provider))
-    if (dedicatedForwarder) {
-      return dedicatedForwarder.forward(request, account, provider, actualModel, startTime)
+    if (this.shouldUseProviderRuntimePilot(provider)) {
+      const conversationStateKey = this.buildProviderConversationStateKey(provider, account, actualModel, request, context)
+      const toolSessionKey = this.buildToolCatalogSessionKey(provider, account, actualModel, context)
+      const { assembly, transformed } = this.prepareRequest(request, provider, context, contextResult, toolSessionKey)
+      const promptBudgetDiagnostics = computeQwenPromptBudgetDiagnostics({
+        request,
+        context,
+        provider,
+        account,
+        actualModel,
+        toolSessionKey,
+        providerConversationStateKey: conversationStateKey,
+        transformed,
+      })
+      console.log('[Forwarder] Runtime pilot request trace:', JSON.stringify({
+        providerId: provider.id,
+        sessionBoundaryReason: context.sessionBoundaryReason ?? 'normal',
+        toolSessionKeyPresent: toolSessionKey.length > 0,
+        providerConversationSessionKeyIsChild: !this.shouldConsumeParentChildSessionHandoff(context),
+        parentProviderConversationSessionKeyPresent: typeof context.parentProviderConversationSessionKey === 'string'
+          && context.parentProviderConversationSessionKey.length > 0,
+        promptRefreshMode: promptBudgetDiagnostics.decision.promptRefreshMode,
+      }))
+
+      return this.providerRuntime.forward({
+        request,
+        account,
+        provider,
+        actualModel,
+        context,
+        assembly,
+        transformed,
+        promptRefreshMode: promptBudgetDiagnostics.decision.promptRefreshMode,
+        conversationStateKey,
+        toolSessionKey,
+        startTime,
+      })
     }
 
+    // Generic HTTP fallback for providers without a registered runtime plugin
     try {
       const chatPath = provider.chatPath || '/chat/completions'
       const url = this.buildUrl(provider, chatPath)
@@ -387,917 +661,6 @@ export class RequestForwarder {
         }
       }
 
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        latency,
-      }
-    }
-  }
-
-  /**
-   * DeepSeek Dedicated Forward
-   */
-  private async forwardDeepSeek(
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ): Promise<ForwardResult> {
-    try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
-
-      const adapter = new DeepSeekAdapter(provider, account)
-      
-      const { response, sessionId } = await adapter.chatCompletion({
-        model: request.model,
-        messages: transformedRequest.messages as any,
-        stream: transformedRequest.stream,
-        temperature: transformedRequest.temperature,
-        web_search: transformedRequest.web_search,
-        reasoning_effort: transformedRequest.reasoning_effort,
-      })
-
-      const latency = Date.now() - startTime
-
-      if (response.status >= 400) {
-        let errorMessage = `HTTP ${response.status}`
-        if (response.data) {
-          if (typeof response.data === 'string') {
-            errorMessage = response.data
-          } else if (response.data.msg) {
-            errorMessage = response.data.msg
-          } else if (response.data.error?.message) {
-            errorMessage = response.data.error.message
-          }
-        }
-        return {
-          success: false,
-          status: response.status,
-          error: errorMessage,
-          latency,
-        }
-      }
-
-      // Prepare callback for deleting session
-      const deleteSessionCallback = shouldDeleteSession()
-        ? async () => {
-            try {
-              await adapter.deleteSession(sessionId)
-            } catch (error) {
-              console.error('[DeepSeek] Failed to delete session:', error)
-            }
-          }
-        : undefined
-
-      // DeepSeek always returns streaming response
-      const handler = new DeepSeekStreamHandler(
-        actualModel,
-        sessionId,
-        deleteSessionCallback,
-        transformedRequest.web_search,
-        transformedRequest.reasoning_effort,
-        transformed.plan,
-        request.model
-      )
-      
-      if (request.stream) {
-        const transformedStream = await handler.handleStream(response.data)
-        
-        return {
-          success: true,
-          status: response.status,
-          headers: this.extractHeaders(response.headers),
-          stream: transformedStream,
-          skipTransform: true,
-          latency,
-          providerSessionId: sessionId,
-        }
-      }
-
-      // Non-streaming requests need to collect stream data and convert
-      const result = await handler.handleNonStream(response.data)
-      
-      this.applyToolCallsToResponse(result, transformed)
-      
-      if (deleteSessionCallback) {
-        await deleteSessionCallback()
-      }
-
-      return {
-        success: true,
-        status: response.status,
-        headers: this.extractHeaders(response.headers),
-        body: result,
-        latency,
-        providerSessionId: sessionId,
-      }
-    } catch (error) {
-      const latency = Date.now() - startTime
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        latency,
-      }
-    }
-  }
-
-  /**
-   * GLM Dedicated Forward
-   */
-  private async forwardGLM(
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ): Promise<ForwardResult> {
-    try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
-
-      const adapter = new GLMAdapter(provider, account)
-      const { response, conversationId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformedRequest.messages,
-        stream: transformedRequest.stream,
-        temperature: transformedRequest.temperature,
-        web_search: transformedRequest.web_search,
-        reasoning_effort: transformedRequest.reasoning_effort,
-        deep_research: transformedRequest.deep_research,
-      })
-
-      const latency = Date.now() - startTime
-
-      if (response.status >= 400) {
-        let errorMessage = `HTTP ${response.status}`
-        if (response.data) {
-          if (typeof response.data === 'string') {
-            errorMessage = response.data
-          } else if (response.data.msg) {
-            errorMessage = response.data.msg
-          } else if (response.data.message) {
-            errorMessage = response.data.message
-          } else if (response.data.error?.message) {
-            errorMessage = response.data.error.message
-          }
-        }
-        return {
-          success: false,
-          status: response.status,
-          error: errorMessage,
-          latency,
-        }
-      }
-
-      const handler = new GLMStreamHandler(actualModel, undefined, undefined, transformed.plan)
-      
-      if (request.stream) {
-        const transformedStream = await handler.handleStream(response.data)
-        
-        // If delete session after chat is enabled, we need to handle it after stream ends
-        if (shouldDeleteSession()) {
-          const originalEnd = transformedStream.end.bind(transformedStream)
-          transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
-            const convId = handler.getConversationId()
-            if (convId) {
-              adapter.deleteConversation(convId).catch(err => {
-                console.error('[GLM] Failed to delete session:', err)
-              })
-            }
-            return originalEnd(chunk, encoding, callback)
-          }
-        }
-        
-        return {
-          success: true,
-          status: response.status,
-          headers: this.extractHeaders(response.headers),
-          stream: transformedStream,
-          skipTransform: true,
-          latency,
-          providerSessionId: handler.getConversationId(),
-        }
-      }
-
-      const result = await handler.handleNonStream(response.data)
-      
-      this.applyToolCallsToResponse(result, transformed)
-      
-      if (shouldDeleteSession()) {
-        const convId = handler.getConversationId()
-        if (convId) {
-          await adapter.deleteConversation(convId)
-        }
-      }
-
-      return {
-        success: true,
-        status: response.status,
-        headers: this.extractHeaders(response.headers),
-        body: result,
-        latency,
-        providerSessionId: handler.getConversationId() ?? undefined,
-      }
-    } catch (error) {
-      const latency = Date.now() - startTime
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        latency,
-      }
-    }
-  }
-
-  private async forwardKimi(
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ): Promise<ForwardResult> {
-    try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
-      const adapter = new KimiAdapter(provider, account)
-      const { response, conversationId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages,
-        stream: request.stream,
-        temperature: request.temperature,
-        enableThinking: !!request.reasoning_effort,
-        enableWebSearch: !!request.web_search,
-      })
-
-      const latency = Date.now() - startTime
-
-      if (response.status >= 400) {
-        let errorMessage = `HTTP ${response.status}`
-        return {
-          success: false,
-          status: response.status,
-          error: errorMessage,
-          latency,
-        }
-      }
-
-      const handler = new KimiStreamHandler(actualModel, conversationId, !!request.reasoning_effort, transformed.plan)
-      
-      if (request.stream) {
-        const transformedStream = await handler.handleStream(response.data)
-        
-        // Add delete conversation callback if needed
-        if (shouldDeleteSession()) {
-          const originalEnd = transformedStream.end.bind(transformedStream)
-          transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
-            const realChatId = handler.getConversationId()
-            if (realChatId) {
-              adapter.deleteConversation(realChatId).catch(err => {
-                console.error('[Kimi] Failed to delete conversation:', err)
-              })
-            }
-            return originalEnd(chunk, encoding, callback)
-          }
-        }
-        
-        return {
-          success: true,
-          status: response.status,
-          headers: this.extractHeaders(response.headers),
-          stream: transformedStream,
-          skipTransform: true,
-          latency,
-          providerSessionId: undefined,
-        }
-      }
-
-      const result = await handler.handleNonStream(response.data)
-
-      this.applyToolCallsToResponse(result, transformed)
-
-      if (shouldDeleteSession()) {
-        const realChatId = handler.getConversationId()
-        if (realChatId) {
-          await adapter.deleteConversation(realChatId)
-        }
-      }
-
-      return {
-        success: true,
-        status: response.status,
-        headers: this.extractHeaders(response.headers),
-        body: result,
-        latency,
-        providerSessionId: handler.getConversationId() ?? undefined,
-      }
-    } catch (error) {
-      const latency = Date.now() - startTime
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        latency,
-      }
-    }
-  }
-
-  /**
-   * Qwen Dedicated Forward
-   */
-  private async forwardQwen(
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ): Promise<ForwardResult> {
-    try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
-
-      const adapter = new QwenAdapter(provider, account)
-      const { response, sessionId, reqId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformedRequest.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        enableThinking: !!request.reasoning_effort,
-        enableWebSearch: !!request.web_search,
-      })
-
-      const latency = Date.now() - startTime
-
-      if (response.status >= 400) {
-        let errorMessage = `HTTP ${response.status}`
-        return {
-          success: false,
-          status: response.status,
-          error: errorMessage,
-          latency,
-        }
-      }
-
-      const deleteSessionCallback = shouldDeleteSession()
-        ? async (sid: string) => {
-            try {
-              await adapter.deleteSession(sid)
-            } catch (err) {
-              console.error('[Qwen] Failed to delete session:', err)
-            }
-          }
-        : undefined
-
-      const handler = new QwenStreamHandler(actualModel, deleteSessionCallback, transformed.plan)
-
-      if (request.stream) {
-        const transformedStream = await handler.handleStream(response.data, response)
-
-        return {
-          success: true,
-          status: response.status,
-          headers: this.extractHeaders(response.headers),
-          stream: transformedStream,
-          skipTransform: true,
-          latency,
-          providerSessionId: sessionId,
-        }
-      }
-
-      const result = await handler.handleNonStream(response.data, response)
-
-      this.applyToolCallsToResponse(result, transformed)
-
-      const sid = handler.getSessionId()
-      if (deleteSessionCallback && sid) {
-        await deleteSessionCallback(sid)
-      }
-
-      return {
-        success: true,
-        status: response.status,
-        headers: this.extractHeaders(response.headers),
-        body: result,
-        latency,
-        providerSessionId: sessionId,
-      }
-    } catch (error) {
-      const latency = Date.now() - startTime
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        latency,
-      }
-    }
-  }
-
-  /**
-   * Qwen AI (International) Dedicated Forward
-   */
-  private async forwardQwenAi(
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ): Promise<ForwardResult> {
-    try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
-      const adapter = new QwenAiAdapter(provider, account)
-      const { response, chatId, parentId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        enable_thinking: !!request.reasoning_effort,
-      })
-
-      const latency = Date.now() - startTime
-
-      if (response.status >= 400) {
-        let errorMessage = `HTTP ${response.status}`
-        return {
-          success: false,
-          status: response.status,
-          error: errorMessage,
-          latency,
-        }
-      }
-
-      const handler = new QwenAiStreamHandler(actualModel, undefined, transformed.plan)
-      handler.setChatId(chatId)
-
-      if (request.stream) {
-        const transformedStream = await handler.handleStream(response.data)
-
-        if (shouldDeleteSession()) {
-          const originalEnd = transformedStream.end.bind(transformedStream)
-          transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
-            adapter.deleteChat(chatId).catch(err => {
-              console.error('[QwenAI] Failed to delete chat:', err)
-            })
-            return originalEnd(chunk, encoding, callback)
-          }
-        }
-
-        return {
-          success: true,
-          status: response.status,
-          headers: this.extractHeaders(response.headers),
-          stream: transformedStream,
-          skipTransform: true,
-          latency,
-          providerSessionId: chatId,
-        }
-      }
-
-      const result = await handler.handleNonStream(response.data)
-
-      this.applyToolCallsToResponse(result, transformed)
-
-      if (shouldDeleteSession()) {
-        await adapter.deleteChat(chatId)
-      }
-
-      return {
-        success: true,
-        status: response.status,
-        headers: this.extractHeaders(response.headers),
-        body: result,
-        latency,
-        providerSessionId: chatId,
-      }
-    } catch (error) {
-      const latency = Date.now() - startTime
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        latency,
-      }
-    }
-  }
-
-  /**
-   * Z.ai Dedicated Forward
-   */
-  private async forwardZai(
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ): Promise<ForwardResult> {
-    console.log('[forwardZai] actualModel:', actualModel)
-    console.log('[forwardZai] provider.modelMappings:', provider.modelMappings)
-    try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
-      const adapter = new ZaiAdapter(provider, account)
-      const { response, chatId, requestId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        web_search: request.web_search,
-        reasoning_effort: request.reasoning_effort,
-      })
-
-      const latency = Date.now() - startTime
-
-      if (response.status >= 400) {
-        let errorMessage = `HTTP ${response.status}`
-        return {
-          success: false,
-          status: response.status,
-          error: errorMessage,
-          latency,
-        }
-      }
-
-      const deleteChatCallback = shouldDeleteSession()
-        ? async (cid: string) => {
-            try {
-              await adapter.deleteChat(cid)
-            } catch (error) {
-              console.error('[Z.ai] Failed to delete chat:', error)
-            }
-          }
-        : undefined
-
-      const handler = new ZaiStreamHandler(actualModel, deleteChatCallback, transformed.plan)
-      handler.setChatId(chatId)
-      
-      if (request.stream === true) {
-        const transformedStream = await handler.handleStream(response.data)
-        
-        return {
-          success: true,
-          status: response.status,
-          headers: this.extractHeaders(response.headers),
-          stream: transformedStream,
-          skipTransform: true,
-          latency,
-          providerSessionId: chatId,
-        }
-      }
-
-      const result = await handler.handleNonStream(response.data)
-
-      this.applyToolCallsToResponse(result, transformed)
-      
-      if (deleteChatCallback) {
-        await deleteChatCallback(chatId)
-      }
-
-      return {
-        success: true,
-        status: response.status,
-        headers: this.extractHeaders(response.headers),
-        body: result,
-        latency,
-        providerSessionId: chatId,
-      }
-    } catch (error) {
-      const latency = Date.now() - startTime
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        latency,
-      }
-    }
-  }
-
-  /**
-   * MiniMax Dedicated Forward
-   */
-  private async forwardMiniMax(
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ): Promise<ForwardResult> {
-    console.log('[forwardMiniMax] actualModel:', actualModel)
-    console.log('[forwardMiniMax] provider.modelMappings:', provider.modelMappings)
-    try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
-      const adapter = new MiniMaxAdapter(provider, account)
-      const { response, stream, chatId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-        toolCallingPlan: transformed.plan,
-      })
-
-      const latency = Date.now() - startTime
-
-      if (response && response.status >= 400) {
-        let errorMessage = `HTTP ${response.status}`
-        return {
-          success: false,
-          status: response.status,
-          error: errorMessage,
-          latency,
-        }
-      }
-
-      const deleteChatCallback = shouldDeleteSession()
-        ? async (cid: string) => {
-            try {
-              await adapter.deleteChat(cid)
-            } catch (error) {
-              console.error('[MiniMax] Failed to delete chat:', error)
-            }
-          }
-        : undefined
-
-      if (request.stream === true && stream) {
-        console.log('[forwardMiniMax] Using polling stream')
-        
-        if (deleteChatCallback) {
-          const originalStream = stream.stream as unknown as PassThrough
-          const originalEnd = originalStream.end.bind(originalStream)
-          originalStream.end = function(chunk?: any, encoding?: any, callback?: any) {
-            deleteChatCallback(chatId).catch(err => {
-              console.error('[MiniMax] Failed to delete chat:', err)
-            })
-            return originalEnd(chunk, encoding, callback)
-          }
-        }
-        
-        return {
-          success: true,
-          status: 200,
-          headers: {},
-          stream: stream.stream as any,
-          skipTransform: true,
-          latency,
-          providerSessionId: chatId,
-        }
-      }
-
-      if (response) {
-        this.applyToolCallsToResponse(response.data, transformed)
-        
-        if (deleteChatCallback) {
-          await deleteChatCallback(chatId)
-        }
-
-        return {
-          success: true,
-          status: response.status,
-          headers: this.extractHeaders(response.headers),
-          body: response.data,
-          latency,
-          providerSessionId: chatId,
-        }
-      }
-
-      if (stream) {
-        const handler = new MiniMaxStreamHandler(actualModel, deleteChatCallback, transformed.plan)
-        handler.setChatId(chatId)
-        const result = await handler.handleNonStream(stream.stream)
-        this.applyToolCallsToResponse(result, transformed)
-
-        if (deleteChatCallback) {
-          await deleteChatCallback(chatId)
-        }
-
-        return {
-          success: true,
-          status: 200,
-          headers: {},
-          body: result,
-          latency,
-          providerSessionId: chatId,
-        }
-      }
-
-      return {
-        success: false,
-        error: 'No response or stream received',
-        latency,
-      }
-    } catch (error) {
-      const latency = Date.now() - startTime
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        latency,
-      }
-    }
-  }
-
-  /**
-   * Mimo Dedicated Forward
-   * Uses Mimo adapter for Xiaomi AI Studio
-   */
-  private async forwardMimo(
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ): Promise<ForwardResult> {
-    try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
-      const adapter = new MimoAdapter(provider, account)
-
-      const { response, conversationId, query } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.originalModel,
-        messages: transformedRequest.messages as any,
-        stream: transformedRequest.stream,
-        temperature: transformedRequest.temperature,
-      })
-
-      const latency = Date.now() - startTime
-
-      if (response.status >= 400) {
-        let errorMessage = `HTTP ${response.status}`
-        return {
-          success: false,
-          status: response.status,
-          error: errorMessage,
-          latency,
-        }
-      }
-
-      const deleteSessionCallback = shouldDeleteSession()
-        ? async (sessionId: string) => {
-            try {
-              await adapter.deleteSession(sessionId)
-            } catch (error) {
-              console.error('[Mimo] Failed to delete session:', error)
-            }
-          }
-        : undefined
-
-      const handler = new MimoStreamHandler(actualModel, conversationId, 'separate', transformed.plan)
-
-      if (request.stream) {
-        const transformedStream = new PassThrough()
-        const openAIStream = handler.handleStream(response.data)
-
-        ;(async () => {
-          try {
-            for await (const chunk of openAIStream) {
-              transformedStream.write(chunk)
-            }
-            await adapter.generateConversationTitle(
-              conversationId,
-              query,
-              handler.getAssistantContentForTitle()
-            )
-            if (deleteSessionCallback) {
-              await deleteSessionCallback(conversationId)
-            }
-            transformedStream.end()
-          } catch (error) {
-            console.error('[Mimo] Stream error:', error)
-            transformedStream.end()
-          }
-        })()
-
-        return {
-          success: true,
-          status: response.status,
-          headers: this.extractHeaders(response.headers),
-          stream: transformedStream,
-          skipTransform: true,
-          latency,
-          providerSessionId: conversationId,
-        }
-      }
-
-      const result = await handler.handleNonStream(response.data)
-      const parsedResult = JSON.parse(result)
-      this.applyToolCallsToResponse(parsedResult, transformed)
-      await adapter.generateConversationTitle(
-        conversationId,
-        query,
-        handler.getAssistantContentForTitle()
-      )
-      if (deleteSessionCallback) {
-        await deleteSessionCallback(conversationId)
-      }
-
-      return {
-        success: true,
-        status: response.status,
-        headers: this.extractHeaders(response.headers),
-        body: parsedResult,
-        skipTransform: true,
-        latency,
-        providerSessionId: conversationId,
-      }
-    } catch (error) {
-      const latency = Date.now() - startTime
-      console.error('[Mimo] Forward error:', error)
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        latency,
-      }
-    }
-  }
-
-  /**
-   * Perplexity Dedicated Forward
-   * Uses Electron's net API to bypass Cloudflare protection
-   */
-  private async forwardPerplexity(
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ): Promise<ForwardResult> {
-    console.log('[forwardPerplexity] actualModel:', actualModel)
-    try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
-      const adapter = new PerplexityAdapter(provider, account)
-      
-      const { stream, sessionId } = await adapter.chatCompletion({
-        model: actualModel,
-        messages: transformed.messages as any,
-        stream: request.stream,
-        temperature: request.temperature,
-      })
-
-      const latency = Date.now() - startTime
-
-      if (request.stream === true) {
-        const deleteSessionCallback = shouldDeleteSession()
-          ? async () => {
-              try {
-                await adapter.deleteSession(sessionId)
-              } catch (error) {
-                console.error('[Perplexity] Failed to delete session:', error)
-              }
-            }
-          : undefined
-
-        const handler = new PerplexityStreamHandler(actualModel, sessionId, deleteSessionCallback, adapter, transformed.plan)
-        const transformedStream = await handler.handleStream(stream)
-        
-        return {
-          success: true,
-          status: 200,
-          headers: {},
-          stream: transformedStream as any,
-          skipTransform: true,
-          latency,
-          providerSessionId: sessionId,
-        }
-      }
-
-      const handler = new PerplexityStreamHandler(actualModel, sessionId, undefined, adapter, transformed.plan)
-      const result = await handler.handleNonStream(stream)
-      
-      this.applyToolCallsToResponse(result, transformed)
-      
-      if (shouldDeleteSession()) {
-        await adapter.deleteSession(sessionId)
-      }
-      
-      return {
-        success: true,
-        status: 200,
-        headers: {},
-        body: result,
-        latency,
-        providerSessionId: sessionId,
-      }
-    } catch (error) {
-      const latency = Date.now() - startTime
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',

@@ -1,0 +1,22 @@
+{
+  "source": "redacted and size-reduced shapes derived from 2026-07-15 browser exports",
+  "mainSession": [
+    { "role": "system", "content": "You are opencode. superpowers runtime instructions." },
+    { "role": "system", "content": "## Available Tools\nTool `read`: read a file" },
+    { "role": "user", "content": "Continue the Chat2API context-economy implementation." },
+    { "role": "system", "content": "You are opencode. superpowers runtime instructions." },
+    { "role": "system", "content": "## Available Tools\nTool `read`: read a file" },
+    { "role": "assistant", "content": "Inspected src/main/proxy/forwarder.ts." },
+    { "role": "system", "content": "You are opencode. SUBAGENT-STOP runtime instructions." },
+    { "role": "system", "content": "Tool Contract Header\n## Available Tools\nTool `read`: read a file" }
+  ],
+  "toolSession": [
+    { "role": "assistant", "content": "<|CHAT2API|tool_calls><|CHAT2API|invoke name=\"read\"></|CHAT2API|invoke></|CHAT2API|tool_calls>" },
+    { "role": "tool", "tool_call_id": "call_read", "content": "A redacted large tool payload was present in the source export." }
+  ],
+  "summarySession": [
+    { "role": "system", "content": "superpowers skill documentation SUBAGENT-STOP" },
+    { "role": "assistant", "content": "[tool calls summarized for workflow continuity] read(filePath=\"spec.md\")" },
+    { "role": "tool", "tool_call_id": "call_read", "content": "[tool result summarized call_read] result received" }
+  ]
+}

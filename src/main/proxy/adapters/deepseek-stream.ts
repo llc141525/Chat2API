@@ -4,8 +4,8 @@
  */
 
 import { PassThrough } from 'stream'
-import { parseToolCallsFromText } from '../utils/toolParser.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
+import { recordToolDiagnosticEvent } from '../toolCalling/diagnostics.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const MODEL_NAME = 'deepseek-chat'
@@ -457,16 +457,26 @@ export class DeepSeekStreamHandler {
     let currentPath = ''
     let accumulatedTokenUsage = 2
     const searchResults: any[] = []
+    const fragmentTypes = new Set<string>()
     const isThinkingModel = this.isThinkingModel()
     const isFoldModel = this.isFoldModel(isThinkingModel)
     const isSearchSilentModel = this.isSearchSilentModel()
     const shouldStripSearchControlMarker = this.shouldStripSearchControlMarker()
+    let upstreamDoneSeen = false
+    const rawPreviewLines: string[] = []
+    const maxRawPreviewLines = 16
+    const rawChunkPreview: string[] = []
+    const maxRawChunkPreview = 6
 
     return new Promise((resolve, reject) => {
       let buffer = ''
 
       stream.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString()
+        const chunkText = chunk.toString()
+        if (rawChunkPreview.length < maxRawChunkPreview) {
+          rawChunkPreview.push(chunkText.slice(0, 400))
+        }
+        buffer += chunkText
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
 
@@ -474,7 +484,13 @@ export class DeepSeekStreamHandler {
           if (!line.trim() || !line.startsWith('data:')) continue
 
           const data = line.slice(5).trim()
-          if (data === '[DONE]') return
+          if (rawPreviewLines.length < maxRawPreviewLines) {
+            rawPreviewLines.push(data)
+          }
+          if (data === '[DONE]') {
+            upstreamDoneSeen = true
+            return
+          }
 
           try {
             const parsed = JSON.parse(data)
@@ -493,6 +509,9 @@ export class DeepSeekStreamHandler {
               const fragments = parsed.v.response.fragments
               if (Array.isArray(fragments) && fragments.length > 0) {
                 for (const fragment of fragments) {
+                  if (typeof fragment.type === 'string') {
+                    fragmentTypes.add(fragment.type)
+                  }
                   if (Array.isArray(fragment.results)) {
                     DeepSeekStreamHandler.mergeSearchResultsInto(searchResults, fragment.results)
                   }
@@ -511,6 +530,9 @@ export class DeepSeekStreamHandler {
             } else if (parsed.p === 'response/fragments') {
               if (Array.isArray(parsed.v)) {
                 for (const fragment of parsed.v) {
+                  if (typeof fragment.type === 'string') {
+                    fragmentTypes.add(fragment.type)
+                  }
                   if (fragment.content) {
                     let cleanedFragment = fragment.content.replace(/FINISHED/g, '')
                     cleanedFragment = stripSearchControlMarker(cleanedFragment, shouldStripSearchControlMarker)
@@ -588,33 +610,70 @@ export class DeepSeekStreamHandler {
       })
 
       stream.on('end', () => {
-        // Parse tool calls from accumulated content
-        const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
-          ? { content: accumulatedContent, toolCalls: [] }
-          : parseToolCallsFromText(accumulatedContent)
+        // Run accumulated content through ToolStreamParser when a managed tool plan exists
+        let parsedToolCalls: Array<{ id: string; type: string; function: { name: string; arguments: string } }> | undefined
+        const toolStreamParserUsed = !!(this.toolStreamParser && this.toolCallingPlan?.shouldParseResponse)
+
+        if (toolStreamParserUsed && accumulatedContent) {
+          const baseChunk = createBaseChunk(`${this.sessionId}@${messageId}`, this.model, this.created)
+          const pushChunks = this.toolStreamParser!.push(accumulatedContent, baseChunk, false)
+          const flushChunks = this.toolStreamParser!.flush(baseChunk)
+          const collected: any[] = []
+          for (const chunk of [...pushChunks, ...flushChunks]) {
+            const tc = chunk?.choices?.[0]?.delta?.tool_calls
+            if (Array.isArray(tc)) collected.push(...tc)
+          }
+          if (collected.length > 0) {
+            parsedToolCalls = collected.map(({ index: _index, ...tc }) => tc)
+            accumulatedContent = ''
+          }
+        }
+
         const citations = isSearchSilentModel
           ? ''
           : DeepSeekStreamHandler.formatSearchCitations(searchResults)
-        const trimmedContent = cleanContent.trim()
+        const trimmedContent = accumulatedContent.trim()
         const contentWithCitations = citations
           ? (trimmedContent ? `${trimmedContent}\n\n${citations}` : citations)
           : trimmedContent
+        const finalContentLength = contentWithCitations.length
+        const finalReasoningLength = accumulatedThinkingContent.trim().length
+        const finishReason = parsedToolCalls && parsedToolCalls.length > 0 ? 'tool_calls' : 'stop'
+        if (finalContentLength === 0 && finalReasoningLength === 0 && !parsedToolCalls?.length) {
+          console.warn(
+            '[DeepSeekStreamHandler] Empty non-stream output diagnostics:',
+            JSON.stringify({
+              model: this.model,
+              fragmentTypes: [...fragmentTypes].sort(),
+              currentPath,
+              upstreamDoneSeen,
+              rawChunkPreview,
+              rawPreviewLines,
+            }),
+          )
+        }
+
+        recordToolDiagnosticEvent({
+          type: finalContentLength === 0 && finalReasoningLength === 0 && !parsedToolCalls?.length
+            ? 'provider_empty_output'
+            : 'provider_output_observed',
+          providerId: 'deepseek',
+          model: this.model,
+          responseMode: 'non_streaming' as const,
+          contentLength: finalContentLength,
+          reasoningLength: finalReasoningLength,
+          fragmentTypes: [...fragmentTypes].sort(),
+          upstreamDoneSeen,
+          finishReason,
+          deepseekResponseMode: 'non_stream' as const,
+          toolStreamParserUsed,
+        })
 
         const message: any = {
           role: 'assistant',
           reasoning_content: accumulatedThinkingContent.trim() || undefined,
-          content: toolCalls.length > 0 ? null : contentWithCitations,
-        }
-
-        if (toolCalls.length > 0) {
-          message.tool_calls = toolCalls
-        }
-
-        // Log for debugging
-        if (isThinkingModel || accumulatedThinkingContent) {
-          console.log('[DeepSeek] Non-stream thinking model:', this.model)
-          console.log('[DeepSeek] Accumulated thinking content length:', accumulatedThinkingContent.length)
-          console.log('[DeepSeek] Accumulated content length:', accumulatedContent.length)
+          content: (parsedToolCalls && parsedToolCalls.length > 0) ? null : contentWithCitations,
+          ...(parsedToolCalls && parsedToolCalls.length > 0 ? { tool_calls: parsedToolCalls } : {}),
         }
 
         resolve({
@@ -624,7 +683,7 @@ export class DeepSeekStreamHandler {
           choices: [{
             index: 0,
             message,
-            finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+            finish_reason: finishReason,
           }],
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: accumulatedTokenUsage },
           created: this.created,

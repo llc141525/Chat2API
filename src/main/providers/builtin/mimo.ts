@@ -27,11 +27,13 @@ export const mimoConfig: BuiltinProviderConfig = {
   enabled: true,
   description: 'XiaomiMIMO - Xiaomi General Intelligence Foundation Model',
   supportedModels: [
+    'MiMo-V2.5-Pro-UltraSpeed',
     'MiMo-V2.5-Pro',
     'MiMo-V2.5',
     'MiMo-V2-Flash',
   ],
   modelMappings: {
+    'MiMo-V2.5-Pro-UltraSpeed': 'mimo-v2.5-pro-ultraspeed',
     'MiMo-V2.5-Pro': 'mimo-v2.5-pro',
     'MiMo-V2.5': 'mimo-v2.5',
     'MiMo-V2-Flash': 'mimo-v2-flash',

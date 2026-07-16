@@ -40,9 +40,7 @@ export function QuickActions({
         <Button
           className={cn(
             "w-full justify-start",
-            proxyRunning 
-              ? "bg-orange-100 text-orange-700 hover:bg-orange-200 dark:bg-orange-950/50 dark:text-white dark:hover:bg-orange-900/50"
-              : "dark:text-white"
+            proxyRunning && "app-button-warning"
           )}
           variant={proxyRunning ? 'secondary' : 'default'}
           onClick={onToggleProxy}
@@ -51,7 +49,7 @@ export function QuickActions({
           {isLoading ? (
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
           ) : proxyRunning ? (
-            <Square className="mr-2 h-4 w-4 text-orange-700 dark:text-orange-400" />
+            <Square className="mr-2 h-4 w-4" />
           ) : (
             <Play className="mr-2 h-4 w-4" />
           )}
@@ -61,7 +59,7 @@ export function QuickActions({
             ? t('quickActions.stopProxy')
             : t('quickActions.startProxy')}
           {proxyRunning && !isLoading && (
-            <Badge variant="secondary" className="ml-auto">
+            <Badge variant="outline" className="ml-auto status-chip status-running">
               {t('dashboard.running')}
             </Badge>
           )}
