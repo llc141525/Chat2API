@@ -13,6 +13,7 @@ import {
   recordPromptBudgetSnapshot,
 } from '../../src/main/proxy/promptBudgetPolicy.ts'
 import {
+  buildServerSummaryEpochSource,
   buildChildSessionHandoff,
   buildProviderConversationStateWritePlan,
   decideProviderConversationStateWriteTargets,
@@ -876,6 +877,35 @@ test('forkProviderConversationContext creates child provider key without changin
   assert.notEqual(forkedA.providerConversationSessionKey, context.providerConversationSessionKey)
   assert.equal(forkedA.providerConversationSessionKey, forkedB.providerConversationSessionKey)
   assert.match(forkedA.providerSessionEpoch ?? '', /^server_summary:[a-f0-9]{24}$/)
+})
+
+test('active tool-workflow handoff keeps a stable server-summary epoch across later tool results', () => {
+  const base = {
+    model: 'Qwen3.7-Max',
+    strategyResults: [{
+      strategyName: 'summary',
+      trimmed: true,
+      subkind: 'summary_skipped_active_tool_workflow',
+    }],
+  }
+  const first = buildServerSummaryEpochSource({
+    ...base,
+    originalMessageCount: 20,
+    finalMessageCount: 9,
+    messages: [{ role: 'tool', tool_call_id: 'call_1', content: 'first tool result' }],
+  })
+  const later = buildServerSummaryEpochSource({
+    ...base,
+    originalMessageCount: 36,
+    finalMessageCount: 9,
+    messages: [{ role: 'tool', tool_call_id: 'call_9', content: 'later tool result' }],
+  })
+
+  assert.deepEqual(later, first)
+  assert.deepEqual(first, {
+    model: 'Qwen3.7-Max',
+    compactionKind: 'active_tool_workflow_handoff',
+  })
 })
 
 test('server-summary fork from a tool-child provider context keeps the tool catalog key and preserves the parent chain', () => {

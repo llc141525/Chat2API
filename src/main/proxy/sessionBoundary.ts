@@ -189,6 +189,19 @@ export function buildServerSummaryEpochSource(input: {
   messages: ChatCompletionRequest['messages']
   strategyResults?: Array<{ strategyName: string; trimmed: boolean; subkind?: string }>
 }): Record<string, unknown> {
+  const activeToolWorkflowHandoff = (input.strategyResults ?? []).some(
+    result => result.trimmed && result.subkind === 'summary_skipped_active_tool_workflow'
+  )
+  if (activeToolWorkflowHandoff) {
+    // The handoff is seeded once into the provider's fresh summary session.
+    // Later tool results must continue that same session; including call ids or
+    // message counts here would create a new provider epoch for every tool turn.
+    return {
+      model: input.model,
+      compactionKind: 'active_tool_workflow_handoff',
+    }
+  }
+
   const summaryKinds = new Set<string>()
   const workflowToolNames = new Set<string>()
   const skillNames = new Set<string>()

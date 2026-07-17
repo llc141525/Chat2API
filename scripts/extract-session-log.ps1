@@ -41,6 +41,7 @@ New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 $RE_TRACE    = '\[Forwarder\] Runtime pilot request trace:\s*(\{.+\})$'
 $RE_TOOL     = '\[Forwarder\] Tool transform trace:\s*(\{.+\})$'
 $RE_SUMM_OK  = '\[SummaryGenerator\] Summary generated successfully, length:\s*(\d+)'
+$RE_SUMM_HANDOFF = '\[SummaryStrategy\] Skipping external summary generation during active tool workflow'
 $RE_SUMM_REJ = '\[SummaryGenerator\] Rejected summary input quality:.*"reason":"([^"]+)"'
 $RE_SUMM_FAIL= '\[SummaryGenerator\] Failed to generate summary'
 $RE_CTX      = '\[Forwarder\] Context management applied:\s*(\d+)\s*->\s*(\d+)'
@@ -87,6 +88,10 @@ Get-Content $LogPath -Encoding UTF8 | ForEach-Object {
 
   if ($line -match $RE_SUMM_OK) {
     $records += [PSCustomObject]@{ line = $lineNum; kind = 'summary_ok'; length = [int]$matches[1] }
+    return
+  }
+  if ($line -match $RE_SUMM_HANDOFF) {
+    $records += [PSCustomObject]@{ line = $lineNum; kind = 'summary_handoff' }
     return
   }
   if ($line -match $RE_SUMM_REJ) {
@@ -149,7 +154,7 @@ if ($records.Count -eq 0) {
 
 $sessions = @()
 $currentId = 0
-$pending = @()  # events waiting for next request
+$pendingToolTransform = $null
 
 foreach ($r in $records) {
   if ($r.kind -eq 'request') {
@@ -164,9 +169,10 @@ foreach ($r in $records) {
       refresh       = $r.refresh
       provSessionId = ''
       provReqId     = ''
-      toolPlan      = ''
-      toolCatalog   = ''
+      toolPlan      = if ($null -ne $pendingToolTransform) { $pendingToolTransform.planMode } else { '' }
+      toolCatalog   = if ($null -ne $pendingToolTransform) { $pendingToolTransform.catalogSrc } else { '' }
       summaryOk     = 0
+      summaryHandoff = $false
       summaryRej    = ''
       summaryFail   = $false
       ctxBefore     = 0
@@ -176,23 +182,22 @@ foreach ($r in $records) {
       fallback      = $false
       errors        = @()
       deleted       = @()
-      eventLines    = @()
+      eventLines    = if ($null -ne $pendingToolTransform) { @($pendingToolTransform.line) } else { @() }
     }
-    $pending = @()
+    $pendingToolTransform = $null
   }
   elseif ($r.kind -eq 'provider_session' -and $sessions.Count -gt 0) {
     $sessions[-1].provSessionId = $r.sessionId
     $sessions[-1].provReqId = $r.reqId
     $sessions[-1].eventLines += $r.line
   }
-  elseif ($r.kind -eq 'tool_transform' -and $sessions.Count -gt 0) {
-    $sessions[-1].toolPlan = $r.planMode
-    $sessions[-1].toolCatalog = $r.catalogSrc
-    $sessions[-1].eventLines += $r.line
+  elseif ($r.kind -eq 'tool_transform') {
+    $pendingToolTransform = $r
   }
   elseif ($r.kind -match 'summary_' -and $sessions.Count -gt 0) {
     switch ($r.kind) {
       'summary_ok'       { $sessions[-1].summaryOk = $r.length }
+      'summary_handoff'  { $sessions[-1].summaryHandoff = $true }
       'summary_rejected' { $sessions[-1].summaryRej = $r.reason }
       'summary_failed'   { $sessions[-1].summaryFail = $true }
     }
@@ -329,7 +334,7 @@ foreach ($s in ($sessions | Where-Object { $_.fallback })) {
 }
 
 # context management 未触发 summary 引导
-foreach ($s in ($sessions | Where-Object { $_.ctxBefore -gt 0 -and $_.summaryOk -eq 0 -and $_.summaryRej -eq '' -and -not $_.summaryFail })) {
+foreach ($s in ($sessions | Where-Object { $_.ctxBefore -gt 0 -and $_.summaryOk -eq 0 -and -not $_.summaryHandoff -and $_.summaryRej -eq '' -and -not $_.summaryFail })) {
   $issues += "#$($s.id) L$($s.line): context reduced $($s.ctxBefore)->$($s.ctxAfter) but NO summary trace — truncation without compaction?"
 }
 

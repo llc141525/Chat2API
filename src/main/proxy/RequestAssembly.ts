@@ -92,7 +92,9 @@ export function buildRequestAssembly(input: BuildRequestAssemblyInput): RequestA
     }
   }
 
-  const filteredMessages = filterProviderMessageHistory(input.messages)
+  const filteredMessages = filterProviderMessageHistory(input.messages, {
+    dropRuntimeConfig: true,
+  })
   const compactMessages = workflowDigest
     ? filteredMessages.filter(message => !STRUCTURED_COMPACT_MESSAGE_MARKERS.some(
       marker => extractTextContent(message.content).includes(marker),
@@ -296,6 +298,7 @@ function buildInfrastructurePromptFromMessages(messages: ChatMessage[]): string 
     if (m.role !== 'system') return false
     const text = extractTextContent(m.content).trim()
     return text.length > 0
+      && !isLikelyConfigurationPayload(text)
       && !text.includes('## Available Tools')
       && !text.includes('Tool Contract Header')
       && !text.includes('[Prior conversation summary')

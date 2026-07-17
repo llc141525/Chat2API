@@ -257,6 +257,49 @@ test('Qwen assembly path keeps summary after base system and before authoritativ
   assert.equal(body.messages[0].meta_data.ori_query, 'please read a file')
 })
 
+test('Qwen assembly drops historical runtime configuration and retains bounded role infrastructure', () => {
+  const assembly = buildRequestAssembly({
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You are opencode. This is runtime configuration.',
+          'superpowers:systematic-debugging',
+          'UNBOUNDED_RUNTIME_CONFIGURATION_SHOULD_NOT_REACH_QWEN',
+        ].join('\n'),
+      },
+      { role: 'system', content: 'You are the project coding agent. Follow the current task.' },
+      { role: 'user', content: 'Continue with the next required tool call.' },
+    ] as any,
+    toolManifest: {
+      renderedPrompt: '## Available Tools\ncatalog_fingerprint: fp\n<|CHAT2API|tool_calls>',
+    } as any,
+  })
+
+  const body = buildQwenAssemblyRequestBodyForTest({
+    assembly,
+    request: {
+      model: 'Qwen3-Max',
+      originalModel: 'Qwen3-Max',
+      stream: true,
+      messages: assembly.messages as any,
+      promptRefreshMode: 'tool_ready',
+    },
+    actualModel: 'Qwen3-Max',
+    sessionId: 'session',
+    reqId: 'req',
+    timestamp: 1,
+    enableThinking: false,
+    enableWebSearch: false,
+  })
+
+  const content = body.messages[0].content as string
+  assert.doesNotMatch(content, /UNBOUNDED_RUNTIME_CONFIGURATION_SHOULD_NOT_REACH_QWEN/)
+  assert.doesNotMatch(content, /superpowers:systematic-debugging/)
+  assert.match(content, /You are the project coding agent/)
+  assert.match(content, /## Available Tools/)
+})
+
 test('Qwen assembly path extracts summary from system messages when assembly.summaryText is absent', () => {
   const assembly = buildRequestAssembly({
     messages: [

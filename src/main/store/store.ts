@@ -664,9 +664,7 @@ class StoreManager {
     
     console.log('[Store] Update account:', {
       id,
-      updatesCredentials: updates.credentials,
-      oldCredentials: accounts[index].credentials,
-      oldCredentialsDecrypted: this.decryptCredentials(accounts[index].credentials),
+      credentialsUpdated: updates.credentials !== undefined,
     })
     
     const updatedAccount: Account = {
@@ -690,7 +688,7 @@ class StoreManager {
     const savedAccount = savedAccounts.find(a => a.id === id)
     console.log('[Store] Verify after save:', {
       id,
-      savedCredentials: savedAccount?.credentials,
+      credentialsPresent: savedAccount?.credentials !== undefined,
     })
     
     return {

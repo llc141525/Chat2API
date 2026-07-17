@@ -299,7 +299,11 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
   const summaryPrompts: string[] = []
   const conversationParts: string[] = []
   const activeSkillCheckpointPrompts: string[] = []
-  const providerMessages = selectProviderMessagesForAssembly(assembly) as QwenMessage[]
+  const providerMessages = selectProviderMessagesForAssembly(assembly, {
+    stripRuntimeConfig: true,
+    stripToolContractHistory: true,
+    dropRuntimeConfig: true,
+  }) as QwenMessage[]
   const lastUserText = extractLastUserText(providerMessages)
   const explicitSummaryText = assembly.summaryText?.trim() || null
   const promptRefreshMode = request.promptRefreshMode

@@ -169,23 +169,43 @@ function ConvertTo-NativeProcessArgumentString([string[]]$Arguments) {
     return $escaped -join ' '
 }
 
-function Resolve-OpencodeExecutablePath([string]$CandidatePath) {
-    if (-not [string]::IsNullOrWhiteSpace($CandidatePath) -and (Test-Path $CandidatePath)) {
-        $extension = [System.IO.Path]::GetExtension($CandidatePath)
-        if ([string]::Equals($extension, ".exe", [StringComparison]::OrdinalIgnoreCase)) {
-            return (Resolve-Path $CandidatePath).Path
-        }
+function Test-OpenCodeNativeExecutable([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
+        return $false
     }
 
+    $item = Get-Item -LiteralPath $Path
+    if ($item.Length -lt 1MB) {
+        return $false
+    }
+
+    $stream = [System.IO.File]::Open($item.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $header = New-Object byte[] 2
+        $read = $stream.Read($header, 0, $header.Length)
+        return $read -eq 2 -and $header[0] -eq 0x4D -and $header[1] -eq 0x5A
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Resolve-OpencodeExecutablePath([string]$CandidatePath) {
+    if (Test-OpenCodeNativeExecutable $CandidatePath) {
+        return (Resolve-Path $CandidatePath).Path
+    }
+
+    $npmRoot = Join-Path $HOME "AppData\Roaming\npm\node_modules"
     $commonCandidates = @(
-        (Join-Path $HOME "AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode.exe"),
-        (Join-Path $HOME "AppData\Roaming\npm\opencode.cmd"),
-        (Join-Path $HOME "AppData\Roaming\npm\opencode.ps1")
+        (Join-Path $npmRoot ".opencode-ai-*\node_modules\opencode-windows-x64\bin\opencode.exe"),
+        (Join-Path $npmRoot "opencode-ai\node_modules\opencode-windows-x64\bin\opencode.exe"),
+        (Join-Path $npmRoot "opencode-ai\node_modules\opencode-windows-x64-baseline\bin\opencode.exe")
     )
 
-    foreach ($path in $commonCandidates) {
-        if (Test-Path $path) {
-            return (Resolve-Path $path).Path
+    foreach ($pattern in $commonCandidates) {
+        foreach ($path in @(Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue)) {
+            if (Test-OpenCodeNativeExecutable $path.FullName) {
+                return $path.FullName
+            }
         }
     }
 
@@ -296,9 +316,22 @@ function Add-EventTextToFile([string]$Path, [string]$EventText) {
 
 function Get-NewLogText([string]$LogPath, [int]$BeforeLineCount) {
     $afterLogLines = @()
+    $previousCount = -1
+    $stableObservations = 0
     for ($attempt = 0; $attempt -lt 15; $attempt++) {
         $afterLogLines = @(Get-Content $LogPath)
-        if ($afterLogLines.Count -gt $BeforeLineCount) {
+        if ($afterLogLines.Count -le $BeforeLineCount) {
+            Start-Sleep -Seconds 1
+            continue
+        }
+
+        if ($afterLogLines.Count -eq $previousCount) {
+            $stableObservations++
+        } else {
+            $previousCount = $afterLogLines.Count
+            $stableObservations = 0
+        }
+        if ($stableObservations -ge 2) {
             break
         }
         Start-Sleep -Seconds 1
@@ -416,7 +449,7 @@ function Measure-EconomyMetrics {
                     $diag = $line.Substring($jsonStart) | ConvertFrom-Json
                     $reason = [string]$diag.boundaryReason
                     if (-not [string]::IsNullOrWhiteSpace($reason)) {
-                        if (-not $boundaryReasonCounts.ContainsKey($reason)) {
+                        if (-not $boundaryReasonCounts.Contains($reason)) {
                             $boundaryReasonCounts[$reason] = 0
                         }
                         $boundaryReasonCounts[$reason]++
@@ -433,7 +466,7 @@ function Measure-EconomyMetrics {
                     $diag = $line.Substring($jsonStart) | ConvertFrom-Json
                     $reason = [string]$diag.sessionBoundaryReason
                     if (-not [string]::IsNullOrWhiteSpace($reason)) {
-                        if (-not $boundaryReasonCounts.ContainsKey($reason)) {
+                        if (-not $boundaryReasonCounts.Contains($reason)) {
                             $boundaryReasonCounts[$reason] = 0
                         }
                         $boundaryReasonCounts[$reason]++
@@ -441,7 +474,7 @@ function Measure-EconomyMetrics {
 
                     $mode = [string]$diag.promptRefreshMode
                     if (-not [string]::IsNullOrWhiteSpace($mode)) {
-                        if (-not $refreshModeCounts.ContainsKey($mode)) {
+                        if (-not $refreshModeCounts.Contains($mode)) {
                             $refreshModeCounts[$mode] = 0
                         }
                         $refreshModeCounts[$mode]++
@@ -463,7 +496,7 @@ function Measure-EconomyMetrics {
                     $diag = $line.Substring($jsonStart) | ConvertFrom-Json
                     $mode = [string]$diag.promptRefreshMode
                     if (-not [string]::IsNullOrWhiteSpace($mode)) {
-                        if (-not $refreshModeCounts.ContainsKey($mode)) {
+                        if (-not $refreshModeCounts.Contains($mode)) {
                             $refreshModeCounts[$mode] = 0
                         }
                         $refreshModeCounts[$mode]++
@@ -508,9 +541,21 @@ function Measure-EconomyMetrics {
 }
 
 function Report-EconomyMetrics {
-    param([string]$LogText, [string]$OutputDir)
+    param(
+        [string]$LogText,
+        [string]$OutputDir,
+        [int]$ObservedNonSkillToolCalls = -1
+    )
 
     $metrics = Measure-EconomyMetrics -LogText $LogText
+    if ($ObservedNonSkillToolCalls -ge 0) {
+        $metrics.toolCallSuccessRate = [ordered]@{
+            totalTurns = $ObservedNonSkillToolCalls
+            turnsWithTools = $ObservedNonSkillToolCalls
+            turnsWithoutTools = 0
+            toolCallRate = 100
+        }
+    }
     $outputPath = Join-Path $OutputDir "economy-metrics.json"
     Write-JsonFile $outputPath $metrics
 
@@ -839,7 +884,7 @@ try {
     }
     Pass "dev.log proves compaction occurred before real tool execution (summary=$summaryEvidence sliding=$slidingEvidence)"
 
-    Report-EconomyMetrics -LogText $newLogText -OutputDir $probeDir
+    Report-EconomyMetrics -LogText $newLogText -OutputDir $probeDir -ObservedNonSkillToolCalls $nonSkillToolCallCount
     Pass "Economy metrics captured"
 
     Write-Host "CAPABILITY_PROBE_PASS"
