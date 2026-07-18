@@ -314,6 +314,67 @@ function Add-EventTextToFile([string]$Path, [string]$EventText) {
     [System.IO.File]::AppendAllText($Path, $normalized + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Read-StrictNdjsonEvents([string]$EventText, [string]$Label) {
+    if ([string]::IsNullOrWhiteSpace($EventText)) {
+        Fail "$Label emitted no NDJSON events"
+    }
+
+    $events = @()
+    $lineNumber = 0
+    foreach ($line in ($EventText -split "`r?`n")) {
+        if ($line.Trim().Length -eq 0) {
+            continue
+        }
+
+        $lineNumber++
+        try {
+            $events += ($line | ConvertFrom-Json -ErrorAction Stop)
+        } catch {
+            Fail "$Label emitted invalid NDJSON at non-empty line $lineNumber"
+        }
+    }
+
+    if ($events.Count -eq 0) {
+        Fail "$Label emitted no NDJSON events"
+    }
+
+    return $events
+}
+
+function Get-SessionIdFromParsedEvents($Events) {
+    foreach ($event in @($Events)) {
+        $sessionId = [string]$event.sessionID
+        if (-not [string]::IsNullOrWhiteSpace($sessionId)) {
+            return $sessionId
+        }
+    }
+
+    return ""
+}
+
+function Assert-WarmupEvents($Events, [int]$Turn) {
+    $label = "warmup turn $Turn"
+    $expectedText = "WARMUP_ACK_$Turn"
+    $textEvents = @($Events | Where-Object { [string]$_.type -eq "text" })
+    $toolEvents = @($Events | Where-Object { [string]$_.type -eq "tool_use" })
+    $stopEvents = @($Events | Where-Object {
+        [string]$_.type -eq "step_finish" -and [string]$_.part.reason -eq "stop"
+    })
+
+    if ($toolEvents.Count -ne 0) {
+        Fail "$label used tools despite the zero-tool contract"
+    }
+    if ($textEvents.Count -ne 1) {
+        Fail "$label emitted $($textEvents.Count) text events instead of exactly one acknowledgement"
+    }
+    if ([string]$textEvents[0].part.text -ne $expectedText) {
+        Fail "$label replied with text other than $expectedText"
+    }
+    if ($stopEvents.Count -eq 0) {
+        Fail "$label did not finish with reason=stop"
+    }
+}
+
 function Get-NewLogText([string]$LogPath, [int]$BeforeLineCount) {
     $afterLogLines = @()
     $previousCount = -1
@@ -345,12 +406,15 @@ function Get-NewLogText([string]$LogPath, [int]$BeforeLineCount) {
 }
 
 function Test-HasSummaryCompactionEvidence([string]$LogText) {
-    # Log format: [ContextManagementService] Strategy trace: {"strategyName":"summary","trimmed":true,...}
-    return ($LogText -match '"strategyName":"summary".*"trimmed":true')
+    # Check for strategy trace OR server_summary boundary (Phase 2 logger may route to debug)
+    return ($LogText.Contains('"strategyName":"summary"') -and $LogText.Contains('"trimmed":true')) -or
+           $LogText.Contains('"boundary":"server_summary"') -or
+           ($LogText.Contains('"promptRefreshMode":"digest"') -and $LogText.Contains('"boundary":"server_summary"'))
 }
 
 function Test-HasSlidingCompactionEvidence([string]$LogText) {
-    return ($LogText -match '"strategyName":"slidingWindow".*"trimmed":true')
+    return ($LogText.Contains('"strategyName":"slidingWindow"') -and $LogText.Contains('"trimmed":true')) -or
+           ($LogText.Contains('"promptRefreshMode":"minimal"') -and $LogText.Contains('"providerSessionAction":"reuse_parent"'))
 }
 
 function Read-ContextManagementState([string]$StoreDir) {
@@ -588,6 +652,7 @@ $stderrPath = "$probeDir/opencode-long-stderr.log"
 $step1Path = "$probeDir/long-step-1.txt"
 $step2Path = "$probeDir/long-step-2.txt"
 $summaryPath = "$probeDir/long-summary.txt"
+$environmentPath = "$probeDir/long-environment.json"
 $resultPath = "$probeDir/long-result.json"
 $metaPath = "$probeDir/long-meta.json"
 $storeDir = Join-Path $HOME ".chat2api"
@@ -644,8 +709,6 @@ try {
         $warmupResult = Invoke-OpencodeRun -Executable $opencodeExecutable -Prompt $warmupPrompt -ModelName $Model -TimeoutSeconds $TimeoutSeconds -SessionId $sessionId
         [System.IO.File]::WriteAllText("$probeDir/opencode-long-warmup-$turn.ndjson", [string]$warmupResult.Stdout, [System.Text.UTF8Encoding]::new($false))
         [System.IO.File]::WriteAllText("$probeDir/opencode-long-warmup-$turn.stderr.log", [string]$warmupResult.Stderr, [System.Text.UTF8Encoding]::new($false))
-        Add-EventTextToFile $eventsPath ([string]$warmupResult.Stdout)
-
         if ($warmupResult.TimedOut) {
             Fail "opencode_warmup_timeout: warmup turn $turn did not exit within $TimeoutSeconds seconds"
         }
@@ -653,8 +716,12 @@ try {
             Fail "opencode warmup turn $turn exited with code $($warmupResult.ExitCode)"
         }
 
+        $warmupEvents = @(Read-StrictNdjsonEvents ([string]$warmupResult.Stdout) "warmup turn $turn")
+        Assert-WarmupEvents $warmupEvents $turn
+        Add-EventTextToFile $eventsPath ([string]$warmupResult.Stdout)
+
         if ([string]::IsNullOrWhiteSpace($sessionId)) {
-            $sessionId = Get-SessionIdFromEvents ([string]$warmupResult.Stdout)
+            $sessionId = Get-SessionIdFromParsedEvents $warmupEvents
             if ([string]::IsNullOrWhiteSpace($sessionId)) {
                 Fail "Could not determine OpenCode session id from warmup turn $turn events"
             }
@@ -702,20 +769,14 @@ try {
     }
     Pass "OpenCode exited successfully"
 
-    $earlyEventLines = Get-Content $finalEventsPath | Where-Object { $_.Trim().Length -gt 0 }
+    $finalEvents = @(Read-StrictNdjsonEvents ([string]$runResult.Stdout) "final tool probe")
     $earlySkillSeen = $false
     $earlyReadSeen = $false
     $earlyBashSeen = $false
     $earlyNonSkillToolCount = 0
     $earlyFinalDoneSeen = $false
     $earlyPartialBashTextSeen = $false
-    foreach ($line in $earlyEventLines) {
-        try {
-            $event = $line | ConvertFrom-Json
-        } catch {
-            continue
-        }
-
+    foreach ($event in $finalEvents) {
         if ([string]$event.type -eq "tool_use") {
             $toolName = [string]$event.part.tool
             if ([string]::Equals($toolName, "skill", [StringComparison]::OrdinalIgnoreCase)) {
@@ -757,8 +818,20 @@ try {
     if (-not (Test-Path $step1Path)) { Fail "Missing $step1Path" }
     if (-not (Test-Path $step2Path)) { Fail "Missing $step2Path" }
     if (-not (Test-Path $summaryPath)) { Fail "Missing $summaryPath" }
+    if (-not (Test-Path $environmentPath)) { Fail "Missing $environmentPath" }
     if (-not (Test-Path $resultPath)) { Fail "Missing $resultPath" }
     Pass "Probe artifact files were created"
+
+    $environmentJson = Read-JsonFile $environmentPath
+    $expectedWorkspace = (Resolve-Path ".").Path.TrimEnd('\\')
+    $observedWorkspace = ([string]$environmentJson.cwd).TrimEnd('\\')
+    if ([string]::IsNullOrWhiteSpace($observedWorkspace) -or -not [string]::Equals($observedWorkspace, $expectedWorkspace, [StringComparison]::OrdinalIgnoreCase)) {
+        Fail "workspace_grounding_failed: tool recorded cwd '$observedWorkspace', expected '$expectedWorkspace'"
+    }
+    if ([string]$environmentJson.sentinel -ne 'tests/agent-capability/input.txt') {
+        Fail "workspace_grounding_failed: sentinel path was not preserved"
+    }
+    Pass "Tool workspace grounding was recorded and verified"
 
     Write-JsonFile $metaPath ([ordered]@{
         model = $Model
@@ -886,6 +959,13 @@ try {
 
     Report-EconomyMetrics -LogText $newLogText -OutputDir $probeDir -ObservedNonSkillToolCalls $nonSkillToolCallCount
     Pass "Economy metrics captured"
+
+    $providerName = Get-ProviderNameFromModel $Model
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\extract-session-log.ps1" -LogPath $LogPath -EventsPath $eventsPath -Provider $providerName -OutputDir $probeDir -RequireExecutionEnvironmentAnchor -Strict
+    if ($LASTEXITCODE -ne 0) {
+        Fail "strict_log_audit_failed: proxy/event log contains an anomaly"
+    }
+    Pass "Strict proxy and event-log audit found no anomalies"
 
     Write-Host "CAPABILITY_PROBE_PASS"
     Write-Host "LONG_CONVERSATION_PROBE_PASS"

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   从 dev.log 提取会话时间线，高信噪比汇总
 
@@ -23,6 +23,11 @@
 param(
   [string]$LogPath = (Join-Path (Get-Location) "dev.log"),
   [string]$OutputDir = (Join-Path (Get-Location) "session-reports"),
+  [string]$EventsPath = "",
+  [string]$Provider = "",
+  [switch]$RequireExecutionEnvironmentAnchor,
+  [int]$MaxInterToolGapMs = 45000,
+  [switch]$Strict,
   [switch]$JsonOnly
 )
 
@@ -50,6 +55,9 @@ $RE_MALFORM  = '\[Forwarder\] Malformed tool output detected'
 $RE_FALLBACK = '\[Forwarder\] dedicated_provider_fallback'
 $RE_QWEN_SES = '\[Qwen\] Session info:.*sessionId:\s*''([^'']+)''.*reqId:\s*''([^'']+)'''
 $RE_GLM_CONV = '\[GLM\] Sending chat request'
+$RE_QWEN_ASSEMBLY = '\[Qwen\] Request assembly trace:\s*(\{.+\})$'
+$RE_RUNTIME_ECONOMY = '\[ProviderRuntime\] Context economy:\s*(\{.+\})$'
+$RE_ATTEMPT_FAIL = '\[Forwarder\] Provider request attempt (?:failed|threw):\s*(\{.+\})$'
 $RE_DEL      = '(Session deleted|Conversation deleted).*:\s*(\S+)'
 $RE_ERR      = '\[(Qwen|GLM|DeepSeek|Kimi|Forwarder)\]\s+(Failed|Error):?\s*(.+)'
 
@@ -138,6 +146,48 @@ Get-Content $LogPath -Encoding UTF8 | ForEach-Object {
     $records += [PSCustomObject]@{ line = $lineNum; kind = 'error'; provider = $matches[1]; msg = $matches[3].Substring(0, [Math]::Min(140, $matches[3].Length)) }
     return
   }
+
+  if ($line -match $RE_QWEN_ASSEMBLY) {
+    try { $data = $matches[1] | ConvertFrom-Json } catch { $data = $null }
+    $records += [PSCustomObject]@{
+      line = $lineNum; kind = 'qwen_assembly'; raw = $data
+      finalChars = if ($data) { [int]$data.finalContentLength } else { 0 }
+      environmentAnchor = if ($data) { [bool]$data.hasExecutionEnvironmentAnchor } else { $false }
+    }
+    return
+  }
+
+  if ($line -match $RE_RUNTIME_ECONOMY) {
+    try { $data = $matches[1] | ConvertFrom-Json } catch { $data = $null }
+    $records += [PSCustomObject]@{
+      line = $lineNum; kind = 'runtime_economy'; raw = $data
+      providerAction = if ($data) { [string]$data.providerSessionAction } else { '' }
+      providerSessionSource = if ($data) { [string]$data.providerSessionIdSource } else { '' }
+      repeatedRuntimeMarkers = if ($data -and $data.contextEconomy) { [int]$data.contextEconomy.repeatedRuntimeConfigMarkers } else { 0 }
+      repeatedToolContractMarkers = if ($data -and $data.contextEconomy) { [int]$data.contextEconomy.repeatedToolContractMarkers } else { 0 }
+    }
+    return
+  }
+
+  if ($line -match $RE_ATTEMPT_FAIL) {
+    try { $data = $matches[1] | ConvertFrom-Json } catch { $data = $null }
+    $records += [PSCustomObject]@{
+      line = $lineNum; kind = 'provider_attempt_failure'; raw = $data
+      provider = if ($data) { [string]$data.providerId } else { '' }
+      attempt = if ($data) { [int]$data.attempt } else { 0 }
+      maxAttempts = if ($data) { [int]$data.maxAttempts } else { 0 }
+      status = if ($data) { [int]$data.status } else { 0 }
+      boundary = if ($data) { [string]$data.boundary } else { '' }
+      message = if ($data) { [string]$data.error } else { 'unparseable provider attempt failure' }
+    }
+    return
+  }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($Provider)) {
+  $records = @($records | Where-Object {
+    $_.kind -notin @('request', 'error', 'provider_attempt_failure') -or [string]::Equals([string]$_.provider, $Provider, [StringComparison]::OrdinalIgnoreCase)
+  })
 }
 
 Write-Host ("[+] Extracted {0} signal records from {1} lines ({2:N1}% hit rate)" -f
@@ -182,6 +232,12 @@ foreach ($r in $records) {
       fallback      = $false
       errors        = @()
       deleted       = @()
+      assemblyChars = 0
+      environmentAnchor = $false
+      providerAction = ''
+      providerSessionSource = ''
+      repeatedRuntimeMarkers = 0
+      repeatedToolContractMarkers = 0
       eventLines    = if ($null -ne $pendingToolTransform) { @($pendingToolTransform.line) } else { @() }
     }
     $pendingToolTransform = $null
@@ -231,6 +287,18 @@ foreach ($r in $records) {
     }
   }
   elseif ($r.kind -eq 'glm_chat_send' -and $sessions.Count -gt 0) {
+    $sessions[-1].eventLines += $r.line
+  }
+  elseif ($r.kind -eq 'qwen_assembly' -and $sessions.Count -gt 0) {
+    $sessions[-1].assemblyChars = $r.finalChars
+    $sessions[-1].environmentAnchor = $r.environmentAnchor
+    $sessions[-1].eventLines += $r.line
+  }
+  elseif ($r.kind -eq 'runtime_economy' -and $sessions.Count -gt 0) {
+    $sessions[-1].providerAction = $r.providerAction
+    $sessions[-1].providerSessionSource = $r.providerSessionSource
+    $sessions[-1].repeatedRuntimeMarkers = $r.repeatedRuntimeMarkers
+    $sessions[-1].repeatedToolContractMarkers = $r.repeatedToolContractMarkers
     $sessions[-1].eventLines += $r.line
   }
 }
@@ -314,12 +382,26 @@ foreach ($s in ($sessions | Where-Object { $_.summaryRej })) {
   $issues += "#$($s.id) L$($s.line): summary REJECTED reason='$($s.summaryRej)' — model would see empty/invalid summary in compact"
 }
 
-# compact 后是否新建了 provider session？
-for ($i = 0; $i -lt $sessions.Count - 1; $i++) {
-  if ($sessions[$i].boundary -in @('client_compact', 'server_summary') -and
-      $sessions[$i+1].provSessionId -and $sessions[$i].provSessionId -and
-      $sessions[$i+1].provSessionId -eq $sessions[$i].provSessionId) {
-    $issues += "#$($sessions[$i].id)->#$($sessions[$i+1].id): compact but provider session unchanged ($($sessions[$i].provSessionId)) — context may be stale"
+# The first compact turn must establish a new provider epoch; later active-tool
+# handoff turns are expected to reuse that epoch. Flag only an explicit fresh
+# boundary that still reuses a session, not all session reuse after compaction.
+foreach ($s in $sessions) {
+  $isCompactBoundary = $s.boundary -eq 'client_compact' -or $s.boundary -eq 'server_summary'
+  if ($isCompactBoundary -and $s.providerAction -eq 'start_fresh' -and $s.providerSessionSource -eq 'state') {
+    $issues += "#$($s.id) L$($s.line): start_fresh boundary reused provider state — compact epoch may be stale"
+  }
+  if ($RequireExecutionEnvironmentAnchor -and $s.provider -eq 'qwen' -and $isCompactBoundary -and -not $s.environmentAnchor) {
+    $issues += "#$($s.id) L$($s.line): compacted Qwen request lacks execution-environment anchor"
+  }
+  $knownQwenAction = $s.providerAction -eq 'reuse_parent' -or $s.providerAction -eq 'start_fresh' -or $s.providerAction -eq 'start_child' -or $s.providerAction -eq 'consume_child_handoff'
+  if ($s.provider -eq 'qwen' -and $s.providerAction -and -not $knownQwenAction) {
+    $issues += "#$($s.id) L$($s.line): unknown Qwen provider session action '$($s.providerAction)'"
+  }
+  if ($s.repeatedRuntimeMarkers -gt 0) {
+    $issues += "#$($s.id) L$($s.line): repeated runtime configuration markers=$($s.repeatedRuntimeMarkers)"
+  }
+  if ($s.repeatedToolContractMarkers -gt 0) {
+    $issues += "#$($s.id) L$($s.line): repeated tool-contract markers=$($s.repeatedToolContractMarkers)"
   }
 }
 
@@ -333,6 +415,10 @@ foreach ($s in ($sessions | Where-Object { $_.fallback })) {
   $issues += "#$($s.id) L$($s.line): used dedicated_fallback — provider runtime was bypassed"
 }
 
+foreach ($failure in ($records | Where-Object { $_.kind -eq 'provider_attempt_failure' })) {
+  $issues += "L$($failure.line): provider request failed (attempt $($failure.attempt)/$($failure.maxAttempts), status=$($failure.status), boundary=$($failure.boundary)): $($failure.message)"
+}
+
 # context management 未触发 summary 引导
 foreach ($s in ($sessions | Where-Object { $_.ctxBefore -gt 0 -and $_.summaryOk -eq 0 -and -not $_.summaryHandoff -and $_.summaryRej -eq '' -and -not $_.summaryFail })) {
   $issues += "#$($s.id) L$($s.line): context reduced $($s.ctxBefore)->$($s.ctxAfter) but NO summary trace — truncation without compaction?"
@@ -343,6 +429,69 @@ $toolChildSessions = $sessions | Where-Object { $_.boundary -eq 'tool_child' -an
 foreach ($s in $toolChildSessions) {
   if ($s.deleted.Count -eq 0) {
     $issues += "#$($s.id) L$($s.line): tool_child session $($s.provSessionId) not cleaned up"
+  }
+}
+
+$eventAudit = [ordered]@{
+  source = $EventsPath
+  parsed = $false
+  toolCalls = 0
+  maxInterToolGapMs = 0
+  duplicateAdjacentToolInputs = @()
+  failedToolEvents = @()
+  rawProtocolTextEvents = @()
+}
+if (-not [string]::IsNullOrWhiteSpace($EventsPath)) {
+  if (-not (Test-Path $EventsPath)) {
+    $issues += "event audit requested but file was not found: $EventsPath"
+  } else {
+    $lastToolTimestamp = $null
+    $previousToolSignature = ''
+    $eventLine = 0
+    foreach ($eventRaw in @(Get-Content $EventsPath -Encoding UTF8)) {
+      $eventLine++
+      if ([string]::IsNullOrWhiteSpace($eventRaw)) { continue }
+      try { $event = $eventRaw | ConvertFrom-Json } catch {
+        $issues += "event L${eventLine}: invalid NDJSON"
+        continue
+      }
+      $eventAudit.parsed = $true
+      $eventText = $eventRaw
+      if ([string]$event.type -eq 'text' -and $eventText -match '<\|CHAT2API\|(?:tool_calls|invoke|parameter)|</(?:tool_call|arg_value)>') {
+        $eventAudit.rawProtocolTextEvents += $eventLine
+      }
+      if ([string]$event.type -ne 'tool_use') { continue }
+      $tool = [string]$event.part.tool
+      $toolStatus = [string]$event.part.state.status
+      if ($toolStatus -and $toolStatus -ne 'completed') {
+        $eventAudit.failedToolEvents += $eventLine
+      }
+      $input = if ($null -ne $event.part.state.input) { $event.part.state.input | ConvertTo-Json -Compress -Depth 20 } else { '' }
+      $signature = "$tool|$input"
+      $eventAudit.toolCalls++
+      if ($signature -eq $previousToolSignature) {
+        $eventAudit.duplicateAdjacentToolInputs += $eventLine
+      }
+      $previousToolSignature = $signature
+      $timestamp = if ($null -ne $event.timestamp) { [int64]$event.timestamp } else { [int64]0 }
+      if ($lastToolTimestamp -ne $null -and $timestamp -gt $lastToolTimestamp) {
+        $gap = $timestamp - $lastToolTimestamp
+        if ($gap -gt $eventAudit.maxInterToolGapMs) { $eventAudit.maxInterToolGapMs = $gap }
+      }
+      if ($timestamp -gt 0) { $lastToolTimestamp = $timestamp }
+    }
+    foreach ($line in $eventAudit.duplicateAdjacentToolInputs) {
+      $issues += "event L${line}: duplicate adjacent tool input"
+    }
+    foreach ($line in $eventAudit.failedToolEvents) {
+      $issues += "event L${line}: tool event did not complete"
+    }
+    foreach ($line in $eventAudit.rawProtocolTextEvents) {
+      $issues += "event L${line}: raw managed-tool protocol leaked as assistant text"
+    }
+    if ($eventAudit.toolCalls -gt 1 -and $eventAudit.maxInterToolGapMs -gt $MaxInterToolGapMs) {
+      $issues += "event audit: maximum tool-to-tool gap $($eventAudit.maxInterToolGapMs)ms exceeds ${MaxInterToolGapMs}ms"
+    }
   }
 }
 
@@ -367,6 +516,7 @@ if (-not $JsonOnly) {
     signalCount = $records.Count
     sessionCount= $sessions.Count
     issues      = $issues
+    eventAudit  = $eventAudit
     sessions    = @($sessions | ForEach-Object {
       [PSCustomObject]@{
         id        = $_.id
@@ -389,6 +539,8 @@ if (-not $JsonOnly) {
         compactChars = $_.compactChars
         malformed = $_.malformed
         fallback  = $_.fallback
+        repeatedRuntimeMarkers = $_.repeatedRuntimeMarkers
+        repeatedToolContractMarkers = $_.repeatedToolContractMarkers
         errorCount = $_.errors.Count
         deleted   = $_.deleted
         eventLines = $_.eventLines
@@ -398,4 +550,9 @@ if (-not $JsonOnly) {
   $path = Join-Path $OutputDir "session-report-$ts.json"
   $report | ConvertTo-Json -Depth 5 | Out-File $path -Encoding UTF8
   Write-Host "`n[+] Report: $path" -ForegroundColor Green
+}
+
+if ($Strict -and $issues.Count -gt 0) {
+  Write-Host "[ERROR] Strict audit rejected $($issues.Count) issue(s)." -ForegroundColor Red
+  exit 2
 }

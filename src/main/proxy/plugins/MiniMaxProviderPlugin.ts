@@ -1,12 +1,15 @@
 /**
- * MiniMaxProviderPlugin — Phase 1 wrapper around MiniMaxAdapter
+ * MiniMaxProviderPlugin — Phase 3c
+ *
+ * Delegates rendering to providers/minimax/renderer.ts and parsing to
+ * providers/minimax/parser.ts. Inlines token parsing and session
+ * deletion from the adapter.
  *
  * Implements the WebProviderPlugin interface to bridge between
  * ProviderRuntime normalized types and the MiniMax web provider protocol.
  *
  * Transport: polling_stream — the provider processes messages asynchronously
- * and the client polls for results. The initial send_msg request triggers
- * processing and returns a chat_id used for subsequent polling.
+ * and the client polls for results.
  */
 
 import type { WebProviderPlugin } from './WebProviderPlugin.ts'
@@ -15,72 +18,17 @@ import type {
   ProviderWebRequest,
   ProviderWebResponse,
   ProviderRuntimeResult,
+  ProviderRuntimeEvent,
   ProviderRuntimeError,
   ProviderDeleteSessionInput,
   ProviderDeleteSessionResult,
+  ProviderRuntimeStreamInput,
 } from './types.ts'
 import { MiniMaxAdapter } from '../adapters/minimax.ts'
+import { renderMiniMaxRequest } from '../providers/minimax/renderer.ts'
+import { parseMiniMaxStream, parseMiniMaxNonStream } from '../providers/minimax/parser.ts'
+import { buildCleanedRequest } from '../core/requestCleaner.ts'
 import axios from 'axios'
-import crypto from 'crypto'
-
-const AGENT_BASE_URL = 'https://agent.minimaxi.com'
-
-/**
- * MD5 hash helper, matching MiniMaxAdapter's internal function.
- */
-function md5(input: string): string {
-  return crypto.createHash('md5').update(input).digest('hex')
-}
-
-/**
- * Extract text content from a message content field.
- */
-function extractTextContent(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .filter((c: Record<string, unknown>) => c.type === 'text')
-      .map((c: Record<string, unknown>) => String(c.text ?? ''))
-      .join('\n')
-  }
-  return String(content ?? '')
-}
-
-/**
- * Build the MiniMax send_msg request body from normalized messages.
- *
- * Mirrors MiniMaxAdapter.messagesPrepare() logic but simplified for
- * managed_xml (tool calls embedded as XML in text content).
- */
-function buildMiniMaxBody(
-  messages: Array<{ role: string; content: unknown }>,
-): Record<string, unknown> {
-  const parts: string[] = []
-  let system = ''
-  for (const msg of messages) {
-    const txt = extractTextContent(msg.content)
-    if (!txt) continue
-    if (msg.role === 'system') {
-      system = txt
-    } else if (msg.role === 'assistant') {
-      parts.push(`Assistant: ${txt}`)
-    } else {
-      parts.push(txt)
-    }
-  }
-  const joined = parts.join('\n\n')
-  const text = system ? `${system}\n\nUser: ${joined}` : joined
-
-  return {
-    msg_type: 1,
-    text,
-    chat_type: 1,
-    attachments: [],
-    selected_mcp_tools: [],
-    backend_config: {},
-    sub_agent_ids: [],
-  }
-}
 
 /**
  * Parse realUserID and jwtToken from a MiniMax credentials token.
@@ -151,88 +99,29 @@ export const MiniMaxProviderPlugin: WebProviderPlugin = {
       input.account.credentials as Record<string, unknown>,
     )
 
-    // Build the send_msg request body
-    const requestBody = buildMiniMaxBody(input.messages)
+    // Build cleaned request
+    const cleaned = buildCleanedRequest(input.assembly, {
+      promptRefreshMode: input.promptRefreshMode ?? 'full',
+      hasProviderSession: Boolean(input.sessionId),
+    })
 
-    // If we have an existing chat_id, include it for the continuation
-    if (sessionId) {
-      (requestBody as Record<string, unknown>).chat_id = sessionId
-    }
-
-    // Compute MiniMax auth headers (pure computation, no HTTP calls)
-    const unix = `${Date.now()}`
-    const timestamp = Math.floor(Date.now() / 1000)
-    const dataJson = JSON.stringify(requestBody)
-
-    // Build query string (matching MiniMaxAdapter.request() logic)
-    const queryParts: string[] = [
-      `device_platform=web`,
-      `biz_id=3`,
-      `app_id=3001`,
-      `version_code=22201`,
-      `uuid=${realUserID}`,
-      `os_name=Mac`,
-      `browser_name=chrome`,
-      `device_memory=8`,
-      `cpu_core_num=11`,
-      `browser_language=zh-CN`,
-      `browser_platform=MacIntel`,
-      `user_id=${realUserID}`,
-      `screen_width=1920`,
-      `screen_height=1080`,
-      `unix=${unix}`,
-      `lang=zh`,
-      `token=${jwtToken}`,
-      `timezone_offset=28800`,
-      `sys_language=zh`,
-      `client=web`,
-    ]
-    const queryStr = queryParts.join('&')
-
-    const uri = '/matrix/api/v1/chat/send_msg'
-    const fullUri = `${uri}?${queryStr}`
-    const yy = md5(
-      `${encodeURIComponent(fullUri)}_${dataJson}${md5(unix)}ooui`,
-    )
-    const signature = md5(`${timestamp}${jwtToken}${dataJson}`)
-
-    return {
-      url: `${AGENT_BASE_URL}${uri}`,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        token: jwtToken,
-        'x-timestamp': String(timestamp),
-        'x-signature': signature,
-        yy,
-      },
-      body: requestBody,
+    // Delegate to renderer
+    const minimaxRequest = renderMiniMaxRequest(cleaned, {
+      model: input.model,
+      originalModel: input.originalModel,
       sessionId,
       reqId,
-    }
+    }, jwtToken, realUserID)
+
+    return minimaxRequest
   },
 
   async parseNonStream(input: ProviderWebResponse): Promise<ProviderRuntimeResult> {
-    let sessionId = ''
-    let reqId = ''
+    return parseMiniMaxNonStream(input)
+  },
 
-    try {
-      const data = input.data as Record<string, unknown>
-      if (data?.chat_id) {
-        sessionId = String(data.chat_id)
-      }
-      if (data?.msg_id) {
-        reqId = String(data.msg_id)
-      }
-    } catch {
-      // Ignore parse errors, return empty strings
-    }
-
-    return {
-      sessionId,
-      reqId,
-      response: input,
-    }
+  parseStream(input: ProviderRuntimeStreamInput): AsyncIterable<ProviderRuntimeEvent> {
+    return parseMiniMaxStream(input)
   },
 
   async deleteSession(input: ProviderDeleteSessionInput): Promise<ProviderDeleteSessionResult> {

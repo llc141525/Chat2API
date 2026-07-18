@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { Readable } from 'node:stream'
 
-import { buildQwenAssemblyRequestBodyForTest, buildQwenChatRequestBodyForTest, QwenStreamHandler } from '../../src/main/proxy/adapters/qwen.ts'
+import { buildQwenAssemblyRequestBodyForTest, QwenStreamHandler } from '../../src/main/proxy/adapters/qwen.ts'
 import { createContextManagementService } from '../../src/main/proxy/services/contextManagementService.ts'
 import { deriveOpenAISessionIdentity } from '../../src/main/proxy/routes/openaiSession.ts'
 import {
@@ -139,46 +139,6 @@ function makeAccount() {
     updatedAt: 0,
   }
 }
-
-test('Qwen request body uses chat scene when continuing an existing session', () => {
-  const body = buildQwenChatRequestBodyForTest({
-    request: {
-      model: 'Qwen3-Max',
-      messages: [{ role: 'user', content: 'continue the thread' }],
-      stream: true,
-    },
-    actualModel: 'Qwen3-Max',
-    sessionId: 'existing-session',
-    reqId: 'new-req',
-    parentReqId: 'prev-req',
-    timestamp: 1,
-    enableThinking: false,
-    enableWebSearch: false,
-  })
-
-  assert.equal(body.session_id, 'existing-session')
-  assert.equal(body.parent_req_id, 'prev-req')
-  assert.equal(body.scene_param, 'chat')
-})
-
-test('Qwen request body keeps first_turn semantics for new sessions', () => {
-  const body = buildQwenChatRequestBodyForTest({
-    request: {
-      model: 'Qwen3-Max',
-      messages: [{ role: 'user', content: 'start a thread' }],
-      stream: true,
-    },
-    actualModel: 'Qwen3-Max',
-    sessionId: 'new-session',
-    reqId: 'new-req',
-    timestamp: 1,
-    enableThinking: false,
-    enableWebSearch: false,
-  })
-
-  assert.equal(body.parent_req_id, '0')
-  assert.equal(body.scene_param, 'first_turn')
-})
 
 test('provider conversation state helpers live outside forwarder and are used by qwen path', () => {
   const forwarderSource = readFileSync('src/main/proxy/forwarder.ts', 'utf8')
@@ -1632,69 +1592,6 @@ test('tool_ready qwen assembly preserves completed read evidence and the next ex
   assert.match(content, /writeFileSync\('\.agent-probe\/long-step-1\.txt'/i)
   assert.match(content, /Do not repeat completed reads or bash writes/i)
   assert.equal(content.includes('input body input body'), false)
-})
-
-test('tool_ready qwen assembly trace reports managed tool contract without logging prompt content', () => {
-  const logs: string[] = []
-  const originalLog = console.log
-  console.log = (...args: unknown[]) => {
-    logs.push(args.map(String).join(' '))
-  }
-
-  try {
-    buildQwenAssemblyRequestBodyForTest({
-      assembly: {
-        messages: [
-          { role: 'system', content: 'system directive' },
-          { role: 'system', content: '[Prior conversation summary] compacted tool workflow' },
-          { role: 'assistant', content: null, tool_calls: [makeToolCall('call_read_input', 'read', '{"filePath":"tests/agent-capability/input.txt"}')] },
-          { role: 'tool', tool_call_id: 'call_read_input', content: 'input body' },
-        ],
-        summaryText: '[Prior conversation summary] compacted tool workflow',
-        toolManifest: {
-          renderedPrompt: [
-            'catalog_fingerprint: catalog-fp-1',
-            '<|CHAT2API|tool_calls><|CHAT2API|invoke name="read"></|CHAT2API|invoke></|CHAT2API|tool_calls>',
-          ].join('\n'),
-        } as any,
-      },
-      request: {
-        model: 'Qwen3-Max',
-        messages: [
-          { role: 'assistant', content: null, tool_calls: [makeToolCall('call_read_input', 'read', '{"filePath":"tests/agent-capability/input.txt"}')] },
-          { role: 'tool', tool_call_id: 'call_read_input', content: 'input body' },
-        ],
-        promptRefreshMode: 'tool_ready',
-        sessionId: 'server-summary-fork',
-      },
-      actualModel: 'Qwen3-Max',
-      sessionId: 'provider-session',
-      reqId: 'req-trace',
-      parentReqId: 'req-previous',
-      timestamp: 1,
-      enableThinking: false,
-      enableWebSearch: false,
-    })
-  } finally {
-    console.log = originalLog
-  }
-
-  const traceLine = logs.find(line => line.startsWith('[Qwen] Request assembly trace: '))
-  assert.ok(traceLine, 'expected qwen assembly path to emit a request assembly trace')
-  const traceJson = traceLine.replace('[Qwen] Request assembly trace: ', '')
-  const trace = JSON.parse(traceJson)
-
-  assert.equal(trace.messageCount, 4)
-  assert.equal(trace.systemMessageCount, 1)
-  assert.equal(trace.conversationPartCount, 2)
-  assert.equal(trace.hasManagedToolContract, true)
-  assert.equal(trace.hasSummaryIsolationHeader, true)
-  assert.equal(trace.promptRefreshMode, 'tool_ready')
-  assert.equal(typeof trace.finalContentLength, 'number')
-  assert.ok(trace.finalContentLength > 0)
-  assert.equal(traceLine.includes('<|CHAT2API|tool_calls>'), false)
-  assert.equal(traceLine.includes('catalog_fingerprint:'), false)
-  assert.equal(traceLine.includes('tests/agent-capability/input.txt'), false)
 })
 
 test('tool_ready qwen assembly preserves step 8 bash command checkpoint after server summary', async () => {

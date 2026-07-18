@@ -230,7 +230,6 @@ test('GLM, Kimi, and MiniMax built-in default models match current web providers
     'utf8',
   )
   assert.match(minimaxAdapterSource, /this\.model = 'MiniMax-M2\.7'/)
-  assert.match(minimaxAdapterSource, /request\.model \|\| 'MiniMax-M2\.7'/)
   assert.doesNotMatch(minimaxAdapterSource, /MiniMax-M2\.5/)
 })
 

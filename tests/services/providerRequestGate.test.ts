@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  markProviderRequestStreamFinished,
   resetProviderRequestGatesForTest,
   runThroughProviderRequestGate,
 } from '../../src/main/proxy/services/providerRequestGate.ts'
@@ -39,4 +40,20 @@ test('provider request gate backs off longer after 429', async () => {
   }, result => result.status)
 
   assert.ok(starts[1] - starts[0] >= 30)
+})
+
+test('provider request gate spaces the next request from stream completion', async () => {
+  resetProviderRequestGatesForTest()
+  const starts: number[] = []
+  const options = { minIntervalMs: 35, rateLimitBackoffMs: 100 }
+
+  await runThroughProviderRequestGate('glm:account', options, async () => ({ status: 200 }), result => result.status)
+  const streamFinishedAt = Date.now()
+  markProviderRequestStreamFinished('glm:account', options)
+  await runThroughProviderRequestGate('glm:account', options, async () => {
+    starts.push(Date.now())
+    return { status: 200 }
+  }, result => result.status)
+
+  assert.ok(starts[0] - streamFinishedAt >= 30)
 })

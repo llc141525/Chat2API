@@ -13,9 +13,17 @@
 
 import type { ChatMessage } from '../types'
 import { hasGeneralToolPromptSignature, GENERAL_TOOL_SIGNATURES } from '../constants/signatures.ts'
+import { extractTextContent } from './contextPayloadClassifier.ts'
 
 const TOOLS_XML_TEST = /<tools>[\s\S]*?<\/tools>/i
 const TOOLS_XML_REPLACE = /<tools>[\s\S]*?<\/tools>/gi
+// Runtime orchestration payloads are not conversation facts. These are
+// protocol signatures, not a client identity check; each client can emit a
+// different subset and a future client can add another signature centrally.
+const RUNTIME_WORKFLOW_SIGNATURES = [
+  'superpowers',
+  'SUBAGENT-STOP',
+]
 
 export interface SanitizeResult {
   sanitized: ChatMessage[]
@@ -49,12 +57,15 @@ export function sanitizeMessagesForSummary(messages: ChatMessage[]): SanitizeRes
   const sanitized: ChatMessage[] = []
 
   for (const msg of messages) {
+    const textContent = extractTextContent(msg.content)
+    // A client may place its bootstrap/runtime envelope in either system or
+    // user role. It is not task history in either form, so never narrate it.
+    if ((msg.role === 'system' || msg.role === 'user') && isRuntimeConfigurationPayload(textContent)) {
+      droppedCount++
+      continue
+    }
+
     if (msg.role === 'system') {
-      const content = typeof msg.content === 'string' ? msg.content : ''
-      if (hasGeneralToolPromptSignature(content) || TOOLS_XML_TEST.test(content)) {
-        droppedCount++
-        continue
-      }
       sanitized.push(msg)
       continue
     }
@@ -83,7 +94,7 @@ export function sanitizeMessagesForSummary(messages: ChatMessage[]): SanitizeRes
     }
 
     if (msg.role === 'assistant') {
-      const content = typeof msg.content === 'string' ? msg.content : ''
+      const content = extractTextContent(msg.content)
       if (content.length > 0 && (hasGeneralToolPromptSignature(content) || TOOLS_XML_TEST.test(content))) {
         const stripped = stripToolCatalogSpans(content)
         strippedSignatureCount++
@@ -103,6 +114,18 @@ export function sanitizeMessagesForSummary(messages: ChatMessage[]): SanitizeRes
   }
 
   return { sanitized, droppedCount, strippedSignatureCount }
+}
+
+function isRuntimeConfigurationPayload(content: string): boolean {
+  if (hasGeneralToolPromptSignature(content) || TOOLS_XML_TEST.test(content)) return true
+  const runtimeMarkerCount = RUNTIME_WORKFLOW_SIGNATURES.filter(signature => content.includes(signature)).length
+  // Do not discard a genuine user question that merely mentions two protocol
+  // terms. A bootstrap envelope also identifies an execution context or has
+  // the size of a configuration document.
+  const hasBootstrapCue = /(?:^|\n)\s*(?:working directory|current directory|workspace(?: root| directory)?|project root|cwd)\s*:/im.test(content)
+    || /(?:^|\n)\s*you are\b/im.test(content)
+    || content.length >= 1000
+  return runtimeMarkerCount >= 2 && hasBootstrapCue
 }
 
 /**

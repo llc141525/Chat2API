@@ -1,3 +1,4 @@
+import { logger } from '../shared/logger.ts'
 /**
  * ADR-001: Tool prompt injection is owned by ToolCallingEngine.
  * This file is a Provider Adapter — it must NEVER import
@@ -136,20 +137,10 @@ function extractManagedToolPrompt(messages: GLMMessage[]): { messages: GLMMessag
 
   if (toolsPrompt) {
     const toolNamesInPrompt = [...toolsPrompt.matchAll(/Tool `([^`]+)`/g)].map((m) => m[1])
-    console.log('[GLM] Extracted tool prompt — tool names:', toolNamesInPrompt)
+    logger.info('[GLM] Extracted tool prompt — tool names:', toolNamesInPrompt)
   }
 
   return { messages: cleanedMessages, toolsPrompt }
-}
-
-export function buildGLMPromptMessagesForTest(
-  messages: GLMMessage[],
-  refs: any[] = [],
-  isMultiTurn: boolean = false,
-): { role: string; content: any[] }[] {
-  const adapter = Object.create(GLMAdapter.prototype) as GLMAdapter
-  const managedToolPrompt = extractManagedToolPrompt(messages)
-  return (adapter as any).messagesToPrompt(managedToolPrompt.messages, refs, managedToolPrompt.toolsPrompt, isMultiTurn)
 }
 
 export function buildGLMAssemblyPromptMessagesForTest(
@@ -234,7 +225,7 @@ export class GLMAdapter {
       return cached.accessToken
     }
 
-    console.log('[GLM] Refreshing Token...')
+    logger.info('[GLM] Refreshing Token...')
     const sign = generateSign()
     const response = await axios.post(
       `${GLM_API_BASE}/user-api/user/refresh`,
@@ -254,7 +245,7 @@ export class GLMAdapter {
       }
     )
 
-    console.log('[GLM] Token response:', JSON.stringify(response.data, null, 2))
+    logger.info('[GLM] Token response:', JSON.stringify(response.data, null, 2))
     const { code, status, message } = response.data || {}
     const isSuccess = code === 0 || status === 0
     if (response.status !== 200 || !isSuccess) {
@@ -271,7 +262,7 @@ export class GLMAdapter {
     tokenCache.set(refreshToken, tokenInfo)
 
     if (refresh_token !== refreshToken) {
-      console.log('[GLM] Token updated, saving new token')
+      logger.info('[GLM] Token updated, saving new token')
       const decryptedCredentials = {
         refresh_token,
       }
@@ -281,7 +272,7 @@ export class GLMAdapter {
       })
     }
 
-    console.log('[GLM] Token refresh successful')
+    logger.info('[GLM] Token refresh successful')
     return access_token
   }
 
@@ -311,7 +302,7 @@ export class GLMAdapter {
    * Upload file to GLM
    */
   private async uploadFile(fileUrl: string): Promise<{ source_id: string; file_url?: string }> {
-    console.log('[GLM] Uploading file:', fileUrl.substring(0, 50) + '...')
+    logger.info('[GLM] Uploading file:', fileUrl.substring(0, 50) + '...')
     
     let filename: string
     let fileData: Buffer
@@ -360,7 +351,7 @@ export class GLMAdapter {
       throw new Error(`File upload failed: HTTP ${response.status}`)
     }
 
-    console.log('[GLM] File uploaded successfully:', response.data.result.source_id)
+    logger.info('[GLM] File uploaded successfully:', response.data.result.source_id)
     return response.data.result
   }
 
@@ -471,7 +462,7 @@ export class GLMAdapter {
         }
 
         if (shouldLogPromptPreview(messages)) {
-          console.log('[GLM] Final prompt preview:', textContent)
+          logger.info('[GLM] Final prompt preview:', textContent)
         }
 
         content.push({ type: 'text', text: textContent })
@@ -515,7 +506,7 @@ export class GLMAdapter {
     }
 
     if (shouldLogPromptPreview(messages)) {
-      console.log('[GLM] Final prompt preview:', textContent)
+      logger.info('[GLM] Final prompt preview:', textContent)
     }
 
     content.push({ type: 'text', text: textContent })
@@ -547,10 +538,10 @@ export class GLMAdapter {
           validateStatus: () => true,
         }
       )
-      console.log('[GLM] Conversation deleted:', conversationId)
+      logger.info('[GLM] Conversation deleted:', conversationId)
       return true
     } catch (error) {
-      console.error('[GLM] Failed to delete conversation:', error)
+      logger.error('[GLM] Failed to delete conversation:', error)
       return false
     }
   }
@@ -585,11 +576,11 @@ export class GLMAdapter {
           }
         )
 
-        console.log('[GLM] Get conversation list page', page, 'response:', JSON.stringify(listResponse.data, null, 2))
+        logger.info('[GLM] Get conversation list page', page, 'response:', JSON.stringify(listResponse.data, null, 2))
 
         const { status, result } = listResponse.data || {}
         if (listResponse.status !== 200 || status !== 0) {
-          console.error('[GLM] Failed to get conversation list')
+          logger.error('[GLM] Failed to get conversation list')
           return false
         }
 
@@ -607,11 +598,11 @@ export class GLMAdapter {
       }
 
       if (allConversationIds.length === 0) {
-        console.log('[GLM] No conversations to delete')
+        logger.info('[GLM] No conversations to delete')
         return true
       }
 
-      console.log('[GLM] Found', allConversationIds.length, 'conversations to delete')
+      logger.info('[GLM] Found', allConversationIds.length, 'conversations to delete')
 
       // Step 2: Bulk delete conversations
       const sign = generateSign()
@@ -634,16 +625,16 @@ export class GLMAdapter {
         }
       )
 
-      console.log('[GLM] Bulk delete response:', JSON.stringify(deleteResponse.data, null, 2))
+      logger.info('[GLM] Bulk delete response:', JSON.stringify(deleteResponse.data, null, 2))
 
       const deleteResult = deleteResponse.data || {}
       const success = deleteResponse.status === 200 && deleteResult.status === 0
       if (success) {
-        console.log('[GLM] All chats deleted')
+        logger.info('[GLM] All chats deleted')
       }
       return success
     } catch (error) {
-      console.error('[GLM] Failed to delete all chats:', error)
+      logger.error('[GLM] Failed to delete all chats:', error)
       return false
     }
   }
@@ -658,7 +649,7 @@ function convertNativeToolCallsToXml(toolCalls: any[]): string {
     const fn = tc.function || tc
     const name = fn.name || tc.name || ''
     if (!name) {
-      console.warn('[GLM] Native tool_call without name:', JSON.stringify(tc).substring(0, 200))
+      logger.warn('[GLM] Native tool_call without name:', JSON.stringify(tc).substring(0, 200))
       return ''
     }
     const args = typeof fn.arguments === 'string' ? safeParseJson(fn.arguments) : (fn.arguments || {})
@@ -894,7 +885,7 @@ export class GLMStreamHandler {
             }
             if (chunk) {
               if (chunk.includes('<|CHAT2API|') || chunk.includes('<tool_calls>')) {
-                console.log('[GLM] Tool call marker detected in chunk:', chunk.substring(0, 200))
+                logger.info('[GLM] Tool call marker detected in chunk:', chunk.substring(0, 200))
               }
             }
 
@@ -908,7 +899,7 @@ export class GLMStreamHandler {
                     (tc: any) => !this.emittedNativeToolCallIds.has(tc.id || tc.call_id || '')
                   )
                   if (newCalls.length > 0) {
-                    console.log('[GLM] Native tool_calls detected:', JSON.stringify(newCalls).substring(0, 300))
+                    logger.info('[GLM] Native tool_calls detected:', JSON.stringify(newCalls).substring(0, 300))
                     for (const tc of newCalls) {
                       const id = tc.id || tc.call_id || ''
                       if (id) this.emittedNativeToolCallIds.add(id)
@@ -916,7 +907,7 @@ export class GLMStreamHandler {
                     nativeToolCallsXml += convertNativeToolCallsToXml(newCalls)
                   }
                 } else if (!['text', 'think', 'image', 'code', 'execution_output', 'tool_result', 'tool_calls'].includes(item.type)) {
-                  console.log('[GLM] Unhandled content type:', item.type, 'keys:', Object.keys(item).join(', '))
+                  logger.info('[GLM] Unhandled content type:', item.type, 'keys:', Object.keys(item).join(', '))
                 }
               }
             }
@@ -954,7 +945,7 @@ export class GLMStreamHandler {
             )
           }
         } catch (err) {
-          console.error('[GLM] Stream parse error:', err)
+          logger.error('[GLM] Stream parse error:', err)
         }
       },
     })
@@ -967,13 +958,13 @@ export class GLMStreamHandler {
 
     // Handle stream errors - ensure proper cleanup
     inputStream.once('error', (err: Error) => {
-      console.error('[GLM] Stream error:', err.message)
+      logger.error('[GLM] Stream error:', err.message)
       finishStream()
     })
 
     // Handle stream close - ensure proper cleanup if not already finished
     inputStream.once('close', () => {
-      console.log('[GLM] Stream closed')
+      logger.info('[GLM] Stream closed')
       finishStream()
     })
 
@@ -1150,19 +1141,19 @@ export class GLMStreamHandler {
   ): any | null {
     const contentEncoding = String(response?.headers?.['content-encoding'] || '').toLowerCase()
     if (contentEncoding === 'gzip') {
-      console.log('[GLM] Decompressing gzip stream...')
+      logger.info('[GLM] Decompressing gzip stream...')
       return stream.pipe(createGunzip())
     }
     if (contentEncoding === 'deflate') {
-      console.log('[GLM] Decompressing deflate stream...')
+      logger.info('[GLM] Decompressing deflate stream...')
       return stream.pipe(createInflate())
     }
     if (contentEncoding === 'br') {
-      console.log('[GLM] Decompressing brotli stream...')
+      logger.info('[GLM] Decompressing brotli stream...')
       return stream.pipe(createBrotliDecompress())
     }
     if (contentEncoding === 'zstd') {
-      console.log('[GLM] Decompressing zstd stream...')
+      logger.info('[GLM] Decompressing zstd stream...')
       const chunks: Buffer[] = []
       stream.on('data', (chunk: Buffer) => chunks.push(chunk))
       stream.once('end', () => {
@@ -1175,12 +1166,12 @@ export class GLMStreamHandler {
             onZstdEnd?.()
           })
         } catch (err) {
-          console.error('[GLM] Zstd decompression error:', err)
+          logger.error('[GLM] Zstd decompression error:', err)
           onZstdEnd?.()
         }
       })
       stream.once('error', (err: Error) => {
-        console.error('[GLM] Stream error:', err)
+        logger.error('[GLM] Stream error:', err)
         onZstdEnd?.()
       })
       return null

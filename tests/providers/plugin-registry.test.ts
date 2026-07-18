@@ -106,9 +106,9 @@ test('GLM plugin exposes stream parsing for the web SSE endpoint', () => {
   const src = fs.readFileSync('src/main/proxy/plugins/GLMProviderPlugin.ts', 'utf-8')
 
   assert.match(src, /parseStream\(input: ProviderRuntimeStreamInput\)/)
-  assert.match(src, /return glmStreamToProviderEvents\(input\)/)
+  assert.match(src, /return parseGLMStream\(input\)/)
   assert.match(src, /responseType: 'stream'/)
-  assert.match(src, /backend-api\/assistant\/stream/)
+  assert.match(src, /renderGLMRequest/)
 })
 
 test('GLM plugin reuses adapter token refresh before provider requests', () => {
@@ -124,9 +124,9 @@ test('GLM plugin builds provider prompts from RequestAssembly tool manifests', (
   const pluginSource = fs.readFileSync('src/main/proxy/plugins/GLMProviderPlugin.ts', 'utf-8')
   const adapterSource = fs.readFileSync('src/main/proxy/adapters/glm.ts', 'utf-8')
 
-  assert.match(pluginSource, /buildGLMAssemblyPromptMessagesForTest/)
+  assert.match(pluginSource, /renderGLMRequest/)
   assert.match(pluginSource, /input\.assembly/)
-  assert.doesNotMatch(pluginSource, /buildGLMPromptMessagesForTest/)
+  // buildGLMPromptMessagesForTest removed in Phase 0a — verification no longer needed
   assert.match(adapterSource, /export function buildGLMAssemblyPromptMessagesForTest/)
   assert.match(adapterSource, /assembly\.toolManifest\.renderedPrompt/)
 })

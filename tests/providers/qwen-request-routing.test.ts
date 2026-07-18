@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 
 import {
   buildQwenAssemblyRequestBodyForTest,
-  buildQwenChatRequestBodyForTest,
 } from '../../src/main/proxy/adapters/qwen.ts'
 import { buildRequestAssembly } from '../../src/main/proxy/RequestAssembly.ts'
 import { createContextManagementService } from '../../src/main/proxy/services/contextManagementService.ts'
@@ -53,7 +52,7 @@ test('Qwen request body keeps router query as the latest real user message', () 
   }
 
   const transformed = engine.transformRequest({ request, provider: qwenProvider, actualModel: 'Qwen3-Max' })
-  const body = buildQwenChatRequestBodyForTest({
+  const body = buildQwenAssemblyRequestBodyForTest({
     request: {
       model: 'Qwen3-Max',
       messages: transformed.messages as any,
@@ -148,7 +147,7 @@ test('Qwen request body preserves tool contract after low-threshold summary comp
     actualModel: 'Qwen3.7-Max',
     toolSessionKey: 'qwen-low-threshold-summary-test',
   })
-  const body = buildQwenChatRequestBodyForTest({
+  const body = buildQwenAssemblyRequestBodyForTest({
     request: {
       model: 'Qwen3.7-Max',
       messages: transformed.messages as any,
@@ -181,7 +180,7 @@ test('Qwen request body preserves tool contract after low-threshold summary comp
 })
 
 test('Qwen request body concatenates multiple system messages instead of keeping only the last one', () => {
-  const body = buildQwenChatRequestBodyForTest({
+  const body = buildQwenAssemblyRequestBodyForTest({
     request: {
       model: 'Qwen3.7-Max',
       stream: true,

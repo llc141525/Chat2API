@@ -1,5 +1,8 @@
 /**
- * MimoProviderPlugin — Phase 1 wrapper around MimoAdapter
+ * MimoProviderPlugin — Phase 1 wrapper delegating to renderer/parser
+ *
+ * Delegates request rendering to providers/mimo/renderer.ts and
+ * response parsing to providers/mimo/parser.ts.
  *
  * Implements the WebProviderPlugin interface to bridge between
  * ProviderRuntime normalized types and the Mimo web provider protocol.
@@ -12,25 +15,15 @@ import type {
   ProviderWebResponse,
   ProviderRuntimeResult,
   ProviderRuntimeError,
+  ProviderRuntimeEvent,
   ProviderDeleteSessionInput,
   ProviderDeleteSessionResult,
+  ProviderRuntimeStreamInput,
 } from './types.ts'
-import { MimoAdapter, buildMimoQuery } from '../adapters/mimo.ts'
+import { MimoAdapter } from '../adapters/mimo.ts'
+import { renderMimoRequest } from '../providers/mimo/renderer.ts'
+import { parseMimoStream, parseMimoNonStream } from '../providers/mimo/parser.ts'
 import axios from 'axios'
-
-const MIMO_API_BASE = 'https://aistudio.xiaomimimo.com'
-
-/**
- * Generate a UUID-like string without dashes.
- */
-function generateId(separator: boolean = true): string {
-  const id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0
-    const v = c === 'x' ? r : (r & 0x3) | 0x8
-    return v.toString(16)
-  })
-  return separator ? id : id.replace(/-/g, '')
-}
 
 export const MimoProviderPlugin: WebProviderPlugin = {
   id: 'mimo',
@@ -53,85 +46,15 @@ export const MimoProviderPlugin: WebProviderPlugin = {
   },
 
   async buildRequest(input: ProviderRuntimeRequest): Promise<ProviderWebRequest> {
-    const credentials = input.account.credentials as Record<string, string>
-    const serviceToken = credentials.service_token ?? ''
-    const userId = credentials.user_id ?? ''
-    const phToken = credentials.ph_token ?? ''
-
-    const conversationId = input.sessionId || generateId(false)
-    const msgId = generateId(false).slice(0, 32)
-    const reqId = msgId
-
-    // Build query from messages using the exported pure function
-    const query = buildMimoQuery(
-      input.messages as Parameters<typeof buildMimoQuery>[0],
-    )
-
-    // Check model name hints for thinking
-    const modelLower = (input.originalModel || input.model).toLowerCase()
-    const enableThinking = input.enableThinking
-      ?? (modelLower.includes('think') || modelLower.includes('r1'))
-
-    const requestBody = {
-      msgId,
-      conversationId,
-      query,
-      isEditedQuery: false,
-      modelConfig: {
-        enableThinking,
-        webSearchStatus: 'disabled' as const,
-        model: input.model,
-        temperature: input.temperature ?? 0.8,
-        topP: 0.95,
-      },
-      multiMedias: [],
-    }
-
-    const queryString = `xiaomichatbot_ph=${encodeURIComponent(phToken)}`
-    const url = `${MIMO_API_BASE}/open-apis/bot/chat?${queryString}`
-
-    return {
-      url,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Cookie: `serviceToken=${serviceToken}; userId=${userId}; xiaomichatbot_ph=${phToken}`,
-        Origin: MIMO_API_BASE,
-        Referer: `${MIMO_API_BASE}/`,
-      },
-      body: requestBody,
-      sessionId: conversationId,
-      reqId,
-    }
+    return renderMimoRequest(input)
   },
 
   async parseNonStream(input: ProviderWebResponse): Promise<ProviderRuntimeResult> {
-    let sessionId = ''
-    let reqId = ''
+    return parseMimoNonStream(input)
+  },
 
-    try {
-      const data = input.data as Record<string, unknown>
-      // Mimo sends dialogId in the SSE event stream
-      if (data?.dialogId) {
-        sessionId = String(data.dialogId)
-      }
-      // Also try to extract from the raw SSE text if data is a string buffer
-      if (typeof input.data === 'string' || input.data instanceof String) {
-        const text = String(input.data)
-        const dialogMatch = text.match(/"dialogId"\s*:\s*"([^"]+)"/)
-        if (dialogMatch) {
-          sessionId = dialogMatch[1]
-        }
-      }
-    } catch {
-      // Ignore parse errors, return empty strings
-    }
-
-    return {
-      sessionId,
-      reqId,
-      response: input,
-    }
+  parseStream(input: ProviderRuntimeStreamInput): AsyncIterable<ProviderRuntimeEvent> {
+    return parseMimoStream(input)
   },
 
   async deleteSession(input: ProviderDeleteSessionInput): Promise<ProviderDeleteSessionResult> {

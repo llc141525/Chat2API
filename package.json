@@ -27,6 +27,10 @@
     "build:linux": "npm run build && electron-builder --linux",
     "build:all": "npm run build && electron-builder --win --mac --linux",
     "release": "node scripts/release.js",
+    "test": "node scripts/run-tests.js",
+    "test:ci": "node scripts/run-tests.js",
+    "test:fast": "node --test tests/providers/qwen-session-continuity.test.ts tests/providers/glm-tool-calling.test.ts tests/services/summarySanitizer.test.ts tests/services/requestAssembly-context-economy.test.ts tests/tool-calling/tool-manifest.test.ts tests/tool-calling/tool-stream-parser.test.ts tests/services/promptBudget-context-economy.test.ts tests/providers/plugin-registry.test.ts",
+    "test:coverage": "node --experimental-test-coverage --test tests/",
     "lint": "eslint src/main/proxy/adapters/",
     "lint:fix": "eslint src/main/proxy/adapters/ --fix"
   },

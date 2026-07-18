@@ -104,10 +104,23 @@ export function buildRequestAssembly(input: BuildRequestAssemblyInput): RequestA
     && compactMessages.every((message, index) => message === input.messages[index])
     ? input.messages
     : compactMessages
-  // Extract infrastructure from raw messages BEFORE filtering — compaction
-  // strips agent definitions and skill content. Re-inject them so the model
-  // retains its role and multi-step skill workflow across compactions.
-  const infrastructurePrompt = buildInfrastructurePromptFromMessages(input.messages)
+  // Project infrastructure only when the provider-facing history lost it to
+  // compaction/configuration filtering. Replaying a still-present system role
+  // at the end of an ordinary request changes instruction precedence (for
+  // example, a client's auxiliary title role can override the newest task).
+  // This condition is client-neutral and applies equally to coding agents,
+  // chat clients, and future integrations.
+  const needsInfrastructureProjection = Boolean(
+    workflowDigest
+    || input.summaryText
+    || compatibilitySummary
+    || input.contextResult?.summaryGenerated
+    || providerMessages !== input.messages
+    || input.messages.some(isRawSkillMessage),
+  )
+  const infrastructurePrompt = needsInfrastructureProjection
+    ? buildInfrastructurePromptFromMessages(input.messages)
+    : null
 
   return {
     messages: providerMessages,
@@ -136,13 +149,24 @@ export function selectProviderMessagesForAssembly(
     maxCheckpointChars?: number
   } = {},
 ): ChatMessage[] {
-  const messages = filterProviderMessageHistory(assembly.messages, options)
+  const filteredMessages = filterProviderMessageHistory(assembly.messages, options)
+  // Raw skill tool results are runtime configuration, not conversation state.
+  // Replace them before looking for a checkpoint: otherwise a checkpoint that
+  // embeds the raw result can reintroduce the full skill document after the
+  // history filter has already removed it.
+  const hasRawSkillHistory = filteredMessages.some(message => isRawSkillMessage(message))
+  const messages = hasRawSkillHistory && assembly.infrastructurePrompt?.trim()
+    ? filteredMessages.map(message => isRawSkillMessage(message)
+      ? { ...message, content: assembly.infrastructurePrompt!.trim() }
+      : message,
+    )
+    : filteredMessages
   const constraint = assembly.toolActionConstraint
   if (constraint?.kind !== 'first_skill_required') {
     const activeSkillCheckpoint = findLastTextContaining(messages, ACTIVE_SKILL_CHECKPOINT_MARKER)
     if (activeSkillCheckpoint) {
       const maxCheckpointChars = options.maxCheckpointChars ?? 4000
-      const boundedCheckpoint = stripConfigurationLines(activeSkillCheckpoint)
+      const boundedCheckpoint = stripConfigurationLines(stripRawSkillDocument(activeSkillCheckpoint))
         .slice(0, Math.max(0, maxCheckpointChars))
 
       return [{
@@ -156,19 +180,6 @@ export function selectProviderMessagesForAssembly(
         ].join('\n'),
       }]
     }
-  }
-
-  // Raw skill tool results are runtime configuration, not conversation state.
-  // The assembly already carries a bounded infrastructure projection extracted
-  // from the latest skill result, so replace raw documents with that projection.
-  const hasRawSkillHistory = messages.some(message => isRawSkillMessage(message))
-  if (hasRawSkillHistory && assembly.infrastructurePrompt?.trim()) {
-    return messages.map(message => {
-      if (!isRawSkillMessage(message)) {
-        return message
-      }
-      return { ...message, content: assembly.infrastructurePrompt.trim() }
-    })
   }
 
   if (constraint?.kind !== 'first_skill_required') {
@@ -219,7 +230,7 @@ function filterProviderMessageHistory(
 
     const text = extractTextContent(message.content)
     const className = classifyTextPayload(text).className
-    if (options.dropRuntimeConfig && className === 'runtime_config') {
+    if (options.dropRuntimeConfig && isDiscardableRuntimeConfiguration(message, text)) {
       continue
     }
     const hasConfigurationMarker = [
@@ -273,6 +284,66 @@ function filterProviderMessageHistory(
   return filtered
 }
 
+/**
+ * A provider must not inherit a client's unbounded runtime/tool configuration
+ * after compaction. This deliberately recognizes protocol structure, not a
+ * particular client brand: Codex, Claude Code, Hermes, OpenCode, and future
+ * clients can all describe a tool catalog differently.
+ */
+function isDiscardableRuntimeConfiguration(message: ChatMessage, text: string): boolean {
+  if (message.role !== 'system' && message.role !== 'user') return false
+  // Drop an entire message only when no task/role residue survives the same
+  // line-level projection used below. Mixed messages are common at client
+  // boundaries; deleting them loses the user's current instruction.
+  const hasOnlyConfigurationLines = () => {
+    const residue = stripConfigurationLines(text)
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+      // Execution-location facts are infrastructure, not a user task. They
+      // are projected separately when compaction actually needs them.
+      .filter(line => !/^(?:working directory|current directory|workspace(?: directory| root)?|project root|cwd)\s*:/i.test(line))
+
+    if (residue.length === 0) return true
+
+    // Preserve meaningful role/task prose from a mixed boundary payload, but
+    // do not let identifier-like runtime residue keep an entire bootstrap.
+    return !residue.some(line => (
+      !/^[A-Z][A-Z0-9_]{7,}$/.test(line)
+      && /[\p{L}]/u.test(line)
+      && /(?:\s|[.!?。！？])/u.test(line)
+    ))
+  }
+  if (isLikelyConfigurationPayload(text)) return hasOnlyConfigurationLines()
+
+  // Classification gives tool-exchange markers precedence. A bootstrap can
+  // contain those markers too, so detect a repeated runtime envelope before
+  // applying that precedence. This stays client-neutral: execution-location
+  // labels and document size identify configuration shape, not a client name.
+  const runtimeMarkerCount = ['superpowers', 'SUBAGENT-STOP']
+    .filter(marker => text.includes(marker))
+    .length
+  const hasExecutionBootstrapCue = /(?:^|\n)\s*(?:working directory|current directory|workspace(?: root| directory)?|project root|cwd)\s*:/im.test(text)
+    || /(?:^|\n)\s*you are\b/im.test(text)
+    || text.length >= 1000
+  if (runtimeMarkerCount >= 2 && hasExecutionBootstrapCue && hasOnlyConfigurationLines()) return true
+
+  const genericToolContractSignals = [
+    'Tool Contract Header',
+    '## Available Tools',
+    '## Tool Call Protocol',
+    'contract_header_version:',
+    'catalog_fingerprint:',
+    'allowed_tools:',
+    'TOOL_WRAP_HINT',
+    'You can invoke the following developer tools',
+    'Tool Call Formatting',
+    '<tools>',
+  ]
+  const signalCount = genericToolContractSignals.filter(signal => text.includes(signal)).length
+  return signalCount >= 2 && hasOnlyConfigurationLines()
+}
+
 function stripConfigurationLines(text: string): string {
   return text
     .split(/\r?\n/)
@@ -292,6 +363,11 @@ function stripConfigurationLines(text: string): string {
 
 function buildInfrastructurePromptFromMessages(messages: ChatMessage[]): string | null {
   const sections: string[] = []
+
+  const executionEnvironment = buildExecutionEnvironmentPrompt(messages)
+  if (executionEnvironment) {
+    sections.push(executionEnvironment)
+  }
 
   // Agent definition: first system-role message not containing tool contract markers
   const agentDef = messages.find(m => {
@@ -325,8 +401,33 @@ function buildInfrastructurePromptFromMessages(messages: ChatMessage[]): string 
   return sections.length > 0 ? sections.join('\n\n') : null
 }
 
+/** Keep only stable project-location facts from an otherwise discarded runtime prompt. */
+function buildExecutionEnvironmentPrompt(messages: ChatMessage[]): string | null {
+  const labels = /^(?:working directory|current directory|workspace(?: directory| root)?|project root|cwd)\s*:\s*(.+)$/i
+  const facts = new Set<string>()
+
+  for (const message of messages) {
+    if (message.role !== 'system') continue
+    for (const line of extractTextContent(message.content).split(/\r?\n/)) {
+      const match = line.trim().match(labels)
+      if (!match || match[1].trim().length > 500) continue
+      facts.add(line.trim().replace(/\s+/g, ' '))
+      if (facts.size >= 8) break
+    }
+    if (facts.size >= 8) break
+  }
+
+  return facts.size > 0
+    ? `[Execution environment — authoritative for this session]\n${[...facts].join('\n')}`
+    : null
+}
+
 function isRawSkillMessage(message: ChatMessage): boolean {
   return extractTextContent(message.content).includes('<skill_content')
+}
+
+function stripRawSkillDocument(text: string): string {
+  return text.replace(/<skill_content\b[\s\S]*?(?:<\/skill_content>|$)/gi, '')
 }
 
 function extractSkillStepLines(skillContent: string): string | null {

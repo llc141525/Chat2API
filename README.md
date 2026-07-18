@@ -77,17 +77,17 @@ Most web-session gateways work for a single request, then become unreliable when
 
 The built-in provider adapters currently cover:
 
-| Provider | Guide |
-| --- | --- |
-| DeepSeek | [Guide](docs/providers/deepseek.md) |
-| GLM | [Guide](docs/providers/glm.md) |
-| Kimi | [Guide](docs/providers/kimi.md) |
-| MiniMax | [Guide](docs/providers/minimax.md) |
-| MiMo | [Guide](docs/providers/mimo.md) |
-| Perplexity | [Guide](docs/providers/perplexity.md) |
-| Qwen | [Guide](docs/providers/qwen.md) |
-| Qwen AI | [Guide](docs/providers/qwen-ai.md) |
-| Z.ai | [Guide](docs/providers/zai.md) |
+| Provider | Default models | Guide |
+| --- | --- | --- |
+| DeepSeek | deepseek-v4-flash, deepseek-v4-pro | [Guide](docs/providers/deepseek.md) |
+| GLM | GLM-5.2, GLM-5.1 | [Guide](docs/providers/glm.md) |
+| Kimi | Kimi-K2.6 | [Guide](docs/providers/kimi.md) |
+| MiniMax | MiniMax-M2.7 | [Guide](docs/providers/minimax.md) |
+| Mimo | MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5-Pro, MiMo-V2.5, MiMo-V2-Flash | [Guide](docs/providers/mimo.md) |
+| Perplexity | Auto | [Guide](docs/providers/perplexity.md) |
+| Qwen | Qwen3.6, Qwen3.7-Max, Qwen3.5-Flash, Qwen3-Max, Qwen3-Max-Thinking-Preview, Qwen3-Coder | [Guide](docs/providers/qwen.md) |
+| Qwen AI | Qwen3.7-Max, Qwen3.6-Plus, Qwen3.6-35B-A3B, Qwen3.6-27B, Qwen3-Coder | [Guide](docs/providers/qwen-ai.md) |
+| Z.ai | Temporarily unavailable due to frontend captcha risk control | [Guide](docs/providers/zai.md) |
 
 Provider authentication methods and available model names change over time. Check the individual guide and the in-app provider catalog instead of hard-coding a model list in client configuration.
 

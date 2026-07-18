@@ -1,5 +1,9 @@
 /**
- * GLMProviderPlugin — Phase 1 wrapper around GLMAdapter
+ * GLMProviderPlugin — Phase 3b wrapper
+ *
+ * Delegates rendering to providers/glm/renderer.ts and parsing to
+ * providers/glm/parser.ts. Inlines file upload, token acquisition,
+ * and conversation deletion logic from the GLM adapter.
  *
  * Implements the WebProviderPlugin interface to bridge between
  * ProviderRuntime normalized types and the GLM web provider protocol.
@@ -17,39 +21,16 @@ import type {
   ProviderDeleteSessionInput,
   ProviderDeleteSessionResult,
 } from './types.ts'
-import { GLMAdapter, GLMStreamHandler, buildGLMAssemblyPromptMessagesForTest } from '../adapters/glm.ts'
-import { selectProviderMessagesForAssembly } from '../RequestAssembly.ts'
-import crypto from 'node:crypto'
+import { GLMAdapter } from '../adapters/glm.ts'
+import { renderGLMRequest } from '../providers/glm/renderer.ts'
+import { parseGLMStream, parseGLMNonStream } from '../providers/glm/parser.ts'
+import { buildCleanedRequest } from '../core/requestCleaner.ts'
 import axios from 'axios'
+import crypto from 'node:crypto'
 
 const GLM_API_BASE = 'https://chatglm.cn/chatglm'
 const DEFAULT_ASSISTANT_ID = '65940acff94777010aa6b796'
 const SIGN_SECRET = '8a1317a7468aa3ad86e997d08f3f31cb'
-
-const FAKE_HEADERS: Record<string, string> = {
-  Accept: 'text/event-stream',
-  'Accept-Encoding': 'gzip, deflate, br, zstd',
-  'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
-  'App-Name': 'chatglm',
-  'Cache-Control': 'no-cache',
-  'Content-Type': 'application/json',
-  Origin: 'https://chatglm.cn',
-  Pragma: 'no-cache',
-  Priority: 'u=1, i',
-  'Sec-Ch-Ua': '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
-  'Sec-Ch-Ua-Mobile': '?0',
-  'Sec-Ch-Ua-Platform': '"Windows"',
-  'Sec-Fetch-Dest': 'empty',
-  'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'same-origin',
-  'X-App-Fr': 'browser_extension',
-  'X-App-Platform': 'pc',
-  'X-App-Version': '0.0.1',
-  'X-Device-Brand': '',
-  'X-Device-Model': '',
-  'X-Lang': 'zh',
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0',
-}
 
 /**
  * Generate a UUID string with dashes.
@@ -96,137 +77,22 @@ function generateSign(): { timestamp: string; nonce: string; sign: string } {
   return { timestamp, nonce, sign }
 }
 
-async function* glmStreamToProviderEvents(
-  input: ProviderRuntimeStreamInput,
-): AsyncIterable<ProviderRuntimeEvent> {
-  const handler = new GLMStreamHandler(input.model, undefined, undefined, input.toolCallingPlan)
-  const rawResponse = (input.rawResponse && typeof input.rawResponse === 'object')
-    ? input.rawResponse as Record<string, unknown>
-    : input.response as unknown as Record<string, unknown>
-  const responseStream = (rawResponse.data ?? input.response.data) as NodeJS.ReadableStream
-  const axiosLikeResponse = rawResponse.data !== undefined
-    ? rawResponse
-    : {
-        ...rawResponse,
-        status: rawResponse.status ?? input.response.status,
-        headers: rawResponse.headers ?? input.response.headers,
-        data: responseStream,
-      }
-
-  const openAiStream = await handler.handleStream(
-    responseStream,
-    axiosLikeResponse as any,
-  )
-
-  let buffer = ''
-  let emittedSessionUpdate = false
-
-  try {
-    for await (const chunk of openAiStream) {
-      buffer += chunk.toString()
-
-      while (true) {
-        const dblNewline = buffer.indexOf('\n\n')
-        if (dblNewline === -1) break
-
-        const eventBlock = buffer.slice(0, dblNewline)
-        buffer = buffer.slice(dblNewline + 2)
-
-        const dataLine = eventBlock
-          .split('\n')
-          .find((line) => line.startsWith('data:'))
-        if (!dataLine) continue
-
-        const payload = dataLine.slice(5).trim()
-        if (!payload || payload === '[DONE]') continue
-
-        let parsed: Record<string, any>
-        try {
-          parsed = JSON.parse(payload)
-        } catch {
-          continue
-        }
-
-        if (parsed.error) {
-          const statusCode = Number(parsed.error.code ?? 0)
-          yield {
-            type: 'error',
-            error: {
-              status: Number.isFinite(statusCode) ? statusCode : 0,
-              code: String(parsed.error.code ?? 'STREAM_ERROR'),
-              message: String(parsed.error.message ?? 'Stream error'),
-              retryable: statusCode >= 500 || statusCode === 0,
-              classified: true,
-            },
-          }
-          return
-        }
-
-        if (!emittedSessionUpdate && parsed.id) {
-          emittedSessionUpdate = true
-          yield {
-            type: 'session_update',
-            sessionId: String(parsed.id),
-            parentId: String(parsed.id),
-          }
-        }
-
-        const choice = parsed.choices?.[0]
-        const delta = choice?.delta ?? {}
-        const finishReason = choice?.finish_reason
-
-        if (typeof delta.content === 'string' && delta.content.length > 0) {
-          yield { type: 'text_delta', text: delta.content }
-        }
-        if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
-          yield { type: 'text_delta', text: delta.reasoning_content }
-        }
-
-        if (Array.isArray(delta.tool_calls)) {
-          for (const call of delta.tool_calls) {
-            yield {
-              type: 'tool_call_delta',
-              call: {
-                index: Number(call.index ?? 0),
-                id: typeof call.id === 'string' ? call.id : undefined,
-                function: call.function ? {
-                  ...(typeof call.function.name === 'string' ? { name: call.function.name } : {}),
-                  ...(typeof call.function.arguments === 'string' ? { arguments: call.function.arguments } : {}),
-                } : undefined,
-              },
-            }
-          }
-        }
-
-        if (finishReason) {
-          yield { type: 'done', finishReason }
-        }
-      }
-    }
-  } catch (err: unknown) {
-    yield {
-      type: 'error',
-      error: {
-        status: 0,
-        code: 'STREAM_ERROR',
-        message: err instanceof Error ? err.message : 'Stream processing error',
-        retryable: true,
-        classified: true,
-      },
-    }
-  }
-}
-
+/**
+ * Upload file/image references for GLM assembly messages.
+ * Uses private methods of GLMAdapter via prototype access.
+ */
 async function uploadGLMAssemblyRefs(
   adapter: GLMAdapter,
   messages: Array<{ role: string; content: unknown }>,
 ): Promise<any[]> {
-  const { fileUrls, imageUrls } = (adapter as any).extractFileUrls(messages)
+  // Access private methods via any cast for file upload
+  const adapterAny = adapter as any
+  const { fileUrls, imageUrls } = adapterAny.extractFileUrls(messages)
   const refs: any[] = []
 
   for (const fileUrl of fileUrls) {
     try {
-      const result = await (adapter as any).uploadFile(fileUrl)
+      const result = await adapterAny.uploadFile(fileUrl)
       refs.push({ source_id: result.source_id, file_url: result.file_url || fileUrl })
     } catch (error) {
       console.error('[GLM] Failed to upload file from runtime assembly:', error)
@@ -235,7 +101,7 @@ async function uploadGLMAssemblyRefs(
 
   for (const imageUrl of imageUrls) {
     try {
-      const result = await (adapter as any).uploadFile(imageUrl)
+      const result = await adapterAny.uploadFile(imageUrl)
       refs.push({
         source_id: result.source_id,
         image_url: result.file_url || imageUrl,
@@ -248,6 +114,37 @@ async function uploadGLMAssemblyRefs(
   }
 
   return refs
+}
+
+/**
+ * Log probe request assembly details for debugging.
+ */
+function traceProbeAssembly(messages: Array<{ role: string; content: unknown }>): void {
+  const text = messages.flatMap((message) => Array.isArray(message.content)
+    ? message.content
+      .filter((part): part is { type?: unknown; text?: unknown } => typeof part === 'object' && part !== null)
+      .map((part) => part.type === 'text' && typeof part.text === 'string' ? part.text : '')
+    : [],
+  ).join('\n')
+
+  const hasWarmupInstruction = text.includes('WARMUP_ACK_')
+  const hasLongTaskInstruction = text.includes('LONG_CONVERSATION_PROBE')
+  if (!hasWarmupInstruction && !hasLongTaskInstruction) return
+
+  console.log('[GLM] Probe request assembly:', JSON.stringify({
+    messageCount: messages.length,
+    roleCounts: messages.reduce<Record<string, number>>((counts, message) => {
+      counts[message.role] = (counts[message.role] ?? 0) + 1
+      return counts
+    }, {}),
+    textChars: text.length,
+    textSha256: crypto.createHash('sha256').update(text).digest('hex').slice(0, 16),
+    runtimeMarkerCount: (text.match(/superpowers/g) ?? []).length,
+    rawSkillDocumentCount: (text.match(/<skill_content\b/gi) ?? []).length,
+    activeSkillCheckpointCount: (text.match(/\[Active skill workflow state checkpoint\]/g) ?? []).length,
+    hasWarmupInstruction,
+    hasLongTaskInstruction,
+  }))
 }
 
 export const GLMProviderPlugin: WebProviderPlugin = {
@@ -273,10 +170,11 @@ export const GLMProviderPlugin: WebProviderPlugin = {
       minIntervalMs: 2000,
       rateLimitBackoffMs: 30000,
     },
+    firstStreamEventTimeoutMs: 20000,
   },
 
   async buildRequest(input: ProviderRuntimeRequest): Promise<ProviderWebRequest> {
-    // Create adapter instance for message conversion utilities and token refresh.
+    // Create adapter instance for token refresh and file upload utilities.
     const adapter = new GLMAdapter(input.provider, input.account)
     const hasManagedToolHistory = input.assembly.messages.some((message) => (
       (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
@@ -287,123 +185,101 @@ export const GLMProviderPlugin: WebProviderPlugin = {
     )
     const effectiveSessionId = startsManagedConversation ? undefined : input.sessionId
 
-    const assemblyMessages = selectProviderMessagesForAssembly(input.assembly, {
-      stripRuntimeConfig: true,
-      stripToolContractHistory: true,
-      dropRuntimeConfig: true,
+    // Build cleaned request
+    const cleaned = buildCleanedRequest(input.assembly, {
+      promptRefreshMode: input.promptRefreshMode ?? 'full',
+      hasProviderSession: !!effectiveSessionId,
     })
+
+    // For file uploads, we need the original assembly messages
+    const assemblyMessages = input.assembly.messages.filter((m) => m.role !== 'system')
     const refs = effectiveSessionId ? [] : await uploadGLMAssemblyRefs(adapter, assemblyMessages)
-    const preparedMessages = buildGLMAssemblyPromptMessagesForTest(
-      input.assembly,
-      refs,
-      !!effectiveSessionId,
-      !effectiveSessionId || !hasManagedToolHistory,
-    )
-    // Determine assistant ID from model name or use default
-    let assistantId = DEFAULT_ASSISTANT_ID
-    if (/^[a-z0-9]{24,}$/.test(input.model)) {
-      assistantId = input.model
-    }
 
-    // Determine chat mode from reasoning/thinking flags
-    let chatMode = ''
-    let isNetworking = false
-    const modelForDetection = input.originalModel || input.model
-    const modelLower = modelForDetection.toLowerCase()
-
-    if (input.enableThinking) {
-      chatMode = 'zero'
-    }
-    if (input.enableWebSearch) {
-      isNetworking = true
-    }
-    if (!chatMode && (modelLower.includes('think') || modelLower.includes('zero'))) {
-      chatMode = 'zero'
-    }
+    // Debug probe logging
+    traceProbeAssembly([
+      { role: 'user', content: cleaned.messages.map((m) => m.content as string).join('\n') },
+    ])
 
     const reqId = generateId()
-    const sign = generateSign()
-    const conversationId = effectiveSessionId || ''
     const token = await adapter.acquireToken()
+    const conversationId = effectiveSessionId || ''
 
-    const body = {
-      assistant_id: assistantId,
-      conversation_id: conversationId,
-      project_id: '',
-      chat_type: 'user_chat',
-      messages: preparedMessages,
-      meta_data: {
-        channel: '',
-        chat_mode: chatMode || undefined,
-        draft_id: '',
-        if_plus_model: true,
-        input_question_type: 'xxxx',
-        is_networking: isNetworking,
-        is_test: false,
-        platform: 'pc',
-        quote_log_id: '',
-        cogview: {
-          rm_label_watermark: false,
-        },
+    const webReq = renderGLMRequest(
+      cleaned,
+      {
+        model: input.model,
+        originalModel: input.originalModel,
+        sessionId: conversationId,
+        reqId,
+        parentReqId: input.parentReqId,
+        enableThinking: input.enableThinking ?? false,
+        enableWebSearch: input.enableWebSearch ?? false,
       },
-    }
+      token,
+      refs,
+    )
 
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${token}`,
-      ...FAKE_HEADERS,
-      'X-Device-Id': uuid(),
-      'X-Request-Id': uuid(),
-      'X-Sign': sign.sign,
-      'X-Timestamp': sign.timestamp,
-      'X-Nonce': sign.nonce,
-    }
-
+    // Add transport options
     return {
-      url: `${GLM_API_BASE}/backend-api/assistant/stream`,
-      method: 'POST',
-      headers,
-      body,
-      sessionId: conversationId,
-      reqId,
+      ...webReq,
       transportOptions: {
         responseType: 'stream',
-        timeout: 120000,
+        timeout: 45000,
         validateStatus: () => true,
       },
     }
   },
 
   async parseNonStream(input: ProviderWebResponse): Promise<ProviderRuntimeResult> {
-    let sessionId = ''
-    let reqId = ''
-
-    try {
-      const data = input.data as Record<string, any>
-      if (data?.conversation_id) {
-        sessionId = String(data.conversation_id)
-      }
-      if (data?.req_id) {
-        reqId = String(data.req_id)
-      }
-    } catch {
-      // Ignore parse errors, return empty strings
-    }
-
-    return {
-      sessionId,
-      reqId,
-      response: input,
-    }
+    return parseGLMNonStream(input)
   },
 
   async deleteSession(input: ProviderDeleteSessionInput): Promise<ProviderDeleteSessionResult> {
-    const adapter = new GLMAdapter(input.provider, input.account)
-    const success = await adapter.deleteConversation(input.sessionId)
-    return { success }
+    // Inline conversation deletion — acquire token and call delete API directly
+    try {
+      const adapter = new GLMAdapter(input.provider, input.account)
+      const token = await adapter.acquireToken()
+      const sign = generateSign()
+
+      const response = await axios.post(
+        `${GLM_API_BASE}/backend-api/assistant/conversation/delete`,
+        {
+          assistant_id: DEFAULT_ASSISTANT_ID,
+          conversation_id: input.sessionId,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Referer: 'https://chatglm.cn/main/alltoolsdetail',
+            'X-Device-Id': uuid(),
+            'X-Request-Id': uuid(),
+            'X-Sign': sign.sign,
+            'X-Timestamp': sign.timestamp,
+            'X-Nonce': sign.nonce,
+            'Accept': 'text/event-stream',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
+            'App-Name': 'chatglm',
+            'Cache-Control': 'no-cache',
+            'Content-Type': 'application/json',
+            Origin: 'https://chatglm.cn',
+            Pragma: 'no-cache',
+          },
+          timeout: 15000,
+          validateStatus: () => true,
+        },
+      )
+
+      console.log('[GLM] Conversation deleted:', input.sessionId, response.status)
+      return { success: response.status === 200 }
+    } catch (error) {
+      console.error('[GLM] Failed to delete conversation:', error)
+      return { success: false }
+    }
   },
 
   parseStream(input: ProviderRuntimeStreamInput): AsyncIterable<ProviderRuntimeEvent> {
-    return glmStreamToProviderEvents(input)
+    return parseGLMStream(input)
   },
 
   classifyError(error: unknown): ProviderRuntimeError {

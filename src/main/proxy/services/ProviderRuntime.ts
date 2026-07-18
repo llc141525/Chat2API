@@ -1,3 +1,4 @@
+import { logger } from '../shared/logger.ts'
 /**
  * ProviderRuntime Service
  * Abstracts session state management for provider adapters.
@@ -12,6 +13,8 @@ import type { Account, Provider } from '../../store/types.ts'
 import type { RequestAssembly } from '../RequestAssembly.ts'
 import type { ToolCallingTransformResult } from '../toolCalling/types.ts'
 import type { PromptRefreshMode } from '../promptBudgetPolicy.ts'
+import type { CleanedRequest } from '../core/requestCleaner.ts'
+import { buildCleanedRequest } from '../core/requestCleaner.ts'
 import { buildSessionBoundaryPlan } from './sessionBoundaryPlan.ts'
 import { buildContextEconomyDiagnostics, extractTextContent } from './contextPayloadClassifier.ts'
 import { projectRequestAssemblyForPromptMode } from './providerPromptProjection.ts'
@@ -25,7 +28,8 @@ import {
   shouldUseProviderConversationFallback,
 } from './providerConversationState.ts'
 import axios, { AxiosError, type AxiosInstance, type AxiosResponse } from 'axios'
-import { runThroughProviderRequestGate } from './providerRequestGate.ts'
+import { markProviderRequestStreamFinished, runThroughProviderRequestGate } from './providerRequestGate.ts'
+import { primeProviderStreamEvents } from './providerStreamGuard.ts'
 
 export type ReadSessionStateInput = {
   conversationStateKey: string
@@ -160,6 +164,13 @@ export class ProviderRuntime {
 
     const providerAssembly = projectRequestAssemblyForPromptMode(input.assembly, input.promptRefreshMode)
 
+    // Phase 3a: Pre-build CleanedRequest so the plugin receives
+    // a pre-filtered, truncated, delta-selected set of messages
+    const cleanedRequest = buildCleanedRequest(providerAssembly, {
+      promptRefreshMode: input.promptRefreshMode ?? 'full',
+      hasProviderSession: Boolean(providerSessionId),
+    })
+
     const promptChars = providerAssembly.messages.reduce(
       (total, message) => total + extractTextContent(message.content).length,
       0,
@@ -169,7 +180,7 @@ export class ProviderRuntime {
       promptRefreshMode: input.promptRefreshMode,
       promptChars,
     })
-    console.log('[ProviderRuntime] Context economy:', JSON.stringify({
+    logger.info('[ProviderRuntime] Context economy:', JSON.stringify({
       contextEconomy,
       providerSessionAction: sessionBoundaryPlan.providerSessionAction,
       providerSessionIdSource,
@@ -183,6 +194,7 @@ export class ProviderRuntime {
       originalModel: input.request.originalModel,
       messages: input.request.messages as any,
       assembly: providerAssembly,
+      cleanedRequest,
       promptRefreshMode: input.promptRefreshMode,
       sessionBoundaryReason: input.context.sessionBoundaryReason,
       sessionBoundaryPlan,
@@ -237,46 +249,101 @@ export class ProviderRuntime {
       reqId: webRequest!.reqId,
       })
 
+      const observedEvents = this.observeStreamEvents(
+        plugin.parseStream({
+          response: {
+            status,
+            headers,
+            data: (response as any).data,
+          },
+          rawResponse: response,
+          model: input.actualModel,
+          toolCallingPlan: input.transformed.plan,
+        }),
+        input,
+        webRequest,
+        plugin,
+        plugin.capabilities.requestThrottle
+          ? () => markProviderRequestStreamFinished(
+            `${input.provider.id}:${input.account.id}`,
+            plugin.capabilities.requestThrottle!,
+          )
+          : undefined,
+      )
+      const guardedEvents = plugin.capabilities.firstStreamEventTimeoutMs
+        ? await primeProviderStreamEvents(
+          observedEvents,
+          plugin.capabilities.firstStreamEventTimeoutMs,
+          () => {
+            const rawStream = (response as any).data
+            rawStream?.destroy?.(new Error('Provider stream first-event timeout'))
+          },
+          event => event.type !== 'session_update',
+        )
+        : { events: observedEvents }
+      if ('error' in guardedEvents) {
+        return {
+          success: false,
+          status: 504,
+          headers,
+          error: guardedEvents.error.message,
+          latency: Date.now() - startTime,
+        }
+      }
+
       return {
         success: true,
         status,
         headers,
-        stream: normalizeProviderStreamToOpenAI(this.observeStreamEvents(
-          plugin.parseStream({
-            response: {
-              status,
-              headers,
-              data: (response as any).data,
-            },
-            rawResponse: response,
-            model: input.actualModel,
-            toolCallingPlan: input.transformed.plan,
-          }),
-          input,
-          webRequest,
-          plugin,
-        )),
+        stream: normalizeProviderStreamToOpenAI(guardedEvents.events),
         latency,
       }
     }
 
     if (plugin.parseStream && webRequest.transportOptions?.responseType === 'stream') {
+      const observedEvents = this.observeStreamEvents(
+        plugin.parseStream({
+          response: {
+            status,
+            headers,
+            data: (response as any).data,
+          },
+          rawResponse: response,
+          model: input.actualModel,
+          toolCallingPlan: input.transformed.plan,
+        }),
+        input,
+        webRequest!,
+        plugin,
+        plugin.capabilities.requestThrottle
+          ? () => markProviderRequestStreamFinished(
+            `${input.provider.id}:${input.account.id}`,
+            plugin.capabilities.requestThrottle!,
+          )
+          : undefined,
+      )
+      const guardedEvents = plugin.capabilities.firstStreamEventTimeoutMs
+        ? await primeProviderStreamEvents(
+          observedEvents,
+          plugin.capabilities.firstStreamEventTimeoutMs,
+          () => {
+            const rawStream = (response as any).data
+            rawStream?.destroy?.(new Error('Provider stream first-event timeout'))
+          },
+          event => event.type !== 'session_update',
+        )
+        : { events: observedEvents }
+      if ('error' in guardedEvents) {
+        return {
+          success: false,
+          status: 504,
+          headers,
+          error: guardedEvents.error.message,
+          latency: Date.now() - startTime,
+        }
+      }
       const aggregated = await this.collectStreamEventsToOpenAI(
-        this.observeStreamEvents(
-          plugin.parseStream({
-            response: {
-              status,
-              headers,
-              data: (response as any).data,
-            },
-            rawResponse: response,
-            model: input.actualModel,
-            toolCallingPlan: input.transformed.plan,
-          }),
-          input,
-          webRequest,
-          plugin,
-        ),
+        guardedEvents.events,
         input.actualModel,
       )
 
@@ -424,18 +491,23 @@ export class ProviderRuntime {
     input: ProviderRuntimeForwardInput,
     webRequest: ProviderWebRequest,
     plugin: WebProviderPlugin,
+    onStreamSettled?: () => void,
   ): AsyncIterable<ProviderRuntimeEvent> {
-    for await (const event of events) {
-      if (event.type === 'session_update' && (event.sessionId || event.parentId)) {
-        this.writeRuntimeSessionState(input, {
-          plugin,
-          webRequest,
-          sessionId: event.sessionId || webRequest.sessionId,
-          reqId: event.parentId || webRequest.reqId,
-        })
-      }
+    try {
+      for await (const event of events) {
+        if (event.type === 'session_update' && (event.sessionId || event.parentId)) {
+          this.writeRuntimeSessionState(input, {
+            plugin,
+            webRequest,
+            sessionId: event.sessionId || webRequest.sessionId,
+            reqId: event.parentId || webRequest.reqId,
+          })
+        }
 
-      yield event
+        yield event
+      }
+    } finally {
+      onStreamSettled?.()
     }
   }
 

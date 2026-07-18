@@ -42,6 +42,15 @@ export async function runThroughProviderRequestGate<T>(
   }
 }
 
+/**
+ * A streamed provider response is not fully committed when its HTTP headers
+ * arrive. Start the next same-account request only after the stream settles.
+ */
+export function markProviderRequestStreamFinished(key: string, options: GateOptions): void {
+  const next = Date.now() + options.minIntervalMs
+  nextAllowedAt.set(key, Math.max(nextAllowedAt.get(key) ?? 0, next))
+}
+
 export function resetProviderRequestGatesForTest(): void {
   chains.clear()
   nextAllowedAt.clear()

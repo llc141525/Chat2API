@@ -170,6 +170,88 @@ test('SummaryStrategy uses local fallback summary when contamination detected in
   )
 })
 
+test('sanitizer drops a mixed runtime/tool system payload even when a protocol marker takes classifier precedence', () => {
+  const history: ChatMessage[] = [
+    msg('system', [
+      'Working directory: E:\\Chat2API',
+      'superpowers: active workflow instructions',
+      'SUBAGENT-STOP: do not continue the child session',
+      'Tool Contract Header',
+      'catalog_fingerprint: test-catalog',
+      '<|CHAT2API|tool_calls>',
+    ].join('\n')),
+    msg('user', 'Summarize the confirmed task progress.'),
+  ]
+
+  const { sanitized, droppedCount } = sanitizeMessagesForSummary(history)
+
+  assert.equal(droppedCount, 1)
+  assert.deepEqual(sanitized, [history[1]])
+})
+
+test('sanitizer drops runtime workflow directives that have no explicit tool-catalog header', () => {
+  const history: ChatMessage[] = [
+    msg('system', [
+      'Working directory: E:\\Chat2API',
+      'superpowers: follow the active workflow before responding',
+      'SUBAGENT-STOP: stop when the child workflow settles',
+    ].join('\n')),
+    msg('user', 'Summarize only the work completed so far.'),
+  ]
+
+  const { sanitized, droppedCount } = sanitizeMessagesForSummary(history)
+
+  assert.equal(droppedCount, 1)
+  assert.deepEqual(sanitized, [history[1]])
+})
+
+test('sanitizer recognizes runtime configuration carried in text content parts', () => {
+  const history: ChatMessage[] = [
+    {
+      role: 'system',
+      content: [
+        { type: 'text', text: 'Working directory: E:\\Chat2API' },
+        { type: 'text', text: 'superpowers: active workflow instructions' },
+        { type: 'text', text: 'SUBAGENT-STOP: stop when the child workflow settles' },
+      ],
+    },
+    msg('user', 'Summarize the confirmed task progress.'),
+  ]
+
+  const { sanitized, droppedCount } = sanitizeMessagesForSummary(history)
+
+  assert.equal(droppedCount, 1)
+  assert.deepEqual(sanitized, [history[1]])
+})
+
+test('sanitizer drops an old user-role runtime payload while retaining the real user task', () => {
+  const history: ChatMessage[] = [
+    msg('user', [
+      'Working directory: E:\\Chat2API',
+      'superpowers: active workflow instructions',
+      'SUBAGENT-STOP: stop when the child workflow settles',
+      'This message defines the client runtime, not the task.',
+    ].join('\n')),
+    msg('user', 'Implement the requested fix and preserve the verified result.'),
+  ]
+
+  const { sanitized, droppedCount } = sanitizeMessagesForSummary(history)
+
+  assert.equal(droppedCount, 1)
+  assert.deepEqual(sanitized, [history[1]])
+})
+
+test('sanitizer retains an ordinary user question that mentions runtime terms', () => {
+  const history: ChatMessage[] = [
+    msg('user', 'What do superpowers and SUBAGENT-STOP mean in this project?'),
+  ]
+
+  const { sanitized, droppedCount } = sanitizeMessagesForSummary(history)
+
+  assert.equal(droppedCount, 0)
+  assert.deepEqual(sanitized, history)
+})
+
 test('SummaryStrategy injects sanitized summary as isolated system narrative', async () => {
   const generator = async (msgs: ChatMessage[]) => `Summary of ${msgs.length} messages.`
   const strategy = new SummaryStrategy(

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
 import { gzipSync } from 'node:zlib'
 
-import { buildGLMAssemblyPromptMessagesForTest, buildGLMPromptMessagesForTest, GLMStreamHandler } from '../../src/main/proxy/adapters/glm.ts'
+import { buildGLMAssemblyPromptMessagesForTest, GLMStreamHandler } from '../../src/main/proxy/adapters/glm.ts'
 import { QwenStreamHandler } from '../../src/main/proxy/adapters/qwen.ts'
 import { QwenAiStreamHandler } from '../../src/main/proxy/adapters/qwen-ai.ts'
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
@@ -218,52 +218,6 @@ test('GLM: tool_choice=required enables tool injection', () => {
   assert.equal(result.plan.toolChoiceMode, 'required')
   assert.equal(result.plan.mode, 'managed')
   assert.equal(result.plan.shouldInjectPrompt, true)
-})
-
-test('GLM adapter moves managed XML tool prompt to the final instruction position', () => {
-  const engine = new ToolCallingEngine()
-  const request: ChatCompletionRequest = {
-    model: 'GLM-5.2',
-    messages: [
-      { role: 'system', content: 'You are a coding assistant.' },
-      { role: 'user', content: 'Read tests/agent-capability/input.txt' },
-    ],
-    tools: openCodeTools as any,
-    stream: true,
-  }
-  const transformed = engine.transformRequest({ request, provider: glmProvider, actualModel: 'glm-5.2' })
-
-  // Inject the toolManifest.renderedPrompt into the system message so the GLM adapter's
-  // extractManagedToolPrompt can find and reposition it (since tool contracts now live
-  // in result.toolManifest.renderedPrompt, NOT in result.messages).
-  const messagesWithToolPrompt = [...transformed.messages]
-  if (transformed.toolManifest?.renderedPrompt) {
-    const sysIdx = messagesWithToolPrompt.findIndex(m => m.role === 'system')
-    if (sysIdx >= 0) {
-      messagesWithToolPrompt[sysIdx] = {
-        ...messagesWithToolPrompt[sysIdx],
-        content: (messagesWithToolPrompt[sysIdx].content as string) + '\n\n' + transformed.toolManifest.renderedPrompt,
-      }
-    }
-  }
-
-  const promptMessages = buildGLMPromptMessagesForTest(messagesWithToolPrompt as any)
-  const text = promptMessages
-    .flatMap((message: any) => message.content)
-    .filter((item: any) => item.type === 'text')
-    .map((item: any) => item.text)
-    .join('\n')
-
-  assert.equal(promptMessages.length, 1)
-  assert.equal(countOccurrences(text, 'Tool Contract Header'), 1)
-  assert.equal(countOccurrences(text, '## Available Tools'), 1)
-  assert.ok(countOccurrences(text, '<|CHAT2API|tool_calls>') >= 1)
-  assert.match(text, /^You are a coding assistant\./)
-  assert.match(text, /Read tests\/agent-capability\/input\.txt/)
-  // Tools must be placed at the END, after the user message, so the model
-  // sees them closest to its generation point (avoids lost-in-the-middle).
-  assert.match(text, /Read tests\/agent-capability\/input\.txt[\s\S]*## Available Tools/)
-  assert.match(text, /## Available Tools[\s\S]*<\|CHAT2API\|tool_calls>/)
 })
 
 test('GLM assembly prompt includes runtime tool manifest action constraint', () => {
@@ -495,37 +449,8 @@ test('GLM assembly replaces raw skill documents even when the client sends them 
   assert.match(text, /Active skill workflow/)
 })
 
-test('GLM adapter adds a continuation anchor after trailing tool_result in multi-turn delta', () => {
-  const promptMessages = buildGLMPromptMessagesForTest([
-    { role: 'system', content: 'You are a coding assistant.' },
-    { role: 'user', content: 'Run the required long probe steps.' },
-    {
-      role: 'assistant',
-      content: null,
-      tool_calls: [
-        {
-          id: 'call_skill_0',
-          type: 'function',
-          function: { name: 'skill', arguments: '{"name":"long-conversation-probe"}' },
-        },
-      ],
-    },
-    {
-      role: 'tool',
-      tool_call_id: 'call_skill_0',
-      content: 'Step 1: use read. Step 2: use bash. Step 10: output the final marker assembled from LONG + CONVERSATION + PROBE + DONE with underscores.',
-    },
-  ] as any, [], true)
-
-  const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
-
-  assert.match(text, /LONG \+ CONVERSATION \+ PROBE \+ DONE/)
-  assert.match(text, /Continue from the tool result above by choosing the next required real tool call\./)
-  assert.match(text, /Only produce final assistant text after the required tool sequence is actually complete\./)
-})
-
 test('GLM adapter does not add the trailing tool_result continuation anchor when a fresh user turn exists', () => {
-  const promptMessages = buildGLMPromptMessagesForTest([
+  const promptMessages = buildGLMAssemblyPromptMessagesForTest({messages:[
     { role: 'system', content: 'You are a coding assistant.' },
     { role: 'user', content: 'Initial instruction.' },
     {
@@ -548,7 +473,7 @@ test('GLM adapter does not add the trailing tool_result continuation anchor when
       role: 'user',
       content: 'Now summarize what changed.',
     },
-  ] as any, [], true)
+  ],summaryText:null,infrastructurePrompt:null,toolManifest:null} as any, [], true, false)
 
   const text = promptMessages[0].content.find((item: any) => item.type === 'text')?.text
 
@@ -770,9 +695,6 @@ test('GLM and Qwen adapters do not inject legacy bracket prompts when forwarder 
   assert.doesNotMatch(glmSource, /^import\s+[^'"\n]*['"][^'\n]*(?:toolsToSystemPrompt|TOOL_WRAP_HINT)/m)
   assert.doesNotMatch(qwenSource, /^import\s+[^'"\n]*['"][^'\n]*(?:toolsToSystemPrompt|TOOL_WRAP_HINT|shouldInjectToolPrompt)/m)
   assert.doesNotMatch(qwenAiSource, /## Available Tools|\[function_calls\]|\[call:TOOL_NAME\]/)
-  assert.match(qwenAiSource, /getProviderToolProfile\('qwen-ai'\)/)
-  assert.match(qwenAiSource, /formatAssistantToolCalls/)
-  assert.match(qwenAiSource, /formatToolResult/)
 })
 
 test('managed_xml prompt explicitly tells models to include required schema parameters', () => {

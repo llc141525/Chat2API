@@ -13,6 +13,8 @@ import type { ProxyContext } from '../types.ts'
 import type { SessionBoundaryPlan } from '../services/sessionBoundaryPlan.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
+import type { CleanedRequest } from '../core/requestCleaner.ts'
+
 // ── Plugin identity ────────────────────────────────────────────────
 
 export interface ProviderPluginCapabilities {
@@ -32,6 +34,8 @@ export interface ProviderPluginCapabilities {
     minIntervalMs: number
     rateLimitBackoffMs: number
   }
+  /** Fail before the downstream client when an accepted stream emits no first event. */
+  firstStreamEventTimeoutMs?: number
 }
 
 // ── Request / response normalization ────────────────────────────────
@@ -42,6 +46,8 @@ export interface ProviderRuntimeRequest {
   model: string
   originalModel?: string
   assembly: RequestAssembly
+  /** Pre-built cleaned request — set by ProviderRuntime before delegating to the plugin */
+  cleanedRequest?: CleanedRequest
   promptRefreshMode?: PromptRefreshMode
   sessionBoundaryReason?: ProxyContext['sessionBoundaryReason']
   sessionBoundaryPlan?: SessionBoundaryPlan
