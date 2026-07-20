@@ -321,6 +321,52 @@ test('active workflow adds a bounded progress handoff after the pinned skill exc
   )
 })
 
+test('active workflow hands off completed work when the model repeats the same skill before compaction', async () => {
+  const service = new ContextManagementService({
+    enabled: true,
+    strategies: {
+      slidingWindow: { enabled: true, maxMessages: 6 },
+      tokenLimit: { enabled: false, maxTokens: 4000 },
+      summary: { enabled: true, keepRecentMessages: 2, summaryPrompt: 'Summarize progress only.' },
+    },
+    executionOrder: ['summary', 'slidingWindow'],
+  }, async () => 'Probe is in progress.')
+
+  const skillResult = (id: string) => ({
+    role: 'tool' as const,
+    tool_call_id: id,
+    content: '<skill_content>\n1. Read input.txt.\n2. Write notes.txt.\n</skill_content>',
+  })
+  const skillCall = (id: string) => ({
+    role: 'assistant' as const,
+    content: null,
+    tool_calls: [{
+      id,
+      type: 'function' as const,
+      function: { name: 'skill', arguments: '{"name":"probe"}' },
+    }],
+  })
+  const messages: ChatMessage[] = [
+    { role: 'system', content: 'You are a coding assistant.' },
+    { role: 'user', content: 'Run the probe.' },
+    skillCall('call_skill_1'),
+    skillResult('call_skill_1'),
+    skillCall('call_skill_2'),
+    skillResult('call_skill_2'),
+  ]
+
+  const result = await service.process(messages)
+  const checkpoint = result.messages.find((message) =>
+    message.role === 'system'
+      && typeof message.content === 'string'
+      && message.content.includes('[Active skill workflow state checkpoint]'),
+  )
+
+  assert.ok(checkpoint, 'repeated skill history must produce a bounded progress checkpoint')
+  assert.match(String(checkpoint?.content), /skill completed/i)
+  assert.match(String(checkpoint?.content), /Required next action: call the read tool/i)
+})
+
 test('active workflow keeps a truly partial post-skill tool boundary raw while summarizing completed ordinary steps', async () => {
   const service = new ContextManagementService({
     enabled: true,

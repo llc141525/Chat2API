@@ -384,6 +384,217 @@ test('ProviderRuntime.forward normalizes plugin stream events into OpenAI SSE', 
   assert.match(output, /data: \[DONE\]/)
 })
 
+test('ProviderRuntime preserves incremental tool-call SSE chunks when validating constrained streams', async () => {
+  conversationStateCache.clear()
+  const plugin = makeFakePlugin({})
+  plugin.parseStream = async function* () {
+    yield {
+      type: 'tool_call_delta',
+      call: {
+        index: 0,
+        id: 'call_read',
+        function: { name: 'read', arguments: '{"file' },
+      },
+    }
+    yield {
+      type: 'tool_call_delta',
+      call: {
+        index: 0,
+        function: { arguments: 'Path":"probe.txt"}' },
+      },
+    }
+    yield { type: 'done', finishReason: 'tool_calls' }
+  }
+
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => plugin,
+    transport: async () => ({ status: 200, headers: {}, data: Readable.from([]) }),
+  })
+
+  const result = await runtime.forward(makeRuntimeInput({
+    request: { model: 'Qwen3-Max', messages: [{ role: 'user', content: 'read' }], stream: true },
+    assembly: {
+      ...makeAssembly([{ role: 'user', content: 'read' }]),
+      toolActionConstraint: {
+        kind: 'next_required_tool',
+        toolName: 'read',
+        args: { filePath: 'probe.txt' },
+      },
+    },
+  }))
+
+  assert.equal(result.success, true)
+  const output = await collect(result.stream as Readable)
+  const toolCallChunks = output
+    .split('data: ')
+    .map(chunk => chunk.trim())
+    .filter(chunk => chunk.startsWith('{') && chunk.includes('"delta":{"tool_calls"'))
+    .map(chunk => JSON.parse(chunk))
+
+  assert.equal(toolCallChunks.length, 2)
+  assert.deepEqual(toolCallChunks[0].choices[0].delta.tool_calls[0], {
+    index: 0,
+    id: 'call_read',
+    function: { name: 'read', arguments: '{"file' },
+  })
+  assert.deepEqual(toolCallChunks[1].choices[0].delta.tool_calls[0], {
+    index: 0,
+    function: { arguments: 'Path":"probe.txt"}' },
+  })
+})
+
+test('ProviderRuntime rejects constrained provider streams that finish with ordinary text instead of required tool call', async () => {
+  conversationStateCache.clear()
+  const plugin = makeFakePlugin({})
+  plugin.parseStream = async function* () {
+    yield { type: 'text_delta', text: 'CAPABILITY_PROBE_DONE' }
+    yield { type: 'done', finishReason: 'stop' }
+  }
+
+  const actionConstraint = {
+    kind: 'first_skill_required' as const,
+    toolName: 'skill',
+    arguments: { name: 'agent-capability-probe' },
+    reason: 'skill_workflow_first_step_required',
+  }
+  const input = makeRuntimeInput({
+    request: { model: 'Kimi-K3', messages: [{ role: 'user', content: 'probe' }], stream: true },
+    actualModel: 'k3',
+    provider: {
+      id: 'kimi',
+      name: 'Kimi',
+      type: 'builtin',
+      authType: 'token',
+      apiEndpoint: '',
+      headers: {},
+      enabled: true,
+      createdAt: 0,
+      updatedAt: 0,
+    },
+    account: {
+      id: 'acc-kimi',
+      providerId: 'kimi',
+      name: 'Kimi Account',
+      credentials: { token: 'token' },
+      enabled: true,
+      createdAt: 0,
+      updatedAt: 0,
+    },
+    assembly: {
+      ...makeAssembly([{ role: 'user', content: 'probe' }]),
+      toolActionConstraint: actionConstraint,
+    },
+  })
+  input.transformed.plan = {
+    ...input.transformed.plan,
+    providerId: 'kimi',
+    actionConstraint,
+    shouldParseResponse: true,
+    contract: {
+      ...input.transformed.plan.contract,
+      providerId: 'kimi',
+      model: 'Kimi-K3',
+      shouldParseResponse: true,
+    },
+  }
+
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => plugin,
+    transport: async () => ({ status: 200, headers: {}, data: Readable.from([]) }),
+  })
+
+  const result = await runtime.forward(input)
+
+  assert.equal(result.success, false)
+  assert.equal(result.status, 502)
+  assert.match(result.error ?? '', /malformed tool output.*required skill call/i)
+})
+
+test('ProviderRuntime writes child handoff and cleans it once after parent consumption', async () => {
+  conversationStateCache.clear()
+  const deleted: string[] = []
+  const childPlugin = makeFakePlugin({})
+  childPlugin.deleteSession = async ({ sessionId }) => {
+    deleted.push(sessionId)
+    return { success: true }
+  }
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => childPlugin,
+    transport: async request => ({
+      status: 200,
+      headers: {},
+      data: {
+        sessionId: request.sessionId,
+        reqId: request.reqId,
+        choices: [{
+          finish_reason: 'stop',
+          message: {
+            role: 'assistant',
+            content: 'Child workflow completed. Next action: continue parent work.',
+          },
+        }],
+      },
+    }),
+  })
+
+  const childInput = makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      requestId: 'req-child',
+      providerConversationSessionKey: 'provider-child',
+      parentProviderConversationSessionKey: 'provider-parent',
+      sessionBoundaryReason: 'tool_child',
+    },
+    conversationStateKey: 'provider-child',
+    request: {
+      model: 'Qwen3-Max',
+      stream: false,
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_read',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"probe.txt"}' },
+          }],
+        },
+        { role: 'tool', tool_call_id: 'call_read', content: 'raw child output' },
+      ],
+    },
+  })
+
+  await runtime.forward(childInput)
+
+  const handoff = conversationStateCache.get('provider-parent')?.childSessionHandoff
+  assert.ok(handoff, 'child settled response must persist a parent handoff')
+  assert.equal(handoff.status, 'ok')
+  assert.equal(handoff.childProviderSessionId, 'runtime-session')
+  assert.equal(JSON.stringify(handoff).includes('raw child output'), false)
+  assert.deepEqual(deleted, [], 'child session must not be deleted before parent consumes handoff')
+
+  const parentInput = makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      requestId: 'req-parent',
+      providerConversationSessionKey: 'provider-parent',
+      sessionBoundaryReason: 'normal',
+    },
+    conversationStateKey: 'provider-parent',
+    request: {
+      model: 'Qwen3-Max',
+      stream: false,
+      messages: [{ role: 'user', content: 'Continue parent.' }],
+    },
+  })
+
+  await runtime.forward(parentInput)
+  await runtime.forward(parentInput)
+
+  assert.deepEqual(deleted, ['runtime-session'])
+  assert.equal(conversationStateCache.get('provider-parent')?.childSessionHandoff, undefined)
+})
+
 test('ProviderRuntime aggregates provider SSE into non-stream OpenAI tool_calls', async () => {
   conversationStateCache.clear()
   const plugin = makeFakePlugin({})

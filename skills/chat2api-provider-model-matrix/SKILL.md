@@ -16,7 +16,7 @@ Use this skill when model coverage must follow the live `/v1/models` surface.
 ## Commands
 
 ```bash
-CHAT2API_BASE_URL=http://127.0.0.1:8080 \
+CHAT2API_BASE_URL=http://127.0.0.1:48763 \
 CHAT2API_MGMT_SECRET=mgmt_xxx \
 CHAT2API_API_KEY=sk_xxx \
 node skills/chat2api-provider-model-matrix/scripts/run-model-matrix.mjs \

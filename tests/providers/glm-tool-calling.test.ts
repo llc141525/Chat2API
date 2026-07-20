@@ -16,7 +16,7 @@ import { managedBracketProtocol } from '../../src/main/proxy/toolCalling/protoco
 import { getProviderToolProfile } from '../../src/main/proxy/toolCalling/providerProfiles.ts'
 import { hasGeneralToolPromptSignature } from '../../src/main/proxy/constants/signatures.ts'
 import type { ToolCallingPlan } from '../../src/main/proxy/toolCalling/types.ts'
-import type { ChatCompletionRequest } from '../../src/main/proxy/types.ts'
+import type { ChatCompletionRequest, ChatMessage } from '../../src/main/proxy/types.ts'
 import type { Provider } from '../../src/main/store/types.ts'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -192,6 +192,203 @@ test('GLM: ToolCallingEngine produces managed_xml plan and injects XML prompt', 
   assert.equal(result.tools, undefined)
   assert.ok(result.toolManifest, 'toolManifest should be present')
   assert.match(result.toolManifest!.renderedPrompt, /<\|CHAT2API\|tool_calls>/)
+})
+
+test('ToolCallingEngine applies checkpoint constraints for direct-verb skill steps', () => {
+  const engine = new ToolCallingEngine()
+  const workflowTools: ChatCompletionRequest['tools'] = [
+    { type: 'function', function: { name: 'skill', description: 'Load a skill', parameters: { type: 'object', properties: { name: { type: 'string' } } } } },
+    { type: 'function', function: { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: { filePath: { type: 'string' } } } } },
+    { type: 'function', function: { name: 'write', description: 'Write a file', parameters: { type: 'object', properties: { filePath: { type: 'string' }, content: { type: 'string' } } } } },
+  ]
+  const request: ChatCompletionRequest = {
+    model: 'GLM-4.7',
+    messages: [
+      {
+        role: 'tool',
+        tool_call_id: 'call_skill',
+        content: '<skill_content name="probe">\n1. Read `input.txt`.\n2. Write `notes.txt`.\n</skill_content>',
+      },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'call_skill',
+          type: 'function',
+          function: { name: 'default_api:skill', arguments: '{"name":"probe"}' },
+        }],
+      },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'call_read',
+          type: 'function',
+          function: { name: 'read', arguments: '{"filePath":"input.txt"}' },
+        }],
+      },
+      { role: 'tool', tool_call_id: 'call_read', content: 'input' },
+      {
+        role: 'system',
+        content: [
+          '[Active skill workflow state checkpoint]',
+          'Required next action: call the write tool for this exact skill step now.',
+          'Next required skill step: 2. Write `notes.txt` — extract the next finding.',
+          'Required next tool arguments: filePath=notes.txt',
+        ].join('\n'),
+      },
+    ],
+    tools: workflowTools as any,
+    stream: true,
+  }
+
+  const result = engine.transformRequest({ request, provider: glmProvider, actualModel: 'GLM-4.7' })
+
+  assert.equal(result.toolManifest?.actionConstraint?.kind, 'next_required_tool')
+  assert.equal(result.toolManifest?.actionConstraint?.toolName, 'write')
+  assert.equal(result.toolManifest?.actionConstraint?.arguments.filePath, 'notes.txt')
+  assert.deepEqual([...result.plan.allowedToolNames], ['write'])
+  assert.match(result.toolManifest?.renderedPrompt ?? '', /<\|CHAT2API\|invoke name="write"><\|CHAT2API\|parameter name="filePath"><!\[CDATA\[notes\.txt\]\]>/)
+})
+
+test('ToolCallingEngine advances direct-verb skill steps without a compaction checkpoint', () => {
+  const engine = new ToolCallingEngine()
+  const workflowTools: ChatCompletionRequest['tools'] = [
+    { type: 'function', function: { name: 'skill', description: 'Load a skill', parameters: { type: 'object', properties: { name: { type: 'string' } } } } },
+    { type: 'function', function: { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: { filePath: { type: 'string' } } } } },
+    { type: 'function', function: { name: 'write', description: 'Write a file', parameters: { type: 'object', properties: { filePath: { type: 'string' }, content: { type: 'string' } } } } },
+  ]
+  const skillResult: ChatMessage = {
+    role: 'tool',
+    tool_call_id: 'call_skill',
+    content: '<skill_content name="probe">\n1. Read `input.txt`.\n2. Write `notes.txt`.\n</skill_content>',
+  }
+  const skillCall: ChatMessage = {
+    role: 'assistant',
+    content: null,
+    tool_calls: [{
+      id: 'call_skill', type: 'function',
+      function: { name: 'skill', arguments: '{"name":"probe"}' },
+    }],
+  }
+  const first = engine.transformRequest({
+    request: {
+      model: 'GLM-4.7',
+      messages: [skillCall, skillResult],
+      tools: workflowTools as any,
+      stream: true,
+    },
+    provider: glmProvider,
+    actualModel: 'GLM-4.7',
+  })
+  assert.equal(first.toolManifest?.actionConstraint?.toolName, 'read')
+  assert.equal(first.toolManifest?.actionConstraint?.arguments.filePath, 'input.txt')
+
+  const afterRead = engine.transformRequest({
+    request: {
+      model: 'GLM-4.7',
+      messages: [
+        skillCall,
+        skillResult,
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_read', type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"input.txt"}' },
+          }],
+        },
+        { role: 'tool', tool_call_id: 'call_read', content: 'input' },
+      ],
+      tools: workflowTools as any,
+      stream: true,
+    },
+    provider: glmProvider,
+    actualModel: 'GLM-4.7',
+  })
+  assert.equal(afterRead.toolManifest?.actionConstraint?.toolName, 'write')
+  assert.equal(afterRead.toolManifest?.actionConstraint?.arguments.filePath, 'notes.txt')
+})
+
+test('ToolCallingEngine enforces a workflow checkpoint carried by a tool result message', () => {
+  const engine = new ToolCallingEngine()
+  const workflowTools: ChatCompletionRequest['tools'] = [
+    { type: 'function', function: { name: 'skill', description: 'Load a skill', parameters: {} } },
+    { type: 'function', function: { name: 'read', description: 'Read a file', parameters: {} } },
+    { type: 'function', function: { name: 'bash', description: 'Run a command', parameters: {} } },
+  ]
+  const transformed = engine.transformRequest({
+    request: {
+      model: 'GLM-4.7',
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_skill', type: 'function',
+            function: { name: 'skill', arguments: '{"name":"probe"}' },
+          }],
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_skill',
+          content: [
+            '<skill_content name="probe">\n1. Read `input.txt`.\n2. Run `node compute-result.mjs`.\n</skill_content>',
+            '[Active skill workflow state checkpoint]',
+            'Required next action: call the bash tool for this exact skill step now.',
+            'Required next tool arguments: command=node compute-result.mjs',
+            'Next required skill step: 2. Run `node compute-result.mjs`',
+          ].join('\n'),
+        },
+      ],
+      tools: workflowTools,
+      stream: true,
+    },
+    provider: glmProvider,
+    actualModel: 'GLM-4.7',
+  })
+
+  assert.equal(transformed.toolManifest?.actionConstraint?.kind, 'next_required_tool')
+  assert.equal(transformed.toolManifest?.actionConstraint?.toolName, 'bash')
+  assert.equal(transformed.toolManifest?.actionConstraint?.arguments.command, 'node compute-result.mjs')
+})
+
+test('ToolCallingEngine maps direct-verb workflow steps to namespaced catalog tools', () => {
+  const engine = new ToolCallingEngine()
+  const request: ChatCompletionRequest = {
+    model: 'GLM-4.7',
+    messages: [
+      {
+        role: 'assistant', content: null,
+        tool_calls: [{
+          id: 'call_skill', type: 'function',
+          function: { name: 'default_api:skill', arguments: '{"name":"probe"}' },
+        }],
+      },
+      {
+        role: 'tool', tool_call_id: 'call_skill',
+        content: '<skill_content name="probe">\n1. Read `input.txt`.\n2. Write `notes.txt`.\n</skill_content>',
+      },
+      {
+        role: 'assistant', content: null,
+        tool_calls: [{
+          id: 'call_read', type: 'function',
+          function: { name: 'default_api:read_file', arguments: '{"filePath":"input.txt"}' },
+        }],
+      },
+      { role: 'tool', tool_call_id: 'call_read', content: 'input' },
+    ],
+    tools: [
+      { type: 'function', function: { name: 'default_api:skill', parameters: {} } },
+      { type: 'function', function: { name: 'default_api:read_file', parameters: {} } },
+      { type: 'function', function: { name: 'default_api:write_file', parameters: {} } },
+    ] as any,
+    stream: true,
+  }
+
+  const result = engine.transformRequest({ request, provider: glmProvider, actualModel: 'GLM-4.7' })
+  assert.equal(result.toolManifest?.actionConstraint?.toolName, 'default_api:write_file')
+  assert.deepEqual([...result.plan.allowedToolNames], ['default_api:write_file'])
 })
 
 test('GLM: tool_choice=none disables tool injection and parsing', () => {
@@ -1032,6 +1229,18 @@ test('Qwen stream emits managed XML as OpenAI tool_calls', async () => {
   assert.match(output, /"name":"default_api:read_file"/)
   assert.match(output, /"finish_reason":"tool_calls"/)
   assert.doesNotMatch(output, /<\|CHAT2API\|tool_calls>/)
+})
+
+test('GLM stream reports an upstream empty close instead of synthesizing a normal stop', async () => {
+  const handler = new GLMStreamHandler('GLM-5.2', undefined, undefined, managedPlan('glm'))
+  const output = await collect(await handler.handleStream(
+    Readable.from([]),
+    { headers: {} } as any,
+  ))
+
+  assert.match(output, /"error"/)
+  assert.match(output, /GLM provider stream closed before emitting any provider event/)
+  assert.doesNotMatch(output, /"finish_reason":"stop"/)
 })
 
 test('Qwen stream recovers when a cumulative snapshot rewrites an in-flight managed XML tool call', async () => {

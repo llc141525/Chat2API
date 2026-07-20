@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatCompletionTool, ToolCall } from '../types.ts'
+import type { ToolActionConstraint } from './ToolManifest.ts'
 
 export type ToolCallingMode = 'managed' | 'disabled'
 export type DisabledReason =
@@ -193,6 +194,8 @@ export interface ToolCallingPlan {
   catalogSnapshot?: ToolCatalogSnapshot
   catalogDiagnostics: ToolCatalogDiagnostics
   availabilityRetryAllowed: boolean
+  /** One-turn constraint that must be satisfied by the provider output. */
+  actionConstraint?: ToolActionConstraint | null
   availabilityRetryAttempted?: boolean
   contract: ToolTurnContract
   diagnostics: ToolCallDiagnostics

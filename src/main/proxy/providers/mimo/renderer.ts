@@ -11,6 +11,7 @@
 import type { ProviderWebRequest } from '../../plugins/types.ts'
 import type { ProviderRuntimeRequest } from '../../plugins/types.ts'
 import { getProviderToolProfile } from '../../toolCalling/providerProfiles.ts'
+import { getMaxToolResultLength } from '../../shared/toolResultLimit.ts'
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -86,8 +87,9 @@ export function buildMimoQuery(messages: MimoMessage[]): string {
 
     if (message.role === 'tool' && message.tool_call_id) {
       const rawContent = extractTextContent(message.content)
-      const truncated = rawContent.length > 2000
-        ? rawContent.slice(0, 2000) + '\n...(truncated)'
+      const MAX_TOOL_RESULT_LENGTH = getMaxToolResultLength()
+      const truncated = rawContent.length > MAX_TOOL_RESULT_LENGTH
+        ? rawContent.slice(0, MAX_TOOL_RESULT_LENGTH) + '\n...(truncated)'
         : rawContent
       entries.push({
         role: 'User',

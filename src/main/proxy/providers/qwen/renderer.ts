@@ -11,6 +11,9 @@
 
 import { renderFinalPrompt } from '../../adapters/renderFinalPrompt.ts'
 import type { CleanedRequest } from '../../core/requestCleaner.ts'
+import { getMaxToolResultLength } from '../../shared/toolResultLimit.ts'
+import { logger } from '../../shared/logger.ts'
+import { createHash } from 'crypto'
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -23,6 +26,7 @@ export interface RenderQwenRequestInput {
   timestamp: number
   enableThinking: boolean
   enableWebSearch: boolean
+  correlationId?: string
   /** The request-level promptRefreshMode for decision-making */
 }
 
@@ -93,6 +97,34 @@ export function renderQwenRequest(
     template: 'prefix',
   })
 
+  logger.info('[Qwen] Production prompt assembly:', JSON.stringify({
+    correlationId: input.correlationId ?? null,
+    model,
+    reqId,
+    sessionId,
+    mode: cleaned.mode,
+    inputMessageCount: cleaned.messages.length,
+    messageRoleCounts: countMessageRoles(cleaned.messages),
+    summaryChars: cleaned.summaryText?.length ?? 0,
+    infrastructurePromptChars: cleaned.infrastructurePrompt?.length ?? 0,
+    toolContractChars: cleaned.toolContractText?.length ?? 0,
+    toolContractPresent: Boolean(cleaned.toolContractText),
+    toolContractHasCatalogFingerprint: cleaned.toolContractText?.includes('catalog_fingerprint:') ?? false,
+    toolContractHasManagedXml: cleaned.toolContractText?.includes('<|CHAT2API|tool_calls>') ?? false,
+    actionConstraint: cleaned.toolActionConstraint,
+    finalPromptChars: finalContent.length,
+    finalPromptSha256: sha256(finalContent),
+    toolContractSha256: cleaned.toolContractText ? sha256(cleaned.toolContractText) : null,
+    finalPromptHasActionConstraint: finalContent.includes('[High-priority tool action constraint]'),
+    requiredXmlMatched: renderRequiredToolXml(cleaned.toolActionConstraint)
+      ? finalContent.includes(renderRequiredToolXml(cleaned.toolActionConstraint)!)
+      : null,
+    finalPromptActionConstraintIndex: finalContent.indexOf('[High-priority tool action constraint]'),
+    finalPromptToolContractIndex: cleaned.toolContractText
+      ? finalContent.indexOf(cleaned.toolContractText.slice(0, 80))
+      : -1,
+  }))
+
   const nonce = generateNonce()
   const queryString = `biz_id=ai_qwen&chat_client=h5&device=pc&fr=pc&pr=qwen&ut=${generateId()}&nonce=${nonce}&timestamp=${timestamp}`
 
@@ -136,6 +168,29 @@ export function renderQwenRequest(
   }
 }
 
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function renderRequiredToolXml(constraint: CleanedRequest['toolActionConstraint']): string | null {
+  if (!constraint || constraint.kind !== 'next_required_tool' || !constraint.toolName) return null
+  const argument = constraint.arguments.filePath
+    ? `<|CHAT2API|parameter name="filePath"><![CDATA[${constraint.arguments.filePath}]]></|CHAT2API|parameter>`
+    : constraint.arguments.command
+      ? `<|CHAT2API|parameter name="command"><![CDATA[${constraint.arguments.command}]]></|CHAT2API|parameter>`
+      : ''
+  return argument
+    ? `<|CHAT2API|tool_calls><|CHAT2API|invoke name="${constraint.toolName}">${argument}</|CHAT2API|invoke></|CHAT2API|tool_calls>`
+    : null
+}
+
+function countMessageRoles(messages: CleanedRequest['messages']): Record<string, number> {
+  return messages.reduce<Record<string, number>>((counts, message) => {
+    counts[message.role] = (counts[message.role] ?? 0) + 1
+    return counts
+  }, {})
+}
+
 // ── Message bucketing ───────────────────────────────────────────────
 
 interface MessageBuckets {
@@ -149,7 +204,7 @@ function separateMessageBuckets(cleaned: CleanedRequest): MessageBuckets {
   const baseSystemPrompts: string[] = []
   const summaryPrompts: string[] = []
   const conversationParts: string[] = []
-  const MAX_TOOL_RESULT_LENGTH = 2000
+  const MAX_TOOL_RESULT_LENGTH = getMaxToolResultLength()
 
   // Build a tool profile reference (simulated — we just need format helpers)
   // Since we have tool definitions in CleanedRequest, we use simple formatting

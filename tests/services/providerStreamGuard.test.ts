@@ -45,3 +45,19 @@ test('stream guard keeps session metadata but waits for a deliverable event', as
     { type: 'text_delta', text: 'ready' },
   ])
 })
+
+test('stream guard rejects a stream that closes before any deliverable event', async () => {
+  async function* empty() {
+    return
+  }
+
+  const guarded = await primeProviderStreamEvents(
+    empty(),
+    100,
+    undefined,
+    event => event.type !== 'session_update',
+  )
+
+  assert.ok('error' in guarded)
+  assert.match(guarded.error.message, /closed without a deliverable event/)
+})

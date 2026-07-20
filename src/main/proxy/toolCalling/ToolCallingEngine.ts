@@ -12,6 +12,7 @@ import { buildToolCallingRuntimePlan } from './runtimePlan.ts'
 import type { NormalizedToolDefinition, ToolCallingPlan, ToolCallingTransformResult, ToolProtocolId } from './types.ts'
 import type { ToolActionConstraint, ToolManifest } from './ToolManifest.ts'
 import { createToolManifest } from './ToolManifest.ts'
+import { logger } from '../shared/logger.ts'
 
 export class ToolCallingEngine {
   private readonly config: ToolCallingConfig
@@ -58,12 +59,24 @@ export class ToolCallingEngine {
     }
 
     const toolManifest = this.createToolManifest(plan, request.messages)
+    logger.info('[ToolCallingEngine] action decision:', JSON.stringify({
+      requestId,
+      toolNames: plan.tools.map(tool => tool.name),
+      allowedToolNames: [...plan.allowedToolNames],
+      actionConstraint: toolManifest.actionConstraint,
+      messageToolNames: request.messages.flatMap(message =>
+        (message.tool_calls ?? []).map(call => call.function?.name).filter(Boolean),
+      ),
+      skillResultCount: request.messages.filter(message => getMessageContent(message).includes('<skill_content')).length,
+      checkpointCount: request.messages.filter(message => getMessageContent(message).includes('[Active skill workflow state checkpoint]')).length,
+    }))
     // Enforce the action constraint at the parser level so the model cannot
     // bypass a constrained turn by calling the wrong tool. The constraint was
     // previously only a prompt hint — the parser would accept any valid managed
     // XML regardless of what the projected catalog showed.
     if (toolManifest.actionConstraint) {
       const c = toolManifest.actionConstraint
+      plan.actionConstraint = c
       if (c.kind === 'terminal_final_text_required') {
         plan.allowedToolNames = new Set()
       } else if (c.toolName) {
@@ -203,7 +216,27 @@ function detectToolActionConstraint(
     .filter(content => content.trim().length > 0)
     .join('\n\n')
 
-  if (plan.tools.some(tool => tool.name === 'skill')) {
+  if (plan.tools.some(tool => workflowToolKey(tool.name) === 'skill')) {
+    const checkpointInspection = inspectCheckpointWorkflowNext(messages)
+    logger.info('[ToolCallingEngine] checkpoint parse:', JSON.stringify({
+      checkpointCount: checkpointInspection.checkpointCount,
+      checkpointChars: checkpointInspection.checkpointChars,
+      status: checkpointInspection.status,
+      reason: checkpointInspection.reason,
+      toolName: checkpointInspection.nextStep?.toolName ?? null,
+      argumentKeys: checkpointInspection.nextStep ? Object.keys(checkpointInspection.nextStep.args) : [],
+    }))
+    const checkpointNext = checkpointInspection.nextStep
+    if (checkpointNext) {
+      const toolName = resolveWorkflowToolName(checkpointNext.toolName, plan.tools)
+      return {
+        kind: 'next_required_tool',
+        toolName,
+        arguments: checkpointNext.args,
+        reason: 'skill_workflow_next_step_required',
+      }
+    }
+
     // If a skill is already loaded, use that skill's name regardless of what
     // the instruction text says. extractFirstSkillConstraintName may match a
     // different skill name from the agent definition (e.g. capability-probe agent
@@ -226,17 +259,29 @@ function detectToolActionConstraint(
         nonSkillToolCount, hasCompletedSkillResult(messages, skillName))
       if (nonSkillToolCount === 0) {
         // After compaction, assistant tool_call history may be truncated to zero.
-        // Don't force a hardcoded 'read' constraint — the prompt still contains
-        // workflow checkpoint markers with the required next action. The first-turn
-        // optimization (read) was a hint, not a correctness requirement.
+        // Do not force a hardcoded 'read' constraint. If the surviving skill
+        // document or checkpoint states the next action, use that evidence;
+        // otherwise leave the catalog unconstrained.
+        const nextStep = extractWorkflowNextStep(messages)
+        if (nextStep) {
+          const toolName = resolveWorkflowToolName(nextStep.toolName, plan.tools)
+          console.log('[ToolCallingEngine] Workflow next step:', JSON.stringify(nextStep))
+          return {
+            kind: 'next_required_tool',
+            toolName,
+            arguments: nextStep.args,
+            reason: 'skill_workflow_next_step_required',
+          }
+        }
         return null
       }
       const nextStep = extractWorkflowNextStep(messages)
       if (nextStep) {
+        const toolName = resolveWorkflowToolName(nextStep.toolName, plan.tools)
         console.log('[ToolCallingEngine] Workflow next step:', JSON.stringify(nextStep))
         return {
           kind: 'next_required_tool',
-          toolName: nextStep.toolName,
+          toolName,
           arguments: nextStep.args,
           reason: 'skill_workflow_next_step_required',
         }
@@ -314,15 +359,77 @@ function countNonSkillToolCalls(messages: ChatMessage[]): number {
   for (const m of messages) {
     if (m.role !== 'assistant') continue
     for (const call of m.tool_calls ?? []) {
-      if (call.function?.name?.toLowerCase() !== 'skill') count++
+      if (workflowToolKey(call.function?.name ?? '') !== 'skill') count++
     }
   }
   return count
 }
 
 const RE_SKILL_STEP = /^\d+\.\s+Use\s+the\s+`(\w+)`\s+tool\s+to\s+(?:read\s+`([^`]+)`|run:?\s*$|run:\s+`([^`]+)`)/im
+const RE_DIRECT_SKILL_STEP = /^\d+\.\s+(Read|Re-read|Write|Glob|Bash|Run)\s+`([^`]+)`/i
 
 const RE_CHECKPOINT_NEXT_TOOL = /Required next action:\s+call the\s+`?(\w+)`?\s+tool/i
+
+interface CheckpointInspection {
+  checkpointCount: number
+  checkpointChars: number
+  status: 'absent' | 'parsed' | 'no_required_action' | 'missing_arguments'
+  reason: string
+  nextStep: WorkflowNextStep | null
+}
+
+function normalizeWorkflowStepToolName(rawToolName: string): string {
+  const normalizedStepName = rawToolName.toLowerCase()
+  return normalizedStepName === 'run'
+    ? 'bash'
+    : normalizedStepName === 're-read'
+      ? 'read'
+      : normalizedStepName
+}
+
+function extractCheckpointNextSkillStepBlock(text: string): string | null {
+  const match = text.match(
+    /Next required skill step:\s*([\s\S]+?)(?:\n(?:Only the|Do not repeat|Latest pinned|Listed read\/bash\/write)\b|$)/i,
+  )
+  return match?.[1]?.trim() || null
+}
+
+function extractWorkflowNextStepFromInstructionBlock(block: string): WorkflowNextStep | null {
+  const numberedStepMatch = block.match(/^\d+\.\s+([\s\S]+)$/)
+  const instruction = (numberedStepMatch?.[1] ?? block).trim()
+  const directMatch = instruction.match(/^(Read|Re-read|Write|Glob|Bash|Run)\s+`([^`]+)`/i)
+  if (directMatch) {
+    const toolName = normalizeWorkflowStepToolName(directMatch[1])
+    return {
+      toolName,
+      args: toolName === 'bash'
+        ? { command: directMatch[2] }
+        : { filePath: directMatch[2] },
+    }
+  }
+
+  const actionMatch = instruction.match(/\b(?:use|call|emit|run)\s+(?:the|a|an)?\s*`?(skill|read|bash|write|edit|grep|glob)`?\s+tool\b/i)
+  const fallbackToolMatch = instruction.match(/\b(skill|read|bash|write|edit|grep|glob)\b/i)
+  const toolName = normalizeWorkflowStepToolName(actionMatch?.[1] ?? fallbackToolMatch?.[1] ?? '')
+  if (!toolName) return null
+
+  const commandMatch = instruction.match(/`([^`]*(?:New-Item|node\b|writeFileSync)[^`]*)`/i)
+  if (toolName === 'bash') {
+    return {
+      toolName,
+      args: commandMatch?.[1]?.trim()
+        ? { command: commandMatch[1].trim() }
+        : {},
+    }
+  }
+
+  const pathMatch = instruction.match(/`(\.?[A-Za-z0-9_./\\-]*\.[A-Za-z0-9_-]+)`/)
+    ?? instruction.match(/(\.?[A-Za-z0-9_./\\-]*\.[A-Za-z0-9_-]+)/)
+  return {
+    toolName,
+    args: pathMatch?.[1]?.trim() ? { filePath: pathMatch[1].trim() } : {},
+  }
+}
 
 /**
  * Scan messages for workflow checkpoint markers placed by context management
@@ -331,23 +438,103 @@ const RE_CHECKPOINT_NEXT_TOOL = /Required next action:\s+call the\s+`?(\w+)`?\s+
  *
  * Format: "Required next action: call the X tool for this exact skill step now."
  */
-function extractCheckpointWorkflowNext(messages: ChatMessage[]): WorkflowNextStep | null {
+function inspectCheckpointWorkflowNext(messages: ChatMessage[]): CheckpointInspection {
+  let checkpointCount = 0
+  let checkpointChars = 0
   for (const message of messages) {
-    if (message.role !== 'user' && message.role !== 'system') continue
+    // Context management may preserve the checkpoint inside the latest tool
+    // result during a child-session handoff. It is still authoritative state,
+    // so do not discard it based on the message role.
     const text = getMessageContent(message)
+    if (!text.includes('[Active skill workflow state checkpoint]')) continue
+    checkpointCount += 1
+    checkpointChars += text.length
     const toolMatch = text.match(RE_CHECKPOINT_NEXT_TOOL)
     if (!toolMatch) continue
-    return { toolName: toolMatch[1].toLowerCase(), args: {} }
+    const skillStepBlock = extractCheckpointNextSkillStepBlock(text)
+    const skillStep = skillStepBlock
+      ? extractWorkflowNextStepFromInstructionBlock(skillStepBlock)
+      : null
+    if (skillStep && Object.keys(skillStep.args).length > 0) {
+      return {
+        checkpointCount,
+        checkpointChars,
+        status: 'parsed',
+        reason: 'next_required_skill_step',
+        nextStep: skillStep,
+      }
+    }
+    const argumentMatch = text.match(/Required next tool arguments:\s*(filePath|command)=([\s\S]+?)(?:\s+(?:Do not call|Next required skill step:|Only the|Latest pinned|Do not repeat|Latest pinned skill|Listed read\/bash\/write)|$)/i)
+    if (!argumentMatch) {
+      const fallbackToolName = skillStep?.toolName ?? toolMatch[1].toLowerCase()
+      return {
+        checkpointCount,
+        checkpointChars,
+        status: 'missing_arguments',
+        reason: skillStepBlock
+          ? 'next_required_skill_step_without_concrete_arguments'
+          : 'required_action_without_arguments',
+        nextStep: { toolName: fallbackToolName, args: {} },
+      }
+    }
+
+    const argumentValue = argumentMatch[2]
+      .trim()
+      .replace(/^['"]|['"]$/g, '')
+      .split(/\s+(?:Do not call|Next required|Only the|Latest pinned)\b/i)[0]
+      .trim()
+    return {
+      checkpointCount,
+      checkpointChars,
+      status: 'parsed',
+      reason: 'required_next_tool_arguments',
+      nextStep: {
+        toolName: toolMatch[1].toLowerCase(),
+        args: argumentMatch[1].toLowerCase() === 'filepath'
+          ? { filePath: argumentValue }
+          : { command: argumentValue },
+      },
+    }
   }
-  return null
+  return {
+    checkpointCount,
+    checkpointChars,
+    status: checkpointCount > 0 ? 'no_required_action' : 'absent',
+    reason: checkpointCount > 0 ? 'checkpoint_without_required_action' : 'no_checkpoint_marker',
+    nextStep: null,
+  }
+}
+
+function extractCheckpointWorkflowNext(messages: ChatMessage[]): WorkflowNextStep | null {
+  return inspectCheckpointWorkflowNext(messages).nextStep
+}
+
+function workflowToolKey(name: string): string {
+  const baseName = name.toLowerCase().split(':').at(-1) ?? name.toLowerCase()
+  return baseName.replace(/_file$/, '')
+}
+
+function resolveWorkflowToolName(
+  semanticName: string,
+  tools: NormalizedToolDefinition[],
+): string {
+  const exact = tools.find(tool => tool.name.toLowerCase() === semanticName.toLowerCase())
+  if (exact) return exact.name
+
+  const semanticKey = workflowToolKey(semanticName)
+  const matchingTool = tools.find(tool => workflowToolKey(tool.name) === semanticKey)
+  return matchingTool?.name ?? semanticName
 }
 
 function extractWorkflowNextStep(messages: ChatMessage[]): WorkflowNextStep | null {
+  const checkpointNext = extractCheckpointWorkflowNext(messages)
+  if (checkpointNext) return checkpointNext
+
   // Collect skill instruction steps from skill result messages
   const steps: Array<{ toolName: string; filePath?: string; command?: string }> = []
   const skillResultText = messages
-    .filter(m => m.role === 'tool' && m.tool_call_id)
     .map(getMessageContent)
+    .filter(content => content.includes('<skill_content'))
     .join('\n')
   if (!skillResultText.includes('<skill_content')) return null
 
@@ -355,10 +542,12 @@ function extractWorkflowNextStep(messages: ChatMessage[]): WorkflowNextStep | nu
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     const match = line.match(RE_SKILL_STEP)
-    if (!match) continue
-    const toolName = (match[1] ?? '').toLowerCase()
-    let filePath = match[2]
-    let command = match[3]
+    const directMatch = line.match(RE_DIRECT_SKILL_STEP)
+    if (!match && !directMatch) continue
+    const rawToolName = (match?.[1] ?? directMatch?.[1] ?? '').toLowerCase()
+    const toolName = normalizeWorkflowStepToolName(rawToolName)
+    let filePath = match?.[2] ?? (directMatch && toolName !== 'bash' ? directMatch[2] : undefined)
+    let command = match?.[3] ?? (directMatch && toolName === 'bash' ? directMatch[2] : undefined)
 
     // If the line ends with 'run:' or 'run:\' and no command was captured on this line,
     // collect the backtick-quoted command from subsequent lines.
@@ -366,7 +555,7 @@ function extractWorkflowNextStep(messages: ChatMessage[]): WorkflowNextStep | nu
       const collected: string[] = []
       for (let j = i + 1; j < lines.length; j++) {
         const cont = lines[j]
-        if (/^\d+\.\s+Use\s+the\s+`/.test(cont)) break
+        if (/^\d+\.\s+(?:Use\s+the\s+`|(?:Read|Write|Glob|Bash|Run)\s+`)/i.test(cont)) break
         const btMatch = cont.match(/`([^`]+)`/)
         if (btMatch) {
           collected.push(btMatch[1])
@@ -383,21 +572,7 @@ function extractWorkflowNextStep(messages: ChatMessage[]): WorkflowNextStep | nu
   }
   if (steps.length === 0) return null
 
-  // Before sequential matching (which is unreliable after compaction):
-  // scan for explicit workflow checkpoint markers from context management.
-  // These survive compaction because they're user-role messages.
-  const checkpointNext = extractCheckpointWorkflowNext(messages)
-  if (checkpointNext) return checkpointNext
-
-  // Collect completed tool calls from assistant messages
-  const completedTools: string[] = []
-  for (const m of messages) {
-    if (m.role !== 'assistant') continue
-    for (const call of m.tool_calls ?? []) {
-      const name = call.function?.name?.toLowerCase()
-      if (name && name !== 'skill') completedTools.push(name)
-    }
-  }
+  const completedTools = collectCompletedWorkflowTools(messages)
 
   // Match sequentially: count completed calls per tool and step through instructions
   const remaining = new Map<string, number>()
@@ -405,7 +580,7 @@ function extractWorkflowNextStep(messages: ChatMessage[]): WorkflowNextStep | nu
     remaining.set(tool, (remaining.get(tool) ?? 0) + 1)
   }
   for (const step of steps) {
-    const key = step.toolName
+      const key = workflowToolKey(step.toolName)
     if ((remaining.get(key) ?? 0) > 0) {
       remaining.set(key, remaining.get(key)! - 1)
     } else {
@@ -419,6 +594,47 @@ function extractWorkflowNextStep(messages: ChatMessage[]): WorkflowNextStep | nu
     }
   }
   return null
+}
+
+function collectCompletedWorkflowTools(messages: ChatMessage[]): string[] {
+  const completedTools: string[] = []
+  for (const m of messages) {
+    if (m.role === 'assistant') {
+      for (const call of m.tool_calls ?? []) {
+        const name = call.function?.name?.toLowerCase()
+        if (name && workflowToolKey(name) !== 'skill') {
+          completedTools.push(workflowToolKey(name))
+        }
+      }
+      continue
+    }
+
+    const openCodeToolName = extractOpenCodeCompletedToolName(getMessageContent(m))
+    if (openCodeToolName && workflowToolKey(openCodeToolName) !== 'skill') {
+      completedTools.push(workflowToolKey(openCodeToolName))
+    }
+  }
+  return completedTools
+}
+
+function extractOpenCodeCompletedToolName(content: string): string | null {
+  const trimmed = content.trim()
+  if (!trimmed.includes('"type"') || !trimmed.includes('"tool"') || !trimmed.includes('completed')) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>
+    const tool = typeof parsed.tool === 'string' ? parsed.tool : null
+    const state = parsed.state && typeof parsed.state === 'object'
+      ? parsed.state as Record<string, unknown>
+      : null
+    return tool && state?.status === 'completed' ? tool : null
+  } catch {
+    const toolMatch = trimmed.match(/"tool"\s*:\s*"([^"]+)"/)
+    const completed = /"status"\s*:\s*"completed"/.test(trimmed)
+    return toolMatch?.[1] && completed ? toolMatch[1] : null
+  }
 }
 
 function extractTerminalFinalTextMarker(text: string): string | undefined {
@@ -449,7 +665,7 @@ function hasCompletedSkillResult(messages: ChatMessage[], skillName: string): bo
     }
 
     for (const call of message.tool_calls ?? []) {
-      if (call.function?.name !== 'skill' || !call.id) {
+      if (workflowToolKey(call.function?.name ?? '') !== 'skill' || !call.id) {
         continue
       }
       if (toolCallArgumentsSkillName(call.function.arguments) === skillName) {
@@ -606,9 +822,13 @@ function renderToolActionConstraint(constraint: ToolActionConstraint): string {
     const hint = args.filePath ? `filePath="${args.filePath}"`
       : args.command ? `command="${args.command}"`
       : null
+    const requiredXml = renderRequiredWorkflowToolXml(toolName, args)
     return [
       '[High-priority tool action constraint]',
       'The skill workflow requires an exact next tool call before any other assistant text or final marker.',
+      requiredXml
+        ? `Output this exact Chat2API XML tool-call shape next, filling any remaining schema fields from the tool definition:\n${requiredXml}`
+        : '',
       `Only valid next tool: ${toolName}`,
       hint ? `Required arguments: ${hint}` : '',
       'Do not call any other tool before this required step.',
@@ -632,4 +852,17 @@ function renderToolActionConstraint(constraint: ToolActionConstraint): string {
     'Do not output any final completion marker before the required skill tool result and follow-up tool sequence complete.',
     'The gateway still preserves the full tool catalog; this prompt shows only the current action surface.',
   ].join('\n')
+}
+
+function renderRequiredWorkflowToolXml(
+  toolName: string,
+  args: { filePath?: string; command?: string },
+): string | null {
+  const parameter = args.filePath
+    ? `<|CHAT2API|parameter name="filePath"><![CDATA[${args.filePath}]]></|CHAT2API|parameter>`
+    : args.command
+      ? `<|CHAT2API|parameter name="command"><![CDATA[${args.command}]]></|CHAT2API|parameter>`
+      : ''
+  if (!parameter) return null
+  return `<|CHAT2API|tool_calls><|CHAT2API|invoke name="${toolName}">${parameter}</|CHAT2API|invoke></|CHAT2API|tool_calls>`
 }

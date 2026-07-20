@@ -139,6 +139,50 @@ test('buildRequest returns valid ProviderWebRequest', async () => {
   assert.equal(req.transportOptions?.decompress, false)
 })
 
+test('buildRequest renders the structured action constraint through the production Qwen path', async () => {
+  const p = await loadPlugin()
+  const input = makeBasicRequest({
+    assembly: makeAssembly([
+      { role: 'user', content: 'Continue the workflow.' },
+    ], {
+      toolManifest: {
+        protocol: 'managed_xml',
+        catalogFingerprint: 'test-fingerprint',
+        allowedToolNames: ['read'],
+        tools: [],
+        contractHeaderVersion: 1,
+        actionConstraint: {
+          kind: 'next_required_tool',
+          toolName: 'read',
+          arguments: { filePath: 'E:\\Chat2API\\src\\renderer\\src\\index.css' },
+          reason: 'skill_workflow_next_step_required',
+        },
+        renderedPrompt: [
+          '[High-priority tool action constraint]',
+          'Output this exact Chat2API XML tool-call shape next.',
+          '<|CHAT2API|tool_calls><|CHAT2API|invoke name="read"><|CHAT2API|parameter name="filePath"><![CDATA[E:\\Chat2API\\src\\renderer\\src\\index.css]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+          '## Available Tools',
+          'catalog_fingerprint: test-fingerprint',
+        ].join('\n'),
+      } as any,
+      toolActionConstraint: {
+        kind: 'next_required_tool',
+        toolName: 'read',
+        arguments: { filePath: 'E:\\Chat2API\\src\\renderer\\src\\index.css' },
+        reason: 'skill_workflow_next_step_required',
+      },
+    }),
+  })
+
+  const request = await p.buildRequest(input)
+  const content = String((request.body as any).messages[0].content)
+
+  assert.match(content, /\[High-priority tool action constraint\]/)
+  assert.match(content, /src\\renderer\\src\\index\.css/)
+  assert.match(content, /<\|CHAT2API\|tool_calls>/)
+  assert.match(content, /catalog_fingerprint: test-fingerprint/)
+})
+
 test('buildRequest includes cookie header with ticket', async () => {
   const p = await loadPlugin()
   const input = makeBasicRequest({

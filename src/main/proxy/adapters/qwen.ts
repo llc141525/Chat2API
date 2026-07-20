@@ -25,8 +25,9 @@ import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
 import { renderFinalPrompt } from './renderFinalPrompt.ts'
-import { selectProviderMessagesForAssembly, type RequestAssembly } from '../RequestAssembly.ts'
+import { buildRequestAssembly, selectProviderMessagesForAssembly, type RequestAssembly } from '../RequestAssembly.ts'
 import type { PromptRefreshMode } from '../promptBudgetPolicy.ts'
+import { getMaxToolResultLength } from '../shared/toolResultLimit.ts'
 
 const QWEN_API_BASE = 'https://chat2.qianwen.com'
 const QWEN_CHAT2_API_BASE = 'https://chat2-api.qianwen.com'
@@ -124,7 +125,7 @@ interface QwenContentDeltaDecision {
 }
 
 interface QwenAssemblyRequestBodyInput {
-  assembly: RequestAssembly
+  assembly?: RequestAssembly
   request: ChatCompletionRequest
   actualModel: string
   sessionId: string
@@ -183,7 +184,7 @@ function hasManagedToolContractMarker(value: string | null | undefined): boolean
 
 function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any {
   const {
-    assembly,
+    assembly: providedAssembly,
     request,
     actualModel,
     sessionId,
@@ -194,16 +195,23 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
     enableWebSearch,
   } = input
 
+  const assembly = providedAssembly ?? buildRequestAssembly({
+    messages: request.messages,
+    toolManifest: null,
+  })
   const toolProfile = getProviderToolProfile('qwen')
   const baseSystemPrompts: string[] = []
   const summaryPrompts: string[] = []
+  const legacyToolContractPrompts: string[] = []
   const conversationParts: string[] = []
   const activeSkillCheckpointPrompts: string[] = []
-  const providerMessages = selectProviderMessagesForAssembly(assembly, {
-    stripRuntimeConfig: true,
-    stripToolContractHistory: true,
-    dropRuntimeConfig: true,
-  }) as QwenMessage[]
+  const providerMessages = (providedAssembly
+    ? selectProviderMessagesForAssembly(assembly, {
+      stripRuntimeConfig: true,
+      stripToolContractHistory: true,
+      dropRuntimeConfig: true,
+    })
+    : request.messages) as QwenMessage[]
   const lastUserText = extractLastUserText(providerMessages)
   const explicitSummaryText = assembly.summaryText?.trim() || null
   const promptRefreshMode = request.promptRefreshMode
@@ -217,7 +225,7 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
   // Apply mode-based conversation filtering on top of delta selection
   conversationMessages = filterConversationForMode(conversationMessages, promptRefreshMode)
 
-  const MAX_TOOL_RESULT_LENGTH = 2000
+  const MAX_TOOL_RESULT_LENGTH = getMaxToolResultLength()
   for (const msg of providerMessages) {
     if (msg.role === 'system') {
       const content = extractTextContent(msg.content as any)
@@ -226,11 +234,18 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
         continue
       }
       const isSummaryMessage = trimmedContent.includes('[Prior conversation summary')
+      const isLegacyToolContract = !providedAssembly && (
+        trimmedContent.includes('## Available Tools')
+        || trimmedContent.includes('catalog_fingerprint:')
+        || trimmedContent.includes('<|CHAT2API|tool_calls>')
+      )
 
       if (isSummaryMessage) {
         if (!explicitSummaryText || trimmedContent !== explicitSummaryText) {
           summaryPrompts.push(content)
         }
+      } else if (isLegacyToolContract) {
+        legacyToolContractPrompts.push(content)
       } else {
         baseSystemPrompts.push(content)
         if (trimmedContent.includes('[Active skill workflow state checkpoint]')) {
@@ -287,12 +302,16 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
   const finalContent = renderFinalPrompt({
     systemText: baseSystemPrompts.join('\n\n') || null,
     summaryText: includeSummary ? effectiveSummaryText : null,
-    toolContractText: includeToolContract ? (assembly.toolManifest?.renderedPrompt ?? null) : null,
+    toolContractText: includeToolContract
+      ? (assembly.toolManifest?.renderedPrompt ?? (legacyToolContractPrompts.join('\n\n') || null))
+      : null,
     infrastructurePrompt: assembly.infrastructurePrompt ?? null,
     conversationText: conversationParts.length > 0 ? `User: ${conversationParts.join('\n\n')}` : '',
     template: 'prefix',
   })
-  const renderedToolContract = includeToolContract ? (assembly.toolManifest?.renderedPrompt ?? null) : null
+  const renderedToolContract = includeToolContract
+    ? (assembly.toolManifest?.renderedPrompt ?? (legacyToolContractPrompts.join('\n\n') || null))
+    : null
   traceQwenRequestAssembly({
     model: actualModel,
     messageCount: providerMessages.length,

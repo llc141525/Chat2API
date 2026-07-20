@@ -5,13 +5,14 @@ Covers: tool calling, context memory, streaming, multi-turn tool loops.
 Runs tests concurrently per model.
 """
 
+import os
 import requests
 import json
 import time
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-BASE_URL = "http://127.0.0.1:8080/v1"
+BASE_URL = os.environ.get("CHAT2API_BASE_URL", "http://127.0.0.1:48763").rstrip("/") + "/v1"
 API_KEY = "sk-ugo4l2lb6p44K0pulK8RJQip1gIM4ydgOstOEMRkrah0QvR8"
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",

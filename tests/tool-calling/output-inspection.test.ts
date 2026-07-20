@@ -7,8 +7,12 @@ import {
 } from '../../src/main/proxy/toolCalling/diagnostics.ts'
 import { inspectNonStreamAssistantOutput, inspectStreamAssistantOutput } from '../../src/main/proxy/toolCalling/outputInspection.ts'
 import type { ToolCallingPlan } from '../../src/main/proxy/toolCalling/types.ts'
+import type { ToolActionConstraint } from '../../src/main/proxy/toolCalling/ToolManifest.ts'
 
-function plan(emptyOutputPolicy: ToolCallingPlan['contract']['emptyOutputPolicy'] = 'diagnose_and_fail'): ToolCallingPlan {
+function plan(
+  emptyOutputPolicy: ToolCallingPlan['contract']['emptyOutputPolicy'] = 'diagnose_and_fail',
+  actionConstraint: ToolActionConstraint | null = null,
+): ToolCallingPlan {
   return {
     mode: 'managed',
     protocol: 'managed_xml',
@@ -26,6 +30,7 @@ function plan(emptyOutputPolicy: ToolCallingPlan['contract']['emptyOutputPolicy'
       reason: 'no_tools',
     },
     availabilityRetryAllowed: false,
+    actionConstraint,
     contract: {
       turnId: 'empty-r1',
       sessionId: 'empty-session',
@@ -59,6 +64,27 @@ function plan(emptyOutputPolicy: ToolCallingPlan['contract']['emptyOutputPolicy'
     },
   }
 }
+
+test('constrained tool turns reject ordinary assistant text without the required tool call', () => {
+  const result = inspectNonStreamAssistantOutput({
+    result: {
+      choices: [{
+        message: { role: 'assistant', content: '2026-07-19 15:10:57 UTC' },
+        finish_reason: 'stop',
+      }],
+    },
+    plan: plan('diagnose_and_fail', {
+      kind: 'next_required_tool',
+      toolName: 'read',
+      arguments: { filePath: 'E:\\Chat2API\\src\\renderer\\src\\index.css' },
+      reason: 'skill_workflow_next_step_required',
+    }),
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.outcome, 'malformed_tool_output')
+  assert.match(result.error, /malformed tool output.*required read call/i)
+})
 
 test('empty non-stream assistant output fails when policy is diagnose_and_fail', () => {
   clearToolDiagnosticEvents()

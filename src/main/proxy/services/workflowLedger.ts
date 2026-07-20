@@ -124,32 +124,38 @@ function summarizeCompletedExchange(group: ChatMessage[], index: number): string
   return `${index + 1}. ${toolNames || 'tool exchange'}${resultSnippet}`
 }
 
-function extractCompletedStep(group: ChatMessage[]): WorkflowLedgerCompletedStep | undefined {
+function extractCompletedSteps(group: ChatMessage[]): WorkflowLedgerCompletedStep[] {
   const assistant = group.find(
     message => message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0
   )
-  const primaryToolCall = assistant?.tool_calls?.[0]
-  if (!primaryToolCall) {
-    return undefined
+  const toolCalls = assistant?.tool_calls ?? []
+  if (toolCalls.length === 0) {
+    return []
   }
 
-  const toolName = primaryToolCall.function?.name || 'tool'
-  const artifactPath = primaryToolCall.function?.arguments
-    ? extractToolArtifactPath(toolName, primaryToolCall.function.arguments)
-    : undefined
-  const toolResult = group.find(
-    message => message.role === 'tool' && typeof message.tool_call_id === 'string'
-  )
-  const evidence = toolResult
-    ? truncateForToolHandoff(getMessageContent(toolResult), 80)
-    : undefined
+  return toolCalls.flatMap((toolCall) => {
+    const toolName = toolCall.function?.name || 'tool'
+    const artifactPath = toolCall.function?.arguments
+      ? extractToolArtifactPath(toolName, toolCall.function.arguments)
+      : undefined
+    const toolResult = group.find(
+      message => message.role === 'tool' && message.tool_call_id === toolCall.id,
+    )
+    const evidence = toolResult
+      ? truncateForToolHandoff(getMessageContent(toolResult), 80)
+      : undefined
 
-  return {
-    toolName,
-    toolCallId: primaryToolCall.id,
-    artifactPath,
-    evidence: evidence && evidence.length > 0 ? evidence : undefined,
-  }
+    if (!toolResult) {
+      return []
+    }
+
+    return [{
+      toolName,
+      toolCallId: toolCall.id,
+      artifactPath,
+      evidence: evidence && evidence.length > 0 ? evidence : undefined,
+    }]
+  })
 }
 
 function renderActiveSkillProgressLine(step: WorkflowLedgerCompletedStep, index: number): string {
@@ -257,6 +263,13 @@ function extractInstructionOutputPath(instructionLine: string): string | undefin
 
 export function extractInstructionToolName(instructionLine: string): string | undefined {
   const [instructionHeader] = instructionLine.split(/\r?\n/, 1)
+  const actionMatch = instructionHeader.match(
+    /\b(?:use|call|emit|run)\s+(?:the|a|an)?\s*`?(skill|read|bash|write|edit|grep|glob)`?\s+tool\b/i,
+  )
+  if (actionMatch?.[1]) {
+    return actionMatch[1].toLowerCase()
+  }
+
   const match = instructionHeader.match(/\b(skill|read|bash|write|edit|grep|glob)\b/i)
   return match?.[1]?.toLowerCase()
 }
@@ -309,6 +322,23 @@ export function extractNextToolArgumentHint(
   }
 
   return undefined
+}
+
+function inferNextArgumentHintFromPinnedInstructions(
+  instructionBlocks: string[],
+  nextInstruction: string | undefined,
+  nextToolName: string | undefined,
+): string | undefined {
+  if (!nextInstruction || nextToolName !== 'bash') {
+    return undefined
+  }
+
+  const nextIndex = instructionBlocks.findIndex(block => block === nextInstruction)
+  const followingBlocks = nextIndex === -1 ? [] : instructionBlocks.slice(nextIndex + 1)
+  const commandBlock = followingBlocks.find(block => extractInstructionToolName(block) === 'bash')
+  return commandBlock
+    ? extractNextToolArgumentHint(commandBlock, 'bash')
+    : undefined
 }
 
 function isInstructionSatisfiedByCompletedStep(
@@ -364,9 +394,7 @@ export function buildWorkflowLedger(input: BuildWorkflowLedgerInput): WorkflowLe
   const kind: WorkflowLedgerKind = latestSkillInstructionPinned
     ? 'active_skill'
     : 'completed_tool_handoff'
-  const completedSteps = input.groups
-    .map(extractCompletedStep)
-    .filter((step): step is WorkflowLedgerCompletedStep => Boolean(step))
+  const completedSteps = input.groups.flatMap(extractCompletedSteps)
   const pinnedSkillInstructions = latestSkillInstructionPinned
     ? extractPinnedSkillInstructionBlocks(input.retainedGroups ?? [])
     : []
@@ -378,6 +406,7 @@ export function buildWorkflowLedger(input: BuildWorkflowLedgerInput): WorkflowLe
     : undefined
   const nextArgumentHint = nextInstruction
     ? extractNextToolArgumentHint(nextInstruction, nextToolName)
+      ?? inferNextArgumentHintFromPinnedInstructions(pinnedSkillInstructions, nextInstruction, nextToolName)
     : undefined
   const renderedSteps = completedSteps.slice(-MAX_COMPLETED_TOOL_HANDOFF_EXCHANGES)
   const renderedProgressLines = latestSkillInstructionPinned

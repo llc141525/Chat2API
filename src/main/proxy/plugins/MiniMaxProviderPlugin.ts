@@ -88,6 +88,7 @@ export const MiniMaxProviderPlugin: WebProviderPlugin = {
     preferredManagedProtocol: 'managed_xml',
     sessionIdKind: 'chat_id',
     transport: 'polling_stream',
+    firstStreamEventTimeoutMs: 20000,
   },
 
   async buildRequest(input: ProviderRuntimeRequest): Promise<ProviderWebRequest> {

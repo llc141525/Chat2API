@@ -62,6 +62,7 @@ class StoreManager {
   private initializationError: Error | null = null
   private requestLogManager: RequestLogManager | null = null
   private appLogManager: AppLogManager | null = null
+  private configChangeUnsubscribe: (() => void) | null = null
 
   setMainWindow(window: BrowserWindow | null): void {
     this.mainWindow = window
@@ -104,12 +105,14 @@ class StoreManager {
         cwd: storagePath,
         defaults: this.getDefaultData(),
         encryptionKey: this.getEncryptionKey(),
+        watch: true,
       })
 
       await this.initializeAppLogManager(storagePath)
       await this.initializeRequestLogManager(storagePath)
       this.initializeDefaultModelMappings()
       await this.initializeDefaultProviders()
+      this.watchExternalConfigChanges()
       this.isInitialized = true
       this.initializationError = null
     } catch (error) {
@@ -124,10 +127,12 @@ class StoreManager {
           cwd: storagePath,
           defaults: this.getDefaultData(),
           encryptionKey: this.getEncryptionKey(),
+          watch: true,
         })
         await this.initializeAppLogManager(storagePath)
         await this.initializeRequestLogManager(storagePath)
         this.initializeDefaultModelMappings()
+        this.watchExternalConfigChanges()
         this.isInitialized = true
         this.initializationError = null
         console.log('[Store] Successfully recovered from corrupted data')
@@ -186,6 +191,27 @@ class StoreManager {
       console.warn('Encryption unavailable, using unencrypted storage:', error)
     }
     return undefined
+  }
+
+  private watchExternalConfigChanges(): void {
+    this.configChangeUnsubscribe?.()
+    this.configChangeUnsubscribe = null
+
+    if (!this.store || typeof this.store.onDidChange !== 'function') {
+      return
+    }
+
+    const unsubscribe = this.store.onDidChange('config', (nextConfig: Partial<AppConfig>) => {
+      const normalized = this.normalizeConfig(nextConfig || DEFAULT_CONFIG)
+      this.appLogManager?.setMaxEntries(this.getMaxLogEntries(normalized))
+      this.requestLogManager?.setConfig(normalized.requestLogConfig)
+      console.log('[Store] Applied external config change:', JSON.stringify({
+        contextManagementEnabled: normalized.contextManagement?.enabled === true,
+        executionOrder: normalized.contextManagement?.executionOrder,
+      }))
+    })
+
+    this.configChangeUnsubscribe = typeof unsubscribe === 'function' ? unsubscribe : null
   }
 
   /**

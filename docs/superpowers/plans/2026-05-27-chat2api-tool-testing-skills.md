@@ -280,7 +280,7 @@ test('management helper prints safe dry-run output without leaking secret', () =
   const result = spawnSync('node', [script, 'snapshot', '--dry-run'], {
     env: {
       ...process.env,
-      CHAT2API_BASE_URL: 'http://127.0.0.1:8080',
+      CHAT2API_BASE_URL: 'http://127.0.0.1:48763',
       CHAT2API_MGMT_SECRET: 'mgmt_super_secret_value',
     },
     encoding: 'utf8',
@@ -309,7 +309,7 @@ Create `skills/chat2api-management-api/scripts/management-api.mjs`:
 ```js
 #!/usr/bin/env node
 
-const baseUrl = (process.env.CHAT2API_BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '')
+const baseUrl = (process.env.CHAT2API_BASE_URL || 'http://127.0.0.1:48763').replace(/\/$/, '')
 const managementSecret = process.env.CHAT2API_MGMT_SECRET || ''
 const command = process.argv[2] || 'help'
 const args = parseArgs(process.argv.slice(3))
@@ -490,7 +490,7 @@ function writeHar(file) {
       entries: [{
         request: {
           method: 'POST',
-          url: 'http://127.0.0.1:8080/v1/chat/completions',
+          url: 'http://127.0.0.1:48763/v1/chat/completions',
           headers: [
             { name: 'Authorization', value: 'Bearer secret' },
             { name: 'x-title', value: 'Cherry Studio' },
@@ -805,7 +805,7 @@ Create `skills/chat2api-tool-client-replay/scripts/replay-client-fixture.mjs` wi
 import fs from 'node:fs'
 
 const args = parseArgs(process.argv.slice(2))
-const baseUrl = (process.env.CHAT2API_BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '')
+const baseUrl = (process.env.CHAT2API_BASE_URL || 'http://127.0.0.1:48763').replace(/\/$/, '')
 const apiKey = process.env.CHAT2API_API_KEY || ''
 
 function parseArgs(values) {
@@ -979,7 +979,7 @@ Create `skills/chat2api-provider-model-matrix/scripts/run-model-matrix.mjs`:
 import fs from 'node:fs'
 
 const args = parseArgs(process.argv.slice(2))
-const baseUrl = (process.env.CHAT2API_BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '')
+const baseUrl = (process.env.CHAT2API_BASE_URL || 'http://127.0.0.1:48763').replace(/\/$/, '')
 const managementSecret = process.env.CHAT2API_MGMT_SECRET || ''
 const apiKey = process.env.CHAT2API_API_KEY || ''
 const runId = new Date().toISOString().replace(/[:.]/g, '-')
@@ -1061,7 +1061,7 @@ Append to `skills/chat2api-provider-model-matrix/SKILL.md`:
 ## Commands
 
 ```bash
-CHAT2API_BASE_URL=http://127.0.0.1:8080 \
+CHAT2API_BASE_URL=http://127.0.0.1:48763 \
 CHAT2API_MGMT_SECRET=mgmt_xxx \
 CHAT2API_API_KEY=sk_xxx \
 node skills/chat2api-provider-model-matrix/scripts/run-model-matrix.mjs \

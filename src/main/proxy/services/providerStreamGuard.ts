@@ -31,7 +31,9 @@ export async function primeProviderStreamEvents<T>(
 
     if (next.result.done) {
       if (timer) clearTimeout(timer)
-      break
+      return {
+        error: new Error('Provider stream closed without a deliverable event'),
+      }
     }
     buffered.push(next.result.value)
     if (isReady(next.result.value)) {

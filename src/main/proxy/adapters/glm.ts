@@ -714,6 +714,7 @@ export class GLMStreamHandler {
     let sentReasoning = ''
     let sentRole = false
     let finished = false
+    let receivedProviderEvent = false
 
     transStream.write(
       `data: ${JSON.stringify({
@@ -775,10 +776,32 @@ export class GLMStreamHandler {
       this.onEnd?.()
     }
 
+    const failStream = (message: string): void => {
+      if (finished) return
+      finished = true
+      transStream.write(`data: ${JSON.stringify({
+        error: {
+          code: 'UPSTREAM_EMPTY_STREAM',
+          message,
+        },
+      })}\n\n`)
+      transStream.end('data: [DONE]\n\n')
+      this.onEnd?.()
+    }
+
+    const finishStreamIfProviderProduced = (): void => {
+      if (receivedProviderEvent) {
+        finishStream()
+        return
+      }
+      failStream('GLM provider stream closed before emitting any provider event')
+    }
+
     const parser = createParser({
       onEvent: (event: any) => {
         try {
           const result = JSON.parse(event.data)
+          receivedProviderEvent = true
 
           if (!this.conversationId && result.conversation_id) {
             this.conversationId = result.conversation_id
@@ -950,7 +973,7 @@ export class GLMStreamHandler {
       },
     })
 
-    const inputStream = this.createDecodedStream(stream, response, (text) => parser.feed(text), finishStream)
+    const inputStream = this.createDecodedStream(stream, response, (text) => parser.feed(text), finishStreamIfProviderProduced)
     if (!inputStream) return transStream
 
     const decoder = new TextDecoder('utf-8')
@@ -959,13 +982,17 @@ export class GLMStreamHandler {
     // Handle stream errors - ensure proper cleanup
     inputStream.once('error', (err: Error) => {
       logger.error('[GLM] Stream error:', err.message)
-      finishStream()
+      if (receivedProviderEvent) {
+        finishStream()
+      } else {
+        failStream(`GLM provider stream failed before emitting any provider event: ${err.message}`)
+      }
     })
 
     // Handle stream close - ensure proper cleanup if not already finished
     inputStream.once('close', () => {
       logger.info('[GLM] Stream closed')
-      finishStream()
+      finishStreamIfProviderProduced()
     })
 
     return transStream

@@ -14,6 +14,7 @@
 
 import type { ChatMessage } from '../types.ts'
 import type { RequestAssembly } from '../RequestAssembly.ts'
+import type { ToolActionConstraint } from '../toolCalling/ToolManifest.ts'
 import type { PromptRefreshMode } from '../promptBudgetPolicy.ts'
 import { extractTextContent, isLikelyConfigurationPayload } from '../services/contextPayloadClassifier.ts'
 
@@ -41,6 +42,8 @@ export interface CleanedRequest {
   activeSkillCheckpoint: string | null
   /** Pre-rendered tool contract prompt from ToolCallingEngine (managed XML) */
   toolContractText: string | null
+  /** Structured constraint that must be reflected in the next assistant action */
+  toolActionConstraint: ToolActionConstraint | null
   /** Request-level prompt refresh mode */
   mode: PromptRefreshMode
 }
@@ -71,9 +74,12 @@ export function buildCleanedRequest(
   // 3. Mode-based conversation truncation
   const truncatedMessages = truncateForMode(deltaMessages, promptRefreshMode)
 
-  // 4. Build infrastructure prompt from ALL original messages
-  //    (non-truncating — captures agent definition + active skill steps)
-  const infrastructurePrompt = buildInfrastructurePromptFromMessages(assembly.messages)
+  // 4. Build infrastructure from the filtered history so repeated runtime
+  // configuration cannot inflate every provider prompt after compaction.
+  // Extract the bounded skill summary from the original history before the
+  // raw skill document is removed; never use the raw document as prompt text.
+  const infrastructurePrompt = assembly.infrastructurePrompt
+    ?? buildInfrastructurePromptFromMessages(assembly.messages)
 
   // 5. Extract summary text
   const summaryText = assembly.summaryText ?? null
@@ -96,6 +102,7 @@ export function buildCleanedRequest(
     infrastructurePrompt,
     toolDefinitions,
     toolContractText,
+    toolActionConstraint: assembly.toolActionConstraint ?? null,
     activeSkillCheckpoint: finalCheckpoint,
     mode: promptRefreshMode,
   }
@@ -180,6 +187,14 @@ function filterProviderMessageHistory(
   const filtered: ChatMessage[] = []
 
   for (const message of messages) {
+    if (message.role === 'tool' && isRawSkillMessage(message)) {
+      const skillResidue = stripRawSkillDocument(extractTextContent(message.content))
+      if (skillResidue.trim()) {
+        filtered.push({ ...message, content: skillResidue.trim() })
+      }
+      continue
+    }
+
     if (message.role === 'tool' || (message.tool_calls?.length ?? 0) > 0) {
       filtered.push(message)
       continue
@@ -336,7 +351,8 @@ function buildInfrastructurePromptFromMessages(messages: ChatMessage[]): string 
     if (text.includes('Tool Contract Header')) continue
     if (text.includes('[Prior conversation summary')) continue
     if (text.includes('[Local fallback summary')) continue
-    agentParts.push(text)
+    agentParts.push(text.slice(0, 2000))
+    break
   }
   if (agentParts.length > 0) {
     sections.push(`[Role definition — authoritative for this session]\n${agentParts.join('\n\n')}`)
@@ -390,21 +406,19 @@ function extractSkillSteps(skillContent: string): string | null {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    if (/^\d+\.\s+Use\s+the\s+`/.test(line)) {
+    if (/^\d+\.\s+\S/.test(line)) {
       inSteps = true
       collectingCommand = /\brun:?\s*$/.test(line.trimEnd())
       steps.push(line.trim())
     } else if (inSteps && /^\d+\./.test(line) && !collectingCommand) {
       collectingCommand = /\brun:?\s*$/.test(line.trimEnd())
       steps.push(line.trim())
-    } else if (collectingCommand && line.trim() && !/^\d+\.\s+Use\s+the\s+`/.test(line)) {
+    } else if (collectingCommand && line.trim() && !/^\d+\.\s+\S/.test(line)) {
       const cmdMatch = line.match(/`([^`]+)`/)
       if (cmdMatch) {
         steps.push(`  ${cmdMatch[1]}`)
         collectingCommand = false
       }
-    } else if (inSteps && line.trim() === '' && steps.length >= 2 && !collectingCommand) {
-      break
     }
     if (steps.join('\n').length > 3000) break
   }
@@ -424,6 +438,14 @@ function extractToolDefinitions(assembly: RequestAssembly): ToolDef[] {
       parameters: tool.inputSchema as Record<string, unknown> | undefined,
     },
   }))
+}
+
+function isRawSkillMessage(message: ChatMessage): boolean {
+  return extractTextContent(message.content).includes('<skill_content')
+}
+
+function stripRawSkillDocument(text: string): string {
+  return text.replace(/<skill_content\b[\s\S]*?(?:<\/skill_content>|$)/gi, '')
 }
 
 function findActiveSkillCheckpoint(messages: ChatMessage[]): string | null {

@@ -73,8 +73,13 @@ export const KimiProviderPlugin: WebProviderPlugin = {
 
     // Determine thinking / web search from model hints
     const modelLower = (input.originalModel || input.model).toLowerCase()
+    // Kimi K3 is only selected when thinking is enabled. The web service
+    // otherwise routes the request back to K2.6, even when model=k3.
     const enableThinking = input.enableThinking
-      ?? (modelLower.includes('think') || modelLower.includes('r1'))
+      ?? (modelLower === 'k3'
+        || modelLower === 'kimi-k3'
+        || modelLower.includes('think')
+        || modelLower.includes('r1'))
     const enableWebSearch = input.enableWebSearch
       ?? modelLower.includes('search')
 

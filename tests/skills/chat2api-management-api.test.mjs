@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { pathToFileURL } from 'node:url'
 
 const script = 'skills/chat2api-management-api/scripts/management-api.mjs'
 const skill = 'skills/chat2api-management-api/SKILL.md'
@@ -29,6 +30,37 @@ test('management helper prints safe dry-run output without leaking secret', () =
 
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /snapshot/)
+  assert.doesNotMatch(result.stdout, /mgmt_super_secret_value/)
+})
+
+test('management helper dry-run defaults to Chat2API local proxy port', () => {
+  const result = spawnSync('node', [script, 'snapshot', '--dry-run'], {
+    env: {
+      ...process.env,
+      CHAT2API_BASE_URL: '',
+      CHAT2API_MGMT_SECRET: 'mgmt_super_secret_value',
+    },
+    encoding: 'utf8',
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.baseUrl, 'http://127.0.0.1:48763')
+})
+
+test('explicit management base url overrides default', () => {
+  const result = spawnSync('node', [script, 'snapshot', '--dry-run'], {
+    env: {
+      ...process.env,
+      CHAT2API_BASE_URL: 'http://127.0.0.1:8080',
+      CHAT2API_MGMT_SECRET: 'mgmt_super_secret_value',
+    },
+    encoding: 'utf8',
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.baseUrl, 'http://127.0.0.1:8080')
   assert.doesNotMatch(result.stdout, /mgmt_super_secret_value/)
 })
 
@@ -84,7 +116,7 @@ globalThis.fetch = async (url, options = {}) => {
       CHAT2API_BASE_URL: 'http://mock.local',
       CHAT2API_MGMT_SECRET: 'mgmt_super_secret_value',
     }, {
-      nodeArgs: ['--import', mockFile],
+      nodeArgs: ['--import', pathToFileURL(mockFile).href],
     })
 
     assert.notEqual(result.status, 0)

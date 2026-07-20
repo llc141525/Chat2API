@@ -80,6 +80,7 @@ export const QwenProviderPlugin: WebProviderPlugin = {
       timestamp,
       enableThinking: input.enableThinking ?? false,
       enableWebSearch: input.enableWebSearch ?? false,
+      correlationId: input.correlationId,
     }, ticket)
 
     return {

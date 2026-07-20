@@ -81,7 +81,7 @@ The built-in provider adapters currently cover:
 | --- | --- | --- |
 | DeepSeek | deepseek-v4-flash, deepseek-v4-pro | [Guide](docs/providers/deepseek.md) |
 | GLM | GLM-5.2, GLM-5.1 | [Guide](docs/providers/glm.md) |
-| Kimi | Kimi-K2.6 | [Guide](docs/providers/kimi.md) |
+| Kimi | Kimi-K3, Kimi-K2.6 | [Guide](docs/providers/kimi.md) |
 | MiniMax | MiniMax-M2.7 | [Guide](docs/providers/minimax.md) |
 | Mimo | MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5-Pro, MiMo-V2.5, MiMo-V2-Flash | [Guide](docs/providers/mimo.md) |
 | Perplexity | Auto | [Guide](docs/providers/perplexity.md) |

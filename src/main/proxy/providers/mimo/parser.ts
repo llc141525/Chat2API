@@ -10,6 +10,7 @@
 
 import type { ToolCallingPlan } from '../../toolCalling/types.ts'
 import { ToolStreamParser } from '../../toolCalling/ToolStreamParser.ts'
+import { logger } from '../../shared/logger.ts'
 import type {
   ProviderRuntimeEvent,
   ProviderRuntimeResult,
@@ -284,10 +285,10 @@ export class MimoStreamHandler {
     const id = `chatcmpl-${uuid(false)}`
     const created = Math.floor(Date.now() / 1000)
 
-    yield this.formatOpenAIChunk(id, created, { role: 'assistant', content: '' }, 'role')
-
     let buffer = ''
     let currentEvent = ''
+    let providerFrameCount = 0
+    let sentRole = false
 
     let state: 'init' | 'thinking' | 'content' = 'init'
     let totalContent = ''
@@ -310,6 +311,7 @@ export class MimoStreamHandler {
           try {
             const dataStr = trimmed.slice(5).trim()
             const data = JSON.parse(dataStr)
+            providerFrameCount++
             const mimoChunk: MimoChunk = { type: currentEvent as any, ...data }
 
             if ((mimoChunk.type === 'message' || mimoChunk.type === 'text') && mimoChunk.content) {
@@ -370,16 +372,21 @@ export class MimoStreamHandler {
 
                 if (cleanedContent) {
                   if (this.toolStreamParser) {
-                    const chunks = this.toolStreamParser.push(cleanedContent, this.createBaseChunk(id, created))
+                    const chunks = this.toolStreamParser.push(cleanedContent, this.createBaseChunk(id, created), !sentRole)
                     for (const chunk of chunks) {
                       yield `data: ${JSON.stringify(chunk)}\n\n`
                     }
                     if (chunks.length > 0 || this.toolStreamParser.isBuffering() || this.toolStreamParser.hasEmittedToolCall()) {
+                      if (chunks.length > 0) sentRole = true
                       lastProcessedIndex = totalContent.length
                       continue
                     }
                   }
-                  yield this.formatOpenAIChunk(id, created, { content: cleanedContent })
+                  yield this.formatOpenAIChunk(id, created, {
+                    ...(!sentRole ? { role: 'assistant' } : {}),
+                    content: cleanedContent,
+                  })
+                  sentRole = true
                 }
 
                 lastProcessedIndex = totalContent.length
@@ -394,6 +401,16 @@ export class MimoStreamHandler {
           }
         }
       }
+    }
+
+    if (providerFrameCount === 0) {
+      yield `data: ${JSON.stringify({
+        error: {
+          code: 'EMPTY_PROVIDER_STREAM',
+          message: 'Mimo provider stream closed before emitting any provider event',
+        },
+      })}\n\n`
+      return
     }
 
     const flushChunks = this.toolStreamParser?.flush(this.createBaseChunk(id, created)) ?? []
@@ -631,6 +648,7 @@ export async function* parseMimoStream(
 ): AsyncIterable<ProviderRuntimeEvent> {
   const { model, toolCallingPlan } = input
   const response = input.response
+  const correlationId = input.correlationId
 
   const handler = new MimoStreamHandler(
     model,
@@ -663,6 +681,20 @@ export async function* parseMimoStream(
 
   let buffer = ''
   let emittedSessionUpdate = false
+  let parsedFrameCount = 0
+  let emittedProviderEventCount = 0
+
+  logger.info('[MimoProviderPlugin] Production stream parse start:', JSON.stringify({
+    correlationId,
+    model,
+    status: response.status,
+    contentType: response.headers?.['content-type'] ?? null,
+    responseDataKind: response.data == null ? 'nullish' : typeof response.data,
+    responseDataReadable: Boolean((response.data as any)?.pipe && (response.data as any)?.on),
+    shouldParseTools: Boolean(toolCallingPlan?.shouldParseResponse),
+    protocol: toolCallingPlan?.protocol ?? null,
+    actionConstraint: input.toolActionConstraint ?? null,
+  }))
 
   try {
     for await (const chunk of openAiStream) {
@@ -686,18 +718,33 @@ export async function* parseMimoStream(
         let parsed: Record<string, any>
         try {
           parsed = JSON.parse(payload)
+          parsedFrameCount++
         } catch {
+          logger.warn('[MimoProviderPlugin] Production stream parse skipped invalid JSON frame:', JSON.stringify({
+            correlationId,
+            payloadLength: payload.length,
+          }))
           continue
         }
 
         if (parsed.error) {
           const statusCode = Number(parsed.error.code ?? 0)
+          const code = String(parsed.error.code ?? 'STREAM_ERROR')
+          const message = String(parsed.error.message ?? 'Stream error')
+          logger.error('[MimoProviderPlugin] Production stream parse provider error:', JSON.stringify({
+            correlationId,
+            model,
+            code,
+            message,
+            parsedFrameCount,
+            emittedProviderEventCount,
+          }))
           yield {
             type: 'error',
             error: {
               status: Number.isFinite(statusCode) ? statusCode : 0,
-              code: String(parsed.error.code ?? 'STREAM_ERROR'),
-              message: String(parsed.error.message ?? 'Stream error'),
+              code,
+              message,
               retryable: statusCode >= 500 || statusCode === 0,
               classified: true,
             },
@@ -707,6 +754,7 @@ export async function* parseMimoStream(
 
         if (!emittedSessionUpdate && handler.getDialogId()) {
           emittedSessionUpdate = true
+          emittedProviderEventCount++
           yield {
             type: 'session_update',
             sessionId: handler.getDialogId() || undefined,
@@ -719,14 +767,17 @@ export async function* parseMimoStream(
         const finishReason = choice?.finish_reason
 
         if (typeof delta.content === 'string' && delta.content.length > 0) {
+          emittedProviderEventCount++
           yield { type: 'text_delta', text: delta.content }
         }
         if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+          emittedProviderEventCount++
           yield { type: 'text_delta', text: delta.reasoning_content }
         }
 
         if (Array.isArray(delta.tool_calls)) {
           for (const call of delta.tool_calls) {
+            emittedProviderEventCount++
             yield {
               type: 'tool_call_delta',
               call: {
@@ -744,11 +795,25 @@ export async function* parseMimoStream(
         }
 
         if (finishReason) {
+          emittedProviderEventCount++
+          logger.info('[MimoProviderPlugin] Production stream parse finish:', JSON.stringify({
+            correlationId,
+            model,
+            finishReason,
+            parsedFrameCount,
+            emittedProviderEventCount,
+            emittedSessionUpdate,
+          }))
           yield { type: 'done', finishReason }
         }
       }
     }
   } catch (err: unknown) {
+    logger.error('[MimoProviderPlugin] Production stream parse error:', JSON.stringify({
+      correlationId,
+      model,
+      message: err instanceof Error ? err.message : String(err),
+    }))
     yield {
       type: 'error',
       error: {

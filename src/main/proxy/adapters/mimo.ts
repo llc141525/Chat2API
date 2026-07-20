@@ -11,6 +11,7 @@ import type { ChatMessage } from '../types.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { getMaxToolResultLength } from '../shared/toolResultLimit.ts'
 
 const MIMO_API_BASE = 'https://aistudio.xiaomimimo.com'
 
@@ -284,8 +285,9 @@ export function buildMimoQuery(messages: MimoMessage[]): string {
 
     if (message.role === 'tool' && message.tool_call_id) {
       const rawContent = extractTextContent(message.content)
-      const truncated = rawContent.length > 2000
-        ? rawContent.slice(0, 2000) + '\n...(truncated)'
+      const maxToolResultLength = getMaxToolResultLength()
+      const truncated = rawContent.length > maxToolResultLength
+        ? rawContent.slice(0, maxToolResultLength) + '\n...(truncated)'
         : rawContent
       entries.push({
         role: 'User',

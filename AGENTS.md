@@ -102,3 +102,11 @@ Probe 验证: multi-turn tool calling, non-stream conversion, catalog continuity
 输出 session 时间线表格。关注: `REJ:*` (summary rejected)、compact 后 provider session 不变、`FALLBACK`、ctx 缩减但无 summary、子 session 未清理 (`tool_child` 无 `del:`)。
 
 发现异常 → 回到探索步骤。
+
+### 日志优先与根因定律
+
+任何 probe 失败或出现异常行为时，必须先完整读取并汇总本次运行产生的结构化日志，再提出假设或修改代码。不得在未解释已有日志证据前反复运行长 probe，也不得用猜测替代日志分析。
+
+修复目标必须是尽可能定位并消除根本原因，而不是仅针对当前症状添加绕过、阈值、特判或其他治标补丁。每个修复都应说明：异常链路、根因证据、为什么该改动能切断根因，以及对应的回归测试。若日志不足以区分多个根因，先补充可观测性或增加最小化测试，再进行下一次长 probe。
+
+结构化日志至少要区分原始 assembly、清洗后的最终 prompt、runtime config、tool contract、tool exchange 和各 session/boundary 的大小与来源；分析时必须确认 probe 使用的是最新代码和唯一的服务进程。

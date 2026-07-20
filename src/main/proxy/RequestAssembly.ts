@@ -437,23 +437,21 @@ function extractSkillStepLines(skillContent: string): string | null {
   let collectingCommand = false
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    if (/^\d+\.\s+Use\s+the\s+`/.test(line)) {
+    if (/^\d+\.\s+\S/.test(line)) {
       inSteps = true
       collectingCommand = /\brun:?\s*$/.test(line.trimEnd())
       steps.push(line.trim())
     } else if (inSteps && /^\d+\./.test(line) && !collectingCommand) {
       collectingCommand = /\brun:?\s*$/.test(line.trimEnd())
       steps.push(line.trim())
-    } else if (collectingCommand && line.trim() && !/^\d+\.\s+Use\s+the\s+`/.test(line)) {
+    } else if (collectingCommand && line.trim() && !/^\d+\.\s+\S/.test(line)) {
       const cmdMatch = line.match(/`([^`]+)`/)
       if (cmdMatch) {
         steps.push(`  ${cmdMatch[1]}`)
         collectingCommand = false
       }
-    } else if (inSteps && line.trim() === '' && steps.length >= 2 && !collectingCommand) {
-      break
     }
-    if (steps.join('\n').length > 800) break
+    if (steps.join('\n').length > 3000) break
   }
   return steps.length > 0 ? steps.join('\n') : null
 }

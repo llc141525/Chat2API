@@ -53,6 +53,20 @@ test('matrix runner dry-run does not leak configured secrets', () => {
   assert.doesNotMatch(result.stdout, /mgmt_super_secret_value/)
 })
 
+test('matrix runner dry-run defaults to Chat2API local proxy port', () => {
+  const result = spawnSync('node', [script, '--fixture', 'fixture.json', '--dry-run'], {
+    env: {
+      ...process.env,
+      CHAT2API_BASE_URL: '',
+    },
+    encoding: 'utf8',
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.modelsEndpoint, 'http://127.0.0.1:48763/v1/models')
+})
+
 test('matrix runner selects provider id when /v1/models uses display owned_by', () => {
   const cwd = makeTempRunDir()
   const capture = path.join(cwd, 'fetch.json')
@@ -124,4 +138,18 @@ globalThis.fetch = async () => new Response(JSON.stringify({ error: 'failed' }),
   assert.match(result.stderr, /GET \/v1\/models failed: 500/)
   assert.doesNotMatch(result.stderr, /sk_super_secret_value/)
   assert.doesNotMatch(result.stderr, /mgmt_super_secret_value/)
+})
+
+test('explicit matrix base url overrides default', () => {
+  const result = spawnSync('node', [script, '--fixture', 'fixture.json', '--dry-run'], {
+    env: {
+      ...process.env,
+      CHAT2API_BASE_URL: 'http://127.0.0.1:8080',
+    },
+    encoding: 'utf8',
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.modelsEndpoint, 'http://127.0.0.1:8080/v1/models')
 })

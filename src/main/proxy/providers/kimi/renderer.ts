@@ -12,6 +12,7 @@
 
 import { createKimiChatPayload, encodeKimiGrpcFrame } from '../../adapters/providerModelOptions.ts'
 import type { CleanedRequest } from '../../core/requestCleaner.ts'
+import { getMaxToolResultLength } from '../../shared/toolResultLimit.ts'
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -98,19 +99,23 @@ function buildKimiContent(cleaned: CleanedRequest): string {
 
   for (const msg of cleaned.messages) {
     const txt = extractTextContent(msg.content as any)
-    if (!txt) continue
     if (msg.role === 'system') {
+      if (!txt) continue
       system = txt
     } else if (msg.role === 'assistant' && msg.tool_calls && (msg.tool_calls as any[]).length > 0) {
       parts.push(`Assistant: ${formatToolCallsText(msg.tool_calls as any[])}`)
     } else if (msg.role === 'tool' && msg.tool_call_id) {
-      const truncated = txt.length > 2000
-        ? txt.slice(0, 2000) + '\n...(truncated)'
+      if (!txt) continue
+      const MAX_TOOL_RESULT_LENGTH = getMaxToolResultLength()
+      const truncated = txt.length > MAX_TOOL_RESULT_LENGTH
+        ? txt.slice(0, MAX_TOOL_RESULT_LENGTH) + '\n...(truncated)'
         : txt
       parts.push(`[Tool Result for ${msg.tool_call_id}]: ${truncated}`)
     } else if (msg.role === 'assistant') {
+      if (!txt) continue
       parts.push(`Assistant: ${txt}`)
     } else {
+      if (!txt) continue
       parts.push(wrapUrlsToTags(txt))
     }
   }

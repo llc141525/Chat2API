@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
 import { inspectNonStreamAssistantOutput } from '../../src/main/proxy/toolCalling/outputInspection.ts'
+import { buildWorkflowLedgerHandoffMessage } from '../../src/main/proxy/services/workflowLedger.ts'
 import type { ChatCompletionRequest } from '../../src/main/proxy/types.ts'
 import type { Provider } from '../../src/main/store/types.ts'
 
@@ -252,6 +253,7 @@ test('first-skill instruction produces a high-priority tool action constraint be
     arguments: { name: 'agent-capability-probe' },
     reason: 'request_requires_first_assistant_action_skill',
   })
+  assert.deepEqual(result.plan.actionConstraint, result.toolManifest!.actionConstraint)
   assert.deepEqual(result.toolManifest!.tools.map((tool) => tool.name), ['bash', 'read', 'skill', 'write'])
 
   const prompt = result.toolManifest!.renderedPrompt
@@ -347,8 +349,354 @@ test('first-skill action constraint disappears after matching skill tool result 
   // When nonSkillToolCount === 0 after compaction, no constraint is forced —
   // the model uses the full catalog. The first-turn 'read' hint is not a
   // correctness requirement. Action constraint is null when history is empty.
-  assert.equal(result.toolManifest!.actionConstraint, null)
+  assert.equal(result.toolManifest!.actionConstraint ?? null, null)
   assert.doesNotMatch(result.toolManifest!.renderedPrompt, /\[High-priority tool action constraint\]/)
+})
+
+test('checkpoint workflow parsing ignores recovery instructions appended to the required read path', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            '[Active skill workflow state checkpoint]',
+            'Required next action: call the read tool.',
+            'Next required skill step: 6. Re-read `.agent-probe/white-ui-notes.txt` to recover your findings',
+            'Only the read tool is valid for the next assistant tool call.',
+            'Required next tool arguments: filePath=.agent-probe/white-ui-notes.txt Do not call read with any other filePath.',
+          ].join('\n'),
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_skill_probe',
+          content: '<skill_content name="white-ui-audit-probe">instructions</skill_content>',
+        },
+      ],
+      tools: skillProbeTools,
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-checkpoint-read-path',
+  })
+
+  assert.equal(result.plan.actionConstraint?.toolName, 'read')
+  assert.deepEqual(result.plan.actionConstraint?.arguments, {
+    filePath: '.agent-probe/white-ui-notes.txt',
+  })
+})
+
+test('skill workflow parsing normalizes direct Re-read steps to read', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [{
+        role: 'tool',
+        tool_call_id: 'call_skill_probe',
+        content: '<skill_content name="white-ui-audit-probe">\n6. Re-read `.agent-probe/white-ui-notes.txt` to recover your findings\n</skill_content>',
+      }],
+      tools: skillProbeTools,
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-direct-reread-step',
+  })
+
+  assert.equal(result.plan.actionConstraint?.toolName, 'read')
+  assert.deepEqual(result.plan.actionConstraint?.arguments, {
+    filePath: '.agent-probe/white-ui-notes.txt',
+  })
+})
+
+test('skill workflow advances past a completed read instead of constraining the same read again', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_skill_probe',
+            type: 'function',
+            function: { name: 'skill', arguments: '{"name":"agent-capability-probe"}' },
+          }],
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_skill_probe',
+          content: [
+            '<skill_content name="agent-capability-probe">',
+            '1. Use the `read` tool to read `tests/agent-capability/input.txt`.',
+            '2. Use the `bash` tool to run:',
+            '   `node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json`',
+            '</skill_content>',
+          ].join('\n'),
+        },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_read_input',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"tests/agent-capability/input.txt"}' },
+          }],
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_read_input',
+          content: 'input contents',
+        },
+      ],
+      tools: skillProbeTools,
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-advance-completed-read',
+  })
+
+  assert.equal(result.plan.actionConstraint?.toolName, 'bash')
+  assert.deepEqual(result.plan.actionConstraint?.arguments, {
+    command: 'node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json',
+  })
+})
+
+test('skill workflow advances past an OpenCode-style completed read user result', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_skill_probe',
+            type: 'function',
+            function: { name: 'skill', arguments: '{"name":"agent-capability-probe"}' },
+          }],
+        },
+        {
+          role: 'user',
+          content: [
+            '<skill_content name="agent-capability-probe">',
+            '1. Use the `read` tool to read `tests/agent-capability/input.txt`.',
+            '2. Use the `bash` tool to run:',
+            '   `node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json`',
+            '</skill_content>',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: '{"type":"tool","tool":"read","state":{"status":"completed"},"input":{"filePath":"tests/agent-capability/input.txt"},"output":"input contents"}',
+        },
+      ],
+      tools: skillProbeTools,
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-advance-opencode-user-read-result',
+  })
+
+  assert.equal(result.plan.actionConstraint?.toolName, 'bash')
+  assert.deepEqual(result.plan.actionConstraint?.arguments, {
+    command: 'node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json',
+  })
+})
+
+test('checkpoint prefers the structured next skill step over stale required-action text', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [{
+        role: 'user',
+        content: [
+          '[Active skill workflow state checkpoint]',
+          'Required next action: call the read tool for this exact skill step now.',
+          'Next required skill step: 2. Bash `node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json`',
+          'Only the read tool is valid for the next assistant tool call.',
+          'Required next tool arguments: filePath=tests/agent-capability/input.txt',
+        ].join('\n'),
+      }, {
+        role: 'tool',
+        tool_call_id: 'call_skill_probe',
+        content: '<skill_content name="agent-capability-probe">instructions</skill_content>',
+      }],
+      tools: skillProbeTools,
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-checkpoint-next-step-priority',
+  })
+
+  assert.equal(result.plan.actionConstraint?.toolName, 'bash')
+  assert.deepEqual(result.plan.actionConstraint?.arguments, {
+    command: 'node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json',
+  })
+})
+
+test('server_summary checkpoint drives next workflow step without raw skill content', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [{
+        role: 'system',
+        content: [
+          '[Workflow state digest v1 — runtime configuration, tool contracts, skill documents, and raw tool payloads omitted.]',
+          'Source: tool_handoff',
+        ].join('\n'),
+      }, {
+        role: 'system',
+        content: [
+          '[Active skill workflow state checkpoint]',
+          'Required next action: call the bash tool for this exact skill step now.',
+          'Required next tool arguments: command=node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json',
+          'Next required skill step: 2. Use the `bash` tool to run:',
+          '  `node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json`',
+          'Only the bash tool is valid for the next assistant tool call.',
+        ].join('\n'),
+      }, {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'call_skill_probe',
+          type: 'function',
+          function: { name: 'skill', arguments: '{"name":"agent-capability-probe"}' },
+        }],
+      }],
+      tools: skillProbeTools,
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-server-summary-checkpoint-no-raw-skill',
+  })
+
+  assert.equal(result.plan.actionConstraint?.toolName, 'bash')
+  assert.deepEqual(result.plan.actionConstraint?.arguments, {
+    command: 'node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json',
+  })
+})
+
+test('server_summary parses actual workflow ledger checkpoint after completed read', () => {
+  const skillResult = [
+    '<skill_content name="agent-capability-probe">',
+    '1. Use the `read` tool to read `tests/agent-capability/input.txt`.',
+    '2. After receiving that `read` tool result, emit a `bash` tool call immediately with no intervening assistant message and no other tool call.',
+    '3. In that `bash` tool call, create `.agent-probe` if needed and run `node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json`.',
+    '</skill_content>',
+  ].join('\n')
+  const skillGroup = [
+    {
+      role: 'assistant' as const,
+      content: null,
+      tool_calls: [{
+        id: 'call_skill_probe',
+        type: 'function' as const,
+        function: { name: 'skill', arguments: '{"name":"agent-capability-probe"}' },
+      }],
+    },
+    { role: 'tool' as const, tool_call_id: 'call_skill_probe', content: skillResult },
+  ]
+  const readGroup = [
+    {
+      role: 'assistant' as const,
+      content: null,
+      tool_calls: [{
+        id: 'call_read_input',
+        type: 'function' as const,
+        function: { name: 'read', arguments: '{"filePath":"tests/agent-capability/input.txt"}' },
+      }],
+    },
+    { role: 'tool' as const, tool_call_id: 'call_read_input', content: 'input contents' },
+  ]
+  const checkpoint = buildWorkflowLedgerHandoffMessage({
+    groups: [readGroup],
+    latestSkillInstructionPinned: true,
+    retainedGroups: [skillGroup],
+  })
+
+  assert.match(String(checkpoint.content), /\[Active skill workflow state checkpoint\]/)
+  assert.match(String(checkpoint.content), /Required next action: call the bash tool/)
+  assert.match(String(checkpoint.content), /Required next tool arguments: command=node tests\/agent-capability\/compute-result\.mjs/)
+
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [
+        checkpoint,
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_skill_probe',
+            type: 'function',
+            function: { name: 'skill', arguments: '{"name":"agent-capability-probe"}' },
+          }],
+        },
+      ],
+      tools: skillProbeTools,
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-server-summary-actual-ledger-checkpoint',
+  })
+
+  assert.equal(result.plan.actionConstraint?.toolName, 'bash')
+  assert.deepEqual(result.plan.actionConstraint?.arguments, {
+    command: 'node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json',
+  })
+})
+
+test('checkpoint parser keeps tool constraint and parses command from multiline next step when argument line is absent', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [{
+        role: 'system',
+        content: [
+          '[Active skill workflow state checkpoint]',
+          'Required next action: call the bash tool for this exact skill step now.',
+          'Next required skill step: 3. In that `bash` tool call, create `.agent-probe` if needed and run:',
+          '  `node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json`',
+          'Only the bash tool is valid for the next assistant tool call.',
+          'Do not repeat any completed read/bash/write call listed in this checkpoint.',
+        ].join('\n'),
+      }, {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'call_skill_probe',
+          type: 'function',
+          function: { name: 'skill', arguments: '{"name":"agent-capability-probe"}' },
+        }],
+      }],
+      tools: skillProbeTools,
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-checkpoint-multiline-no-argument-line',
+  })
+
+  assert.equal(result.plan.actionConstraint?.toolName, 'bash')
+  assert.deepEqual(result.plan.actionConstraint?.arguments, {
+    command: 'node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt > .agent-probe/result.json',
+  })
+})
+
+test('workflow guidance without concrete arguments does not force an empty tool call', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [
+        {
+          role: 'user',
+          content: 'Required next action: call the read tool.\nOnly the read tool is valid for the next assistant tool call.',
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_skill_probe',
+          content: '<skill_content name="white-ui-audit-probe">instructions</skill_content>',
+        },
+      ],
+      tools: skillProbeTools,
+    }),
+    provider,
+    actualModel: 'deepseek-chat',
+    toolSessionKey: 'engine-empty-workflow-args',
+  })
+
+  assert.equal(result.plan.actionConstraint ?? null, null)
 })
 
 test('final marker instruction alone does not activate terminal finalization constraint', () => {

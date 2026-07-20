@@ -10,6 +10,7 @@
 
 import { createGunzip, createInflate, createBrotliDecompress } from 'zlib'
 import { PassThrough } from 'stream'
+import { createHash } from 'crypto'
 import * as ZstdCodec from 'zstd-codec'
 import { logger } from '../../shared/logger.ts'
 import { parseToolCallsFromText } from '../../utils/toolParser.ts'
@@ -41,7 +42,12 @@ export async function* parseQwenStream(
   const { model, toolCallingPlan } = input
   const response = input.response
 
-  const qwenHandler = new QwenEventParser(model, toolCallingPlan)
+  const qwenHandler = new QwenEventParser(
+    model,
+    toolCallingPlan,
+    input.correlationId,
+    input.toolActionConstraint,
+  )
   const contentEncoding = (response.headers?.['content-encoding'] as string)?.toLowerCase()
 
   // Build an axios-like response object for the handler
@@ -152,6 +158,20 @@ export async function* parseQwenStream(
         }
       }
     }
+
+    const inspectionError = qwenHandler.getInspectionError()
+    if (inspectionError) {
+      yield {
+        type: 'error',
+        error: {
+          status: 422,
+          code: 'MALFORMED_TOOL_OUTPUT',
+          message: inspectionError,
+          retryable: true,
+          classified: true,
+        },
+      }
+    }
   } catch (err: unknown) {
     yield {
       type: 'error',
@@ -223,15 +243,25 @@ class QwenEventParser {
   private hasError: boolean = false
   private toolStreamParser?: ToolStreamParser
   private toolCallingPlan?: ToolCallingPlan
+  private correlationId?: string
+  private toolActionConstraint?: ProviderRuntimeStreamInput['toolActionConstraint']
   private sentRole: boolean = false
   private thinkingContent: string = ''
   private sentThinkingRole: boolean = false
   private finalized = false
+  private inspectionError?: string
 
-  constructor(model: string, toolCallingPlan?: ToolCallingPlan) {
+  constructor(
+    model: string,
+    toolCallingPlan?: ToolCallingPlan,
+    correlationId?: string,
+    toolActionConstraint?: ProviderRuntimeStreamInput['toolActionConstraint'],
+  ) {
     this.model = model
     this.created = Math.floor(Date.now() / 1000)
     this.toolCallingPlan = toolCallingPlan
+    this.correlationId = correlationId
+    this.toolActionConstraint = toolActionConstraint ?? undefined
     this.toolStreamParser = toolCallingPlan?.shouldParseResponse
       ? new ToolStreamParser(toolCallingPlan)
       : undefined
@@ -243,6 +273,10 @@ class QwenEventParser {
 
   getResponseId(): string {
     return this.responseId
+  }
+
+  getInspectionError(): string | undefined {
+    return this.inspectionError
   }
 
   /**
@@ -706,6 +740,29 @@ class QwenEventParser {
         })
       : { ok: true as const, outcome: finishReason === 'tool_calls' ? 'tool_calls' as const : 'content' as const }
 
+    logger.info('[Qwen] Production response parse:', JSON.stringify({
+      correlationId: this.correlationId ?? null,
+      model: this.model,
+      responseId: this.responseId || null,
+      sessionId: this.sessionId || null,
+      assistantContentChars: this.content.length,
+      assistantContentHasManagedXml: containsManagedToolMarker(this.content),
+      parserObservedToolCall: this.toolStreamParser?.hasEmittedToolCall() ?? false,
+      finishReason,
+      inspectionOk: inspection.ok,
+      inspectionOutcome: inspection.outcome,
+      allowedToolNames: this.toolCallingPlan ? [...this.toolCallingPlan.allowedToolNames] : [],
+      parserFormat: this.toolCallingPlan?.diagnostics.parserFormat ?? null,
+      parsedToolCallCount: this.toolCallingPlan?.diagnostics.parsedToolCallCount ?? 0,
+      malformedReason: this.toolCallingPlan?.diagnostics.malformedReason ?? null,
+      responseSha256: sha256(this.content),
+      constraintOutcome: this.toolActionConstraint?.kind === 'next_required_tool'
+        ? (this.toolStreamParser?.hasEmittedToolCall() ? 'required_tool_emitted' : 'required_tool_not_emitted')
+        : null,
+    }))
+
+    this.inspectionError = inspection.ok ? undefined : inspection.error
+
     if (!inspection.ok && inspection.outcome !== 'malformed_tool_output') {
       transStream.write(
         `data: ${JSON.stringify({
@@ -795,6 +852,10 @@ function containsManagedToolMarker(value: string): boolean {
   return value.includes('<|CHAT2API|') || value.includes('<tool_calls>')
 }
 
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
 // ── Non-stream finalize helper ──────────────────────────────────────
 
 function resolveWithContent(
@@ -808,6 +869,13 @@ function resolveWithContent(
   const result = parseToolCallsFromText(content, 'qwen')
   cleanContent = result.content
   toolCalls = result.toolCalls
+
+  logger.info('[Qwen] Production non-stream response parse:', JSON.stringify({
+    assistantContentChars: content.length,
+    assistantContentHasManagedXml: containsManagedToolMarker(content),
+    parsedToolCallCount: toolCalls.length,
+    parserFormat: result.protocol ?? null,
+  }))
 
   if (toolCalls.length > 0) {
     data.choices[0].message.content = null

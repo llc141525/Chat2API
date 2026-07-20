@@ -10,23 +10,24 @@
  */
 
 import { PassThrough } from 'stream'
-import http2, { ClientHttp2Session, ClientHttp2Stream } from 'http2'
-import axios, { AxiosResponse } from 'axios'
+import http2, { type ClientHttp2Session, type ClientHttp2Stream } from 'http2'
+import axios, { type AxiosResponse } from 'axios'
 import crypto from 'crypto'
-import { createParser, EventSourceMessage } from 'eventsource-parser'
+import { createParser, type EventSourceMessage } from 'eventsource-parser'
 import FormData from 'form-data'
-import { Account, Provider } from '../../store/types.ts'
+import type { Account, Provider } from '../../store/types.ts'
 
 import { parseToolCallsFromText } from '../utils/toolParser.ts'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import { getMaxToolResultLength } from '../shared/toolResultLimit.ts'
 import { getToolProtocol } from '../toolCalling/protocols/index.ts'
 import {
   createToolCallState,
   processStreamContent,
   flushToolCallBuffer,
   createBaseChunk,
-  ToolCallState
 } from '../utils/streamToolHandler.ts'
+import type { ToolCallState } from '../utils/streamToolHandler.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
@@ -462,8 +463,9 @@ export class MiniMaxAdapter {
         }))))
       } else if (msg.role === 'tool' && msg.tool_call_id) {
         const rawContent = extractMiniMaxTextContent(msg.content)
-        const truncated = rawContent.length > 2000
-          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+      const maxToolResultLength = getMaxToolResultLength()
+      const truncated = rawContent.length > maxToolResultLength
+        ? rawContent.slice(0, maxToolResultLength) + '\n...(truncated)'
           : rawContent
         conversationParts.push(toolProfile.formatToolResult({
           toolCallId: msg.tool_call_id,
@@ -912,8 +914,26 @@ export class MiniMaxStreamHandler {
     let hasReceivedData = false
     let httpStatus: number | null = null
     let buffer = ''
+    let upstreamClosed = false
+    let streamFinalized = false
 
     console.log('[MiniMax] Starting stream handler...')
+
+    const safeWrite = (data: string): boolean => {
+      if (streamFinalized || transStream.writableEnded) return false
+      transStream.write(data)
+      return true
+    }
+
+    const safeEnd = (data?: string): void => {
+      if (streamFinalized || transStream.writableEnded) return
+      streamFinalized = true
+      if (data) {
+        transStream.end(data)
+      } else {
+        transStream.end()
+      }
+    }
 
     // Listen for HTTP/2 response headers to check status code
     stream.once('response', (headers: http2.IncomingHttpHeaders) => {
@@ -934,7 +954,7 @@ export class MiniMaxStreamHandler {
 
         // Emit error event on the transform stream for the client to handle
         transStream.emit('error', new Error(errorMessage))
-        transStream.end()
+        safeEnd()
         return
       }
     })
@@ -943,6 +963,7 @@ export class MiniMaxStreamHandler {
     const parser = createParser({
       onEvent: (event: EventSourceMessage) => {
         try {
+          if (streamFinalized || transStream.writableEnded) return
           hasReceivedData = true
           const eventName = event.event
           if (event.data === '[DONE]') return
@@ -958,11 +979,11 @@ export class MiniMaxStreamHandler {
             const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? flushToolCallBuffer(this.toolCallState, baseChunk, 'minimax')
 
             for (const outChunk of flushChunks) {
-              transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+              safeWrite(`data: ${JSON.stringify(outChunk)}\n\n`)
             }
 
             const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
-            transStream.write(
+            safeWrite(
               `data: ${JSON.stringify({
                 id: this.chatId,
                 model: this.model,
@@ -971,7 +992,7 @@ export class MiniMaxStreamHandler {
                 created: this.created,
               })}\n\n`
             )
-            transStream.end('data: [DONE]\n\n')
+            safeEnd('data: [DONE]\n\n')
             if (this.onEnd) this.onEnd(this.chatId)
             return
           }
@@ -991,13 +1012,7 @@ export class MiniMaxStreamHandler {
 
             if (!this.chatId && finalChatId) this.chatId = finalChatId
 
-            const exceptCharIndex = text.indexOf('')
-            const chunk = text.substring(
-              exceptCharIndex !== -1
-                ? Math.min(content.length, exceptCharIndex)
-                : content.length,
-              exceptCharIndex === -1 ? text.length : exceptCharIndex
-            )
+            const chunk = typeof text === 'string' ? text.slice(content.length) : ''
             content += chunk
 
             console.log('[MiniMax] Stream chunk:', chunk.substring(0, 50), 'isEnd:', isEnd)
@@ -1015,7 +1030,7 @@ export class MiniMaxStreamHandler {
                 ).chunks
 
             for (const outChunk of outputChunks) {
-              transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+              safeWrite(`data: ${JSON.stringify(outChunk)}\n\n`)
             }
 
             if (outputChunks.length > 0) this.sentRole = true
@@ -1025,11 +1040,11 @@ export class MiniMaxStreamHandler {
               const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? flushToolCallBuffer(this.toolCallState, baseChunk, 'minimax')
 
               for (const outChunk of flushChunks) {
-                transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+                safeWrite(`data: ${JSON.stringify(outChunk)}\n\n`)
               }
 
               const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : this.toolCallState.hasEmittedToolCall ? 'tool_calls' : 'stop'
-              transStream.write(
+              safeWrite(
                 `data: ${JSON.stringify({
                   id: this.chatId,
                   model: this.model,
@@ -1038,19 +1053,20 @@ export class MiniMaxStreamHandler {
                   created: this.created,
                 })}\n\n`
               )
-              transStream.end('data: [DONE]\n\n')
+              safeEnd('data: [DONE]\n\n')
               if (this.onEnd) this.onEnd(this.chatId)
             }
           }
         } catch (err) {
           console.error('[MiniMax] Stream parse error:', err)
           transStream.emit('error', err instanceof Error ? err : new Error(String(err)))
-          transStream.end()
+          safeEnd()
         }
       }
     })
 
     stream.on('data', (chunk: Buffer) => {
+      if (streamFinalized || transStream.writableEnded) return
       hasReceivedData = true
       const chunkStr = chunk.toString()
       console.log('[MiniMax] Raw chunk:', chunkStr.substring(0, 200))
@@ -1081,7 +1097,7 @@ export class MiniMaxStreamHandler {
 
             // Handle type 8 (end of stream)
             if (type === 8) {
-              transStream.write(
+              safeWrite(
                 `data: ${JSON.stringify({
                   id: this.chatId,
                   model: this.model,
@@ -1090,7 +1106,7 @@ export class MiniMaxStreamHandler {
                   created: this.created,
                 })}\n\n`
               )
-              transStream.end('data: [DONE]\n\n')
+              safeEnd('data: [DONE]\n\n')
               if (this.onEnd) this.onEnd(this.chatId)
               return
             }
@@ -1113,13 +1129,7 @@ export class MiniMaxStreamHandler {
 
               if (!this.chatId && finalChatId) this.chatId = finalChatId
 
-              const exceptCharIndex = text.indexOf('')
-              const chunk = text.substring(
-                exceptCharIndex !== -1
-                  ? Math.min(content.length, exceptCharIndex)
-                  : content.length,
-                exceptCharIndex === -1 ? text.length : exceptCharIndex
-              )
+              const chunk = typeof text === 'string' ? text.slice(content.length) : ''
               content += chunk
 
               console.log('[MiniMax] Stream chunk:', chunk.substring(0, 50), 'isEnd:', isEnd)
@@ -1133,7 +1143,7 @@ export class MiniMaxStreamHandler {
                   }]
 
               for (const outChunk of outputChunks) {
-                transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+                safeWrite(`data: ${JSON.stringify(outChunk)}\n\n`)
               }
 
               if (outputChunks.length > 0) this.sentRole = true
@@ -1141,16 +1151,16 @@ export class MiniMaxStreamHandler {
               if (isEnd === 0) {
                 const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
                 for (const outChunk of flushChunks) {
-                  transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+                  safeWrite(`data: ${JSON.stringify(outChunk)}\n\n`)
                 }
                 const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
-                transStream.write(
+                safeWrite(
                   `data: ${JSON.stringify({
                     ...baseChunk,
                     choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
                   })}\n\n`
                 )
-                transStream.end('data: [DONE]\n\n')
+                safeEnd('data: [DONE]\n\n')
                 if (this.onEnd) this.onEnd(this.chatId)
               }
             }
@@ -1165,10 +1175,12 @@ export class MiniMaxStreamHandler {
     stream.once('error', (err: Error) => {
       console.error('[MiniMax] Stream error:', err)
       transStream.emit('error', err)
-      transStream.end()
+      safeEnd()
     })
 
-    stream.once('close', () => {
+    const finishUpstream = () => {
+      if (upstreamClosed) return
+      upstreamClosed = true
       console.log('[MiniMax] Stream closed, hasReceivedData:', hasReceivedData, 'httpStatus:', httpStatus)
       // Process any remaining data in buffer
       if (buffer.trim()) {
@@ -1180,10 +1192,18 @@ export class MiniMaxStreamHandler {
         }
       }
       // Only end gracefully if we received data successfully
-      if (hasReceivedData || (httpStatus && httpStatus < 400)) {
-        transStream.end('data: [DONE]\n\n')
-      }
-    })
+      setImmediate(() => {
+        if (transStream.writableEnded) return
+        if (hasReceivedData || (httpStatus && httpStatus < 400)) {
+          safeEnd('data: [DONE]\n\n')
+        } else {
+          safeEnd()
+        }
+      })
+    }
+
+    stream.once('end', finishUpstream)
+    stream.once('close', finishUpstream)
 
     return transStream
   }

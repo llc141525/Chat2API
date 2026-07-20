@@ -627,13 +627,8 @@ function collectActiveToolWorkflowMessages(messages: ChatMessage[]): MessageSele
 
   const summarizedGroups = groups.filter(
     (group, index) =>
-      !retainedGroupIndexes.has(index)
-      && isCompletedToolExchangeGroup(group)
-      && (
-        latestSkillInstructionGroupIndex === undefined
-        || index > latestSkillInstructionGroupIndex
-        || !isSkillInstructionExchangeGroup(group)
-      )
+    !retainedGroupIndexes.has(index)
+    && isCompletedToolExchangeGroup(group)
   )
   const handoffAnchor = summarizedGroups[0]?.find(
     message => message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0

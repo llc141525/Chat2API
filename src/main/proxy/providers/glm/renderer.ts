@@ -14,6 +14,7 @@ import { renderFinalPrompt } from '../../adapters/renderFinalPrompt.ts'
 import { selectProviderMessagesForAssembly } from '../../RequestAssembly.ts'
 import type { CleanedRequest } from '../../core/requestCleaner.ts'
 import crypto from 'node:crypto'
+import { getMaxToolResultLength } from '../../shared/toolResultLimit.ts'
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -255,7 +256,7 @@ interface MessageBuckets {
 function separateMessageBuckets(cleaned: CleanedRequest): MessageBuckets {
   const baseSystemPrompts: string[] = []
   const conversationParts: string[] = []
-  const MAX_TOOL_RESULT_LENGTH = 2000
+  const MAX_TOOL_RESULT_LENGTH = getMaxToolResultLength()
 
   for (const msg of cleaned.messages) {
     if (msg.role === 'system') {

@@ -33,6 +33,20 @@ test('replay dry-run reports selected fixture and model', () => {
   assert.doesNotMatch(result.stdout, /sk-secret-value/)
 })
 
+test('replay dry-run defaults to Chat2API local proxy port', () => {
+  const result = spawnSync('node', [script, '--fixture', 'sample.json', '--profile', 'cherry-studio', '--model', 'deepseek-v4-flash', '--dry-run'], {
+    env: {
+      ...process.env,
+      CHAT2API_BASE_URL: '',
+    },
+    encoding: 'utf8',
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.baseUrl, 'http://127.0.0.1:48763')
+})
+
 test('replay dry-run does not require fixture file', () => {
   const result = spawnSync('node', [script, '--fixture', 'missing-fixture.json', '--profile', 'openai-tools', '--model', 'deepseek-v4-flash', '--dry-run'], {
     encoding: 'utf8',
@@ -126,6 +140,20 @@ globalThis.fetch = async (url, options) => {
   assert.equal(captured.headers['proxy-authorization'], undefined)
   assert.equal(captured.headers['x-scenario'], 'kept')
   assert.equal(captured.body.model, 'deepseek-v4-flash')
+})
+
+test('explicit replay base url overrides default', () => {
+  const result = spawnSync('node', [script, '--fixture', 'sample.json', '--profile', 'cherry-studio', '--model', 'deepseek-v4-flash', '--dry-run'], {
+    env: {
+      ...process.env,
+      CHAT2API_BASE_URL: 'http://127.0.0.1:8080',
+    },
+    encoding: 'utf8',
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  const output = JSON.parse(result.stdout)
+  assert.equal(output.baseUrl, 'http://127.0.0.1:8080')
 })
 
 test('missing model exits nonzero without leaking key', () => {

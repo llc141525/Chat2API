@@ -13,6 +13,7 @@
 import { renderFinalPrompt } from '../../adapters/renderFinalPrompt.ts'
 import { resolveDeepSeekChatOptions } from '../../adapters/providerModelOptions.ts'
 import type { CleanedRequest } from '../../core/requestCleaner.ts'
+import { getMaxToolResultLength } from '../../shared/toolResultLimit.ts'
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -143,7 +144,7 @@ function deepseekMessagesToCleanPrompt(
   cleaned: CleanedRequest,
   isMultiTurn: boolean = false,
 ): string {
-  const MAX_TOOL_RESULT_LENGTH = 2000
+  const MAX_TOOL_RESULT_LENGTH = getMaxToolResultLength()
 
   // Process messages into text
   const processedMessages: Array<{ role: string; text: string }> = []

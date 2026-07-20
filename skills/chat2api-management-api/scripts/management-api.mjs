@@ -2,7 +2,7 @@
 
 import fs from 'node:fs'
 
-const baseUrl = (process.env.CHAT2API_BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '')
+const baseUrl = (process.env.CHAT2API_BASE_URL || 'http://127.0.0.1:48763').replace(/\/$/, '')
 const managementSecret = process.env.CHAT2API_MGMT_SECRET || ''
 const command = process.argv[2] || 'help'
 const args = parseArgs(process.argv.slice(3))

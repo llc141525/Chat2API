@@ -18,13 +18,15 @@ export function inspectNonStreamAssistantOutput(input: {
   const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : []
   const finishReason = typeof firstChoice?.finish_reason === 'string' ? firstChoice.finish_reason : undefined
 
-  const outcome = classifyNonStreamOutput({
-    content,
-    toolCalls,
-    finishReason,
-    validationFailureKind: input.plan.diagnostics.validationFailureKind,
-    availabilityRetryResult: input.plan.diagnostics.availabilityRetryResult,
-  })
+  const outcome = hasMissingRequiredTool(input.plan, toolCalls.length)
+    ? 'malformed_tool_output'
+    : classifyNonStreamOutput({
+        content,
+        toolCalls,
+        finishReason,
+        validationFailureKind: input.plan.diagnostics.validationFailureKind,
+        availabilityRetryResult: input.plan.diagnostics.availabilityRetryResult,
+      })
   input.plan.diagnostics.terminalOutcome = outcome
   if (outcome === 'malformed_tool_output') {
     input.plan.diagnostics.suppressedReason = 'malformed_tool_output'
@@ -68,7 +70,7 @@ export function inspectNonStreamAssistantOutput(input: {
   return {
     ok: false,
     outcome,
-    error: buildInspectionError(outcome, input.plan.contract.turnId),
+    error: buildInspectionError(outcome, input.plan.contract.turnId, input.plan),
   }
 }
 
@@ -78,7 +80,9 @@ export function inspectStreamAssistantOutput(input: {
   finishReason?: string
 }): StreamOutputInspection {
   const { observation, plan } = input
-  const outcome = classifyStreamOutput(observation)
+  const outcome = hasMissingRequiredTool(plan, observation.emittedToolCallCount)
+    ? 'malformed_tool_output'
+    : classifyStreamOutput(observation)
   plan.diagnostics.terminalOutcome = outcome
   if (observation.suppressedReason) {
     plan.diagnostics.suppressedReason = observation.suppressedReason
@@ -131,7 +135,7 @@ export function inspectStreamAssistantOutput(input: {
   return {
     ok: false,
     outcome,
-    error: buildInspectionError(outcome, plan.contract.turnId),
+    error: buildInspectionError(outcome, plan.contract.turnId, plan),
   }
 }
 
@@ -164,7 +168,19 @@ function isSuccessfulOutcome(outcome: ProviderTurnOutcome): boolean {
   return outcome === 'content' || outcome === 'tool_calls'
 }
 
-function buildInspectionError(outcome: ProviderTurnOutcome, turnId: string): string {
+function hasMissingRequiredTool(plan: ToolCallingPlan, toolCallCount: number): boolean {
+  const constraint = plan.actionConstraint
+  return Boolean(
+    constraint
+    && (constraint.kind === 'first_skill_required' || constraint.kind === 'next_required_tool')
+    && toolCallCount === 0,
+  )
+}
+
+function buildInspectionError(outcome: ProviderTurnOutcome, turnId: string, plan?: ToolCallingPlan): string {
+  if (outcome === 'malformed_tool_output' && plan?.actionConstraint) {
+    return `Provider returned malformed tool output: did not emit the required ${plan.actionConstraint.toolName ?? 'tool'} call for managed tool turn ${turnId}`
+  }
   if (outcome === 'tool_availability_drift') {
     return `Provider refused the authoritative tool catalog for managed tool turn ${turnId}`
   }

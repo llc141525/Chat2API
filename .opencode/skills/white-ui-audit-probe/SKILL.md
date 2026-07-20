@@ -11,36 +11,46 @@ Analyze the Chat2API project's white-themed UI design system, then produce a con
 
 ## Step-by-step workflow (follow EXACTLY)
 
-### Phase 1: Discovery (must execute sequentially)
-1. Read `E:\Chat2API\tailwind.config.js` to understand color tokens and theme configuration
-2. Read `E:\Chat2API\src\renderer\src\index.css` for base styles and CSS variables
-3. Glob `E:\Chat2API\src\renderer\src\**/*.tsx` to find component files
-4. Pick 3-5 representative TSX component files and read them, noting how colors/spacing are used
-5. Write your findings to `.agent-probe/white-ui-notes.txt` — list every white/light color token you found,
-   which files use them, and any inconsistency you notice
+### Phase 1: Discovery
+1. Read `E:\Chat2API\tailwind.config.js` — extract color tokens only (skip non-color config)
+2. Read `E:\Chat2API\src\renderer\src\index.css` — extract CSS variables only
+3. Glob `E:\Chat2API\src\renderer\src\**\*.tsx` to find component files
+4. Read EXACTLY 2 component files from the glob results — pick the first 2 non-index files
+5. Write findings to `.agent-probe/white-ui-notes.txt` — format as bullet points
 
 ### Phase 2: After compaction (context may be summarized)
 6. Re-read `.agent-probe/white-ui-notes.txt` to recover your findings
-7. Read 3-5 MORE component files (different from Phase 1) to expand coverage
-8. Update `.agent-probe/white-ui-notes.txt` with additional findings
+7. Read EXACTLY 2 MORE component files (different from Phase 1)
+8. Append new findings to `.agent-probe/white-ui-notes.txt`
 
-### Phase 3: Discussion (probe interactive continuity)
-9. Write a decision summary to `.agent-probe/white-ui-decision.txt` with:
-   - Whether the white theme is consistent across all components you checked
-   - At least 2 specific examples from actual files (file path + line content)
-   - At least 1 recommendation for improvement
+### Phase 3: Decision
+9. Write `.agent-probe/white-ui-decision.txt` with:
+   - 1-sentence consistency verdict (yes/no)
+   - 2 file path + line content examples
+   - 1 recommendation
 
 ### Phase 4: Final spec
-10. Read both `.agent-probe/white-ui-notes.txt` and `.agent-probe/white-ui-decision.txt`
-11. Write the final audit spec to `.agent-probe/white-ui-audit.md` with:
-    - Section 1: Color tokens inventory (token name → value → usage count)
-    - Section 2: Inconsistency findings (specific file paths + concrete examples)
-    - Section 3: Component coverage (files analyzed, patterns found)
-    - Section 4: Recommendations (numbered, specific, actionable)
-    - Section 5: A truth marker: `WHITE_UI_AUDIT_DONE`
+10. Read `.agent-probe/white-ui-notes.txt` and `.agent-probe/white-ui-decision.txt`
+11. Write `.agent-probe/white-ui-audit.md` with 4 sections:
+
+```
+## Section 1: Color Tokens
+(token name → value from files read)
+
+## Section 2: Findings
+(specific file paths + concrete observations)
+
+## Section 3: Coverage
+(files analyzed count, component types touched)
+
+## Section 4: Recommendations
+(2-3 numbered, specific, actionable items)
+
+WHITE_UI_AUDIT_DONE
+```
 
 ## Pitfalls
-- Do not skip Phase 1 steps — you MUST read actual files before writing notes
-- In Phase 2, read files you have NOT read before — don't re-read the same ones
-- Use exact file paths in your output
-- The final marker `WHITE_UI_AUDIT_DONE` must appear in `.agent-probe/white-ui-audit.md`
+- Read EXACTLY 2 files in Phase 1, EXACTLY 2 in Phase 2 — not more
+- Do NOT re-read tailwind.config.js or index.css after Phase 1
+- The marker `WHITE_UI_AUDIT_DONE` MUST be the last line of white-ui-audit.md
+- Keep notes.txt under 30 lines total

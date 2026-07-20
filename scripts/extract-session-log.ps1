@@ -39,6 +39,17 @@ if (-not (Test-Path $LogPath)) {
 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
+function Get-TraceRequestId($data) {
+  if ($null -eq $data) { return 'unknown' }
+  foreach ($name in @('correlationId', 'requestId')) {
+    if ($data.PSObject.Properties.Name -contains $name) {
+      $value = [string]$data.$name
+      if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+  }
+  return 'unknown'
+}
+
 # ============================================================
 # Phase 1: 提取所有结构化 trace 行 + 关键事件
 # ============================================================
@@ -72,6 +83,7 @@ Get-Content $LogPath -Encoding UTF8 | ForEach-Object {
     $records += [PSCustomObject]@{
       line       = $lineNum
       kind       = 'request'
+      requestId  = Get-TraceRequestId $data
       provider   = if ($data) { $data.providerId } else { '' }
       boundary   = if ($data) { $data.sessionBoundaryReason } else { '?' }
       toolKey    = if ($data) { $data.toolSessionKeyPresent } else { $false }
@@ -87,6 +99,7 @@ Get-Content $LogPath -Encoding UTF8 | ForEach-Object {
     $records += [PSCustomObject]@{
       line       = $lineNum
       kind       = 'tool_transform'
+      requestId  = Get-TraceRequestId $data
       planMode   = if ($data) { $data.planMode } else { '' }
       injected   = if ($data) { $data.injected } else { $false }
       catalogSrc = if ($data) { $data.catalogSource } else { '' }
@@ -161,6 +174,7 @@ Get-Content $LogPath -Encoding UTF8 | ForEach-Object {
     try { $data = $matches[1] | ConvertFrom-Json } catch { $data = $null }
     $records += [PSCustomObject]@{
       line = $lineNum; kind = 'runtime_economy'; raw = $data
+      requestId = Get-TraceRequestId $data
       providerAction = if ($data) { [string]$data.providerSessionAction } else { '' }
       providerSessionSource = if ($data) { [string]$data.providerSessionIdSource } else { '' }
       repeatedRuntimeMarkers = if ($data -and $data.contextEconomy) { [int]$data.contextEconomy.repeatedRuntimeConfigMarkers } else { 0 }
@@ -203,15 +217,26 @@ if ($records.Count -eq 0) {
 # ============================================================
 
 $sessions = @()
+$sessionsByRequestId = @{}
 $currentId = 0
 $pendingToolTransform = $null
 
 foreach ($r in $records) {
   if ($r.kind -eq 'request') {
     $currentId++
+    $requestId = if ($r.requestId) { [string]$r.requestId } else { 'unknown' }
+    $toolTransformForRequest = $null
+    if ($null -ne $pendingToolTransform) {
+      $pendingRequestId = if ($pendingToolTransform.requestId) { [string]$pendingToolTransform.requestId } else { 'unknown' }
+      if ($pendingRequestId -eq 'unknown' -or $pendingRequestId -eq $requestId) {
+        $toolTransformForRequest = $pendingToolTransform
+      }
+    }
     $sessions += [PSCustomObject]@{
       id            = $currentId
       line          = $r.line
+      requestId     = $requestId
+      correlationId = $requestId
       provider      = $r.provider
       boundary      = $r.boundary
       toolKey       = $r.toolKey
@@ -219,8 +244,8 @@ foreach ($r in $records) {
       refresh       = $r.refresh
       provSessionId = ''
       provReqId     = ''
-      toolPlan      = if ($null -ne $pendingToolTransform) { $pendingToolTransform.planMode } else { '' }
-      toolCatalog   = if ($null -ne $pendingToolTransform) { $pendingToolTransform.catalogSrc } else { '' }
+      toolPlan      = if ($null -ne $toolTransformForRequest) { $toolTransformForRequest.planMode } else { '' }
+      toolCatalog   = if ($null -ne $toolTransformForRequest) { $toolTransformForRequest.catalogSrc } else { '' }
       summaryOk     = 0
       summaryHandoff = $false
       summaryRej    = ''
@@ -238,9 +263,14 @@ foreach ($r in $records) {
       providerSessionSource = ''
       repeatedRuntimeMarkers = 0
       repeatedToolContractMarkers = 0
-      eventLines    = if ($null -ne $pendingToolTransform) { @($pendingToolTransform.line) } else { @() }
+      eventLines    = if ($null -ne $toolTransformForRequest) { @($toolTransformForRequest.line) } else { @() }
     }
-    $pendingToolTransform = $null
+    if ($requestId -ne 'unknown') {
+      $sessionsByRequestId[$requestId] = $sessions[-1]
+    }
+    if ($null -ne $toolTransformForRequest) {
+      $pendingToolTransform = $null
+    }
   }
   elseif ($r.kind -eq 'provider_session' -and $sessions.Count -gt 0) {
     $sessions[-1].provSessionId = $r.sessionId
@@ -295,11 +325,17 @@ foreach ($r in $records) {
     $sessions[-1].eventLines += $r.line
   }
   elseif ($r.kind -eq 'runtime_economy' -and $sessions.Count -gt 0) {
-    $sessions[-1].providerAction = $r.providerAction
-    $sessions[-1].providerSessionSource = $r.providerSessionSource
-    $sessions[-1].repeatedRuntimeMarkers = $r.repeatedRuntimeMarkers
-    $sessions[-1].repeatedToolContractMarkers = $r.repeatedToolContractMarkers
-    $sessions[-1].eventLines += $r.line
+    $requestId = if ($r.requestId) { [string]$r.requestId } else { 'unknown' }
+    $targetSession = if ($requestId -ne 'unknown' -and $sessionsByRequestId.ContainsKey($requestId)) {
+      $sessionsByRequestId[$requestId]
+    } else {
+      $sessions[-1]
+    }
+    $targetSession.providerAction = $r.providerAction
+    $targetSession.providerSessionSource = $r.providerSessionSource
+    $targetSession.repeatedRuntimeMarkers = $r.repeatedRuntimeMarkers
+    $targetSession.repeatedToolContractMarkers = $r.repeatedToolContractMarkers
+    $targetSession.eventLines += $r.line
   }
 }
 
@@ -319,8 +355,8 @@ function Classify($s) {
 }
 
 # --- 时间线表格 ---
-$header = "{0,3} {1,1} {2,-11} {3,-10} {4,-8} {5,-12} {6,-25} {7}" -f
-  'ID', '', 'TYPE', 'PROVIDER', 'REFRESH', 'PLAN/CATALOG', 'PROVIDER_SESSION', 'EVENTS'
+$header = "{0,3} {1,1} {2,-11} {3,-10} {4,-14} {5,-8} {6,-12} {7,-25} {8}" -f
+  'ID', '', 'TYPE', 'PROVIDER', 'REQ_ID', 'REFRESH', 'PLAN/CATALOG', 'PROVIDER_SESSION', 'EVENTS'
 Write-Host "`n$header" -ForegroundColor White
 Write-Host ('-' * 120) -ForegroundColor DarkGray
 
@@ -332,6 +368,9 @@ foreach ($s in $sessions) {
   $provStr = if ($s.provSessionId) {
     $s.provSessionId.Substring(0, [Math]::Min(24, $s.provSessionId.Length))
   } else { '-' }
+  $requestStr = if ($s.requestId) {
+    $s.requestId.Substring(0, [Math]::Min(14, $s.requestId.Length))
+  } else { 'unknown' }
 
   # Events compact format
   $evtParts = @()
@@ -349,8 +388,8 @@ foreach ($s in $sessions) {
   if ($s.errors.Count -gt 0) { $evtParts += "ERRx$($s.errors.Count)" }
   $evtStr = $evtParts -join ' '
 
-  $line = "{0,3} {1,1} {2,-11} {3,-10} {4,-8} {5,-12} {6,-25} {7}" -f `
-    $s.id, $icon, $class, $s.provider, $refreshStr, $planStr, $provStr, $evtStr
+  $line = "{0,3} {1,1} {2,-11} {3,-10} {4,-14} {5,-8} {6,-12} {7,-25} {8}" -f `
+    $s.id, $icon, $class, $s.provider, $requestStr, $refreshStr, $planStr, $provStr, $evtStr
 
   if ($s.errors.Count -gt 0 -or $s.summaryRej -or $s.fallback -or $s.malformed) {
     Write-Host $line -ForegroundColor $color -BackgroundColor DarkRed
@@ -521,6 +560,8 @@ if (-not $JsonOnly) {
       [PSCustomObject]@{
         id        = $_.id
         line      = $_.line
+        requestId = $_.requestId
+        correlationId = $_.correlationId
         type      = (Classify $_)[0]
         provider  = $_.provider
         boundary  = $_.boundary
@@ -539,6 +580,8 @@ if (-not $JsonOnly) {
         compactChars = $_.compactChars
         malformed = $_.malformed
         fallback  = $_.fallback
+        providerAction = $_.providerAction
+        providerSessionSource = $_.providerSessionSource
         repeatedRuntimeMarkers = $_.repeatedRuntimeMarkers
         repeatedToolContractMarkers = $_.repeatedToolContractMarkers
         errorCount = $_.errors.Count

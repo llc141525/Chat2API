@@ -216,7 +216,8 @@ test('GLM, Kimi, and MiniMax built-in default models match current web providers
   assert.equal(glmConfig.modelMappings?.['GLM-5.2'], 'glm-5.2')
   assert.equal(glmConfig.modelMappings?.['GLM-5.1'], 'glm-5.1')
 
-  assert.deepEqual(kimiConfig.supportedModels, ['Kimi-K2.6'])
+  assert.deepEqual(kimiConfig.supportedModels, ['Kimi-K3', 'Kimi-K2.6'])
+  assert.equal(kimiConfig.modelMappings?.['Kimi-K3'], 'k3')
   assert.equal(kimiConfig.modelMappings?.['Kimi-K2.6'], 'kimi-k2.6')
   assert.equal(kimiConfig.modelMappings?.['Kimi-K2.5'], undefined)
 
@@ -233,8 +234,70 @@ test('GLM, Kimi, and MiniMax built-in default models match current web providers
   assert.doesNotMatch(minimaxAdapterSource, /MiniMax-M2\.5/)
 })
 
+test('Kimi K3 enables thinking when the request uses its official model id', async () => {
+  const { KimiProviderPlugin } = await import('../../src/main/proxy/plugins/KimiProviderPlugin.ts')
+  const request = await KimiProviderPlugin.buildRequest!({
+    provider: { id: 'kimi' } as any,
+    account: { credentials: { token: 'test-token' } } as any,
+    model: 'k3',
+    originalModel: 'Kimi-K3',
+    messages: [{ role: 'user', content: 'hello' }],
+    assembly: {
+      messages: [{ role: 'user', content: 'hello' }],
+      toolManifest: { protocol: 'managed_xml', tools: [], renderedPrompt: '' },
+    } as any,
+  } as any)
+  const payload = JSON.parse(request.body.subarray(5).toString('utf8'))
+  assert.equal(payload.options.thinking, true)
+})
+
+test('Kimi preserves assistant tool_calls with null content in provider-session delta prompt', async () => {
+  const { KimiProviderPlugin } = await import('../../src/main/proxy/plugins/KimiProviderPlugin.ts')
+  const request = await KimiProviderPlugin.buildRequest!({
+    provider: { id: 'kimi' } as any,
+    account: { credentials: { token: 'test-token' } } as any,
+    model: 'k3',
+    originalModel: 'Kimi-K3',
+    sessionId: 'session-existing',
+    messages: [],
+    assembly: {
+      messages: [
+        { role: 'user', content: 'first turn' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_read_1',
+            type: 'function',
+            function: {
+              name: 'default_api:read_file',
+              arguments: '{"filePath":"tests/agent-capability/input.txt"}',
+            },
+          }],
+        },
+        {
+          role: 'tool',
+          content: 'TOOL_RESULT_SENTINEL',
+          tool_call_id: 'call_read_1',
+        },
+        { role: 'assistant', content: '' },
+      ],
+      toolManifest: { protocol: 'managed_xml', tools: [], renderedPrompt: 'TOOL_CONTRACT_SENTINEL' },
+    } as any,
+  } as any)
+
+  const payload = JSON.parse(request.body.subarray(5).toString('utf8'))
+  const content = payload.message.blocks[0].text.content
+
+  assert.match(content, /Assistant: \[Call: default_api:read_file\] \{"filePath":"tests\/agent-capability\/input\.txt"\}/)
+  assert.match(content, /\[Tool Result for call_read_1\]: TOOL_RESULT_SENTINEL/)
+  assert.match(content, /TOOL_CONTRACT_SENTINEL/)
+  assert.doesNotMatch(content, /Assistant:\s*\n\nTOOL_CONTRACT_SENTINEL/)
+})
+
 test('Kimi K2.6 model mapping reaches the web chat request payload', () => {
-  assert.deepEqual(kimiConfig.supportedModels, ['Kimi-K2.6'])
+  assert.deepEqual(kimiConfig.supportedModels, ['Kimi-K3', 'Kimi-K2.6'])
+  assert.equal(kimiConfig.modelMappings?.['Kimi-K3'], 'k3')
   assert.equal(kimiConfig.modelMappings?.['Kimi-K2.6'], 'kimi-k2.6')
   assert.equal(resolveKimiScenario('kimi-k2.6'), 'SCENARIO_K2D6')
   assert.equal(resolveKimiScenario('kimi-k2.5'), 'SCENARIO_K2D5')

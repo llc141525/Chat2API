@@ -71,6 +71,25 @@ test('ledger picks bash after first read and exposes exact command argument hint
   assert.match(String(ledger.nextArgumentHint), /writeFileSync\('\.agent-probe\/long-step-1\.txt'/)
 })
 
+test('ledger recognizes bash as the action in a step that mentions the prior read result', () => {
+  const retainedGroups = [
+    makeSkillGroup([
+      '1. Use the `read` tool to read `tests/agent-capability/input.txt`.',
+      '2. After receiving that `read` tool result, emit a `bash` tool call immediately.',
+      '3. In that `bash` tool call, run `node tests/agent-capability/compute-result.mjs tests/agent-capability/input.txt`.',
+    ].join('\n')),
+  ]
+
+  const ledger = buildWorkflowLedger({
+    groups: [makeExchange('call_read_1', 'read', '{"filePath":"tests/agent-capability/input.txt"}', 'input evidence')],
+    latestSkillInstructionPinned: true,
+    retainedGroups,
+  })
+
+  assert.equal(ledger.nextToolName, 'bash')
+  assert.match(String(ledger.nextInstruction), /emit a `bash` tool call/i)
+})
+
 test('ledger picks a later read path after earlier read and bash completions', () => {
   const retainedGroups = [
     makeSkillGroup([
@@ -95,6 +114,70 @@ test('ledger picks a later read path after earlier read and bash completions', (
   assert.match(String(ledger.nextInstruction), /3\. Use the `read` tool/)
   assert.equal(ledger.nextArgumentHint, 'filePath=.agent-probe/long-summary.txt')
   assert.doesNotMatch(String(ledger.nextArgumentHint), /tests\/agent-capability\/input\.txt/)
+})
+
+test('ledger accounts for every tool call in one parallel assistant exchange', () => {
+  const retainedGroups = [
+    makeSkillGroup([
+      '1. Read `tailwind.config.js`.',
+      '2. Read `src/renderer/src/index.css`.',
+      '3. Glob `src/renderer/src/**/*.tsx`.',
+      '4. Read exactly two component files.',
+    ].join('\n')),
+  ]
+  const parallelGroup: ChatMessage[] = [
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        makeToolCall('call_read_tailwind', 'read', '{"filePath":"tailwind.config.js"}'),
+        makeToolCall('call_read_css', 'read', '{"filePath":"src/renderer/src/index.css"}'),
+        makeToolCall('call_glob_components', 'glob', '{"pattern":"src/renderer/src/**/*.tsx"}'),
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call_read_tailwind', content: 'tailwind evidence' },
+    { role: 'tool', tool_call_id: 'call_read_css', content: 'css evidence' },
+    { role: 'tool', tool_call_id: 'call_glob_components', content: 'component list' },
+  ]
+
+  const ledger = buildWorkflowLedger({
+    groups: [parallelGroup],
+    latestSkillInstructionPinned: true,
+    retainedGroups,
+  })
+
+  assert.equal(ledger.completedSteps.length, 3)
+  assert.equal(ledger.nextToolName, 'read')
+  assert.match(String(ledger.nextInstruction), /4\. Read exactly two component files/)
+})
+
+test('ledger does not mark a parallel tool call complete without its matching result', () => {
+  const retainedGroups = [
+    makeSkillGroup([
+      '1. Read `a.txt`.',
+      '2. Read `b.txt`.',
+    ].join('\n')),
+  ]
+  const partialParallelGroup: ChatMessage[] = [
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        makeToolCall('call_read_a', 'read', '{"filePath":"a.txt"}'),
+        makeToolCall('call_read_b', 'read', '{"filePath":"b.txt"}'),
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call_read_a', content: 'a evidence' },
+  ]
+
+  const ledger = buildWorkflowLedger({
+    groups: [partialParallelGroup],
+    latestSkillInstructionPinned: true,
+    retainedGroups,
+  })
+
+  assert.equal(ledger.completedSteps.length, 1)
+  assert.equal(ledger.nextArgumentHint, 'filePath=b.txt')
 })
 
 test('ledger renders completed exchange handoff bounded without copying long raw tool output', () => {

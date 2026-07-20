@@ -12,6 +12,7 @@ import type { PromptRefreshMode } from '../promptBudgetPolicy.ts'
 import type { ProxyContext } from '../types.ts'
 import type { SessionBoundaryPlan } from '../services/sessionBoundaryPlan.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import type { ToolActionConstraint } from '../toolCalling/ToolManifest.ts'
 
 import type { CleanedRequest } from '../core/requestCleaner.ts'
 
@@ -58,6 +59,7 @@ export interface ProviderRuntimeRequest {
   parentReqId?: string
   enableThinking?: boolean
   enableWebSearch?: boolean
+  correlationId?: string
 }
 
 export interface ProviderWebRequest {
@@ -92,6 +94,8 @@ export interface ProviderRuntimeStreamInput {
   rawResponse?: unknown
   model: string
   toolCallingPlan?: ToolCallingPlan
+  correlationId?: string
+  toolActionConstraint?: ToolActionConstraint | null
 }
 
 // ── Stream events ───────────────────────────────────────────────────

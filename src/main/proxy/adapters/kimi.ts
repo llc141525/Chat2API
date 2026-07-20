@@ -10,6 +10,7 @@
 
 import axios, { type AxiosResponse } from 'axios'
 import type { Account, Provider } from '../../store/types.ts'
+import { getMaxToolResultLength } from '../shared/toolResultLimit.ts'
 import { PassThrough } from 'stream'
 
 import { parseToolCallsFromText } from '../utils/toolParser.ts'
@@ -187,8 +188,9 @@ export class KimiAdapter {
         }))))
       } else if (msg.role === 'tool' && msg.tool_call_id) {
         const rawContent = extractKimiTextContent(msg.content)
-        const truncated = rawContent.length > 2000
-          ? rawContent.slice(0, 2000) + '\n...(truncated)'
+      const maxToolResultLength = getMaxToolResultLength()
+      const truncated = rawContent.length > maxToolResultLength
+        ? rawContent.slice(0, maxToolResultLength) + '\n...(truncated)'
           : rawContent
         conversationParts.push(toolProfile.formatToolResult({
           toolCallId: msg.tool_call_id,

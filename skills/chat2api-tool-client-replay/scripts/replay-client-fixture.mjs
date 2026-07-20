@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 
 const args = parseArgs(process.argv.slice(2))
-const baseUrl = (process.env.CHAT2API_BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '')
+const baseUrl = (process.env.CHAT2API_BASE_URL || 'http://127.0.0.1:48763').replace(/\/$/, '')
 const apiKey = process.env.CHAT2API_API_KEY || ''
 const sensitiveHeaders = new Set([
   'authorization',

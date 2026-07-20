@@ -178,7 +178,7 @@ export class RequestForwarder {
     contextResult?: ContextProcessResult,
     toolSessionKey?: string | null
   ): { assembly: RequestAssembly; transformed: ToolCallingTransformResult } {
-    const transformed = this.transformRequestForPromptToolUse(request, provider, toolSessionKey)
+    const transformed = this.transformRequestForPromptToolUse(request, provider, toolSessionKey, context?.requestId)
     return {
       assembly: buildRequestAssembly({
         messages: request.messages,
@@ -220,7 +220,8 @@ export class RequestForwarder {
   private transformRequestForPromptToolUse(
     request: ChatCompletionRequest,
     provider?: Provider,
-    toolSessionKey?: string | null
+    toolSessionKey?: string | null,
+    requestId?: string
   ): ToolCallingTransformResult {
     const config = storeManager.getConfig().toolCallingConfig
     const engine = new ToolCallingEngine(config)
@@ -242,6 +243,8 @@ export class RequestForwarder {
       toolSessionKey: toolSessionKey ?? undefined,
     })
     console.log('[Forwarder] Tool transform trace:', JSON.stringify({
+      correlationId: requestId ?? null,
+      requestId: requestId ?? null,
       providerId: provider?.id ?? 'custom',
       model: request.model,
       toolSessionKeyPresent: typeof toolSessionKey === 'string' && toolSessionKey.length > 0,
@@ -579,6 +582,8 @@ export class RequestForwarder {
         transformed,
       })
       console.log('[Forwarder] Runtime pilot request trace:', JSON.stringify({
+        correlationId: context.requestId,
+        requestId: context.requestId,
         providerId: provider.id,
         sessionBoundaryReason: context.sessionBoundaryReason ?? 'normal',
         toolSessionKeyPresent: toolSessionKey.length > 0,

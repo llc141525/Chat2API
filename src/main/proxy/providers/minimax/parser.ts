@@ -9,6 +9,7 @@
  */
 
 import { MiniMaxStreamHandler } from '../../adapters/minimax.ts'
+import { logger } from '../../shared/logger.ts'
 import type {
   ProviderRuntimeEvent,
   ProviderRuntimeResult,
@@ -31,6 +32,7 @@ export async function* parseMiniMaxStream(
 ): AsyncIterable<ProviderRuntimeEvent> {
   const { model, toolCallingPlan } = input
   const response = input.response
+  const correlationId = input.correlationId
 
   const handler = new MiniMaxStreamHandler(
     model,
@@ -49,6 +51,21 @@ export async function* parseMiniMaxStream(
 
   let buffer = ''
   let emittedSessionUpdate = false
+  let parsedFrameCount = 0
+  let emittedProviderEventCount = 0
+  let sawDoneFrame = false
+
+  logger.info('[MiniMaxProviderPlugin] Production stream parse start:', JSON.stringify({
+    correlationId,
+    model,
+    status: response.status,
+    contentType: response.headers?.['content-type'] ?? null,
+    responseDataKind: response.data == null ? 'nullish' : typeof response.data,
+    responseDataReadable: Boolean((response.data as any)?.pipe && (response.data as any)?.on),
+    shouldParseTools: Boolean(toolCallingPlan?.shouldParseResponse),
+    protocol: toolCallingPlan?.protocol ?? null,
+    actionConstraint: input.toolActionConstraint ?? null,
+  }))
 
   try {
     for await (const chunk of openAiStream) {
@@ -67,12 +84,21 @@ export async function* parseMiniMaxStream(
         if (!dataLine) continue
 
         const payload = dataLine.slice(5).trim()
-        if (!payload || payload === '[DONE]') continue
+        if (!payload) continue
+        if (payload === '[DONE]') {
+          sawDoneFrame = true
+          continue
+        }
 
         let parsed: Record<string, any>
         try {
           parsed = JSON.parse(payload)
+          parsedFrameCount++
         } catch {
+          logger.warn('[MiniMaxProviderPlugin] Production stream parse skipped invalid JSON frame:', JSON.stringify({
+            correlationId,
+            payloadLength: payload.length,
+          }))
           continue
         }
 
@@ -87,11 +113,13 @@ export async function* parseMiniMaxStream(
               classified: true,
             },
           }
+          emittedProviderEventCount++
           return
         }
 
         if (!emittedSessionUpdate && (handler.getChatId() || parsed.id)) {
           emittedSessionUpdate = true
+          emittedProviderEventCount++
           yield {
             type: 'session_update',
             sessionId: handler.getChatId() || String(parsed.id || ''),
@@ -103,14 +131,17 @@ export async function* parseMiniMaxStream(
         const finishReason = choice?.finish_reason
 
         if (typeof delta.content === 'string' && delta.content.length > 0) {
+          emittedProviderEventCount++
           yield { type: 'text_delta', text: delta.content }
         }
         if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+          emittedProviderEventCount++
           yield { type: 'text_delta', text: delta.reasoning_content }
         }
 
         if (Array.isArray(delta.tool_calls)) {
           for (const call of delta.tool_calls) {
+            emittedProviderEventCount++
             yield {
               type: 'tool_call_delta',
               call: {
@@ -128,11 +159,46 @@ export async function* parseMiniMaxStream(
         }
 
         if (finishReason) {
+          emittedProviderEventCount++
+          logger.info('[MiniMaxProviderPlugin] Production stream parse finish:', JSON.stringify({
+            correlationId,
+            finishReason,
+            parsedFrameCount,
+            emittedProviderEventCount,
+            emittedSessionUpdate,
+          }))
           yield { type: 'done', finishReason }
         }
       }
     }
+
+    if (emittedProviderEventCount === 0) {
+      const message = 'MiniMax provider stream closed before emitting any provider event'
+      logger.error('[MiniMaxProviderPlugin] Production stream empty close:', JSON.stringify({
+        correlationId,
+        model,
+        status: response.status,
+        parsedFrameCount,
+        sawDoneFrame,
+        responseDataKind: response.data == null ? 'nullish' : typeof response.data,
+      }))
+      yield {
+        type: 'error',
+        error: {
+          status: 502,
+          code: 'EMPTY_PROVIDER_STREAM',
+          message,
+          retryable: true,
+          classified: true,
+        },
+      }
+    }
   } catch (err: unknown) {
+    logger.error('[MiniMaxProviderPlugin] Production stream parse error:', JSON.stringify({
+      correlationId,
+      model,
+      message: err instanceof Error ? err.message : String(err),
+    }))
     yield {
       type: 'error',
       error: {
