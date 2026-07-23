@@ -17,6 +17,8 @@ export interface RenderFinalPromptInput {
   systemText: string | null
   /** Summary text from context compaction, or null */
   summaryText: string | null
+  /** Authoritative runtime recovery context from persisted session state, or null */
+  recoveryContextText?: string | null
   /** Rendered tool contract prompt from ToolManifest, or null */
   toolContractText: string | null
   /** Infrastructure prompt (agent definition + skill summary) injected after compaction, or null */
@@ -51,6 +53,9 @@ export function renderFinalPrompt(input: RenderFinalPromptInput): string {
     if (input.summaryText) {
       sections.push(input.summaryText)
     }
+    if (input.recoveryContextText) {
+      sections.push(input.recoveryContextText)
+    }
     // Tool contract (authoritative, after summary to take precedence)
     if (input.toolContractText) {
       sections.push(input.toolContractText)
@@ -63,6 +68,9 @@ export function renderFinalPrompt(input: RenderFinalPromptInput): string {
     // suffix: conversation first, then summary, then tools
     if (input.summaryText) {
       sections.push(input.summaryText)
+    }
+    if (input.recoveryContextText) {
+      sections.push(input.recoveryContextText)
     }
     if (input.conversationText.length > 0) {
       sections.push(input.conversationText)

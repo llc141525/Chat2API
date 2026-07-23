@@ -10,9 +10,22 @@ import type { ToolCallingPlan } from '../toolCalling/types.ts'
 
 const MODEL_NAME = 'deepseek-chat'
 const SEARCH_CONTROL_MARKER_PATTERN = /^(SEARCH|WEB_SEARCH|SEARCHING)(?:\s+|$)/i
+const DIAGNOSTIC_PREVIEW_LIMIT = 400
+const DIAGNOSTIC_RAW_CHUNK_LIMIT = 6
+const DIAGNOSTIC_RAW_LINE_LIMIT = 16
 
 function stripSearchControlMarker(content: string, enabled: boolean): string {
   return enabled ? content.replace(SEARCH_CONTROL_MARKER_PATTERN, '') : content
+}
+
+function sanitizeDiagnosticPreview(value: string): string {
+  return value
+    .slice(0, DIAGNOSTIC_PREVIEW_LIMIT)
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(/"access_token"\s*:\s*"[^"]+"/gi, '"access_token":"[REDACTED]"')
+    .replace(/"refresh_token"\s*:\s*"[^"]+"/gi, '"refresh_token":"[REDACTED]"')
+    .replace(/"token"\s*:\s*"[^"]+"/gi, '"token":"[REDACTED]"')
+    .replace(/authorization=([^&\s"]+)/gi, 'authorization=[REDACTED]')
 }
 
 interface StreamChunk {
@@ -48,6 +61,18 @@ export class DeepSeekStreamHandler {
   private reasoningEffort: string | undefined
   private isDone: boolean = false
   private semanticModel: string
+  private streamFragmentTypes = new Set<string>()
+  private streamUpstreamDoneSeen: boolean = false
+  private streamRawChunkPreview: string[] = []
+  private streamRawLinePreview: string[] = []
+  private streamParsedChunkCount: number = 0
+  private streamParseErrorCount: number = 0
+  private transformedTextDeltaCount: number = 0
+  private transformedReasoningDeltaCount: number = 0
+  private transformedToolCallDeltaCount: number = 0
+  private transformedFinishCount: number = 0
+  private transformedContentLength: number = 0
+  private transformedReasoningLength: number = 0
 
   constructor(
     model: string,
@@ -188,7 +213,105 @@ export class DeepSeekStreamHandler {
     })}\n\n`
   }
 
+  private resetStreamDiagnostics(): void {
+    this.streamFragmentTypes = new Set<string>()
+    this.streamUpstreamDoneSeen = false
+    this.streamRawChunkPreview = []
+    this.streamRawLinePreview = []
+    this.streamParsedChunkCount = 0
+    this.streamParseErrorCount = 0
+    this.transformedTextDeltaCount = 0
+    this.transformedReasoningDeltaCount = 0
+    this.transformedToolCallDeltaCount = 0
+    this.transformedFinishCount = 0
+    this.transformedContentLength = 0
+    this.transformedReasoningLength = 0
+  }
+
+  private observeFragmentType(type: unknown): void {
+    if (typeof type === 'string' && type.trim()) {
+      this.streamFragmentTypes.add(type)
+    }
+  }
+
+  private observeOpenAIChunk(chunk: any): void {
+    const choice = chunk?.choices?.[0]
+    const delta = choice?.delta ?? {}
+    if (typeof delta.content === 'string' && delta.content.length > 0) {
+      this.transformedTextDeltaCount += 1
+      this.transformedContentLength += delta.content.length
+    }
+    if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+      this.transformedReasoningDeltaCount += 1
+      this.transformedReasoningLength += delta.reasoning_content.length
+    }
+    if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
+      this.transformedToolCallDeltaCount += delta.tool_calls.length
+    }
+    if (choice?.finish_reason) {
+      this.transformedFinishCount += 1
+    }
+  }
+
+  private writeObservedChunk(
+    transStream: PassThrough,
+    delta: { role?: string; content?: string; reasoning_content?: string; tool_calls?: any[] },
+    finishReason?: string,
+  ): void {
+    this.observeOpenAIChunk({
+      choices: [{
+        delta,
+        finish_reason: finishReason || null,
+      }],
+    })
+    transStream.write(this.createChunk(delta, finishReason))
+  }
+
+  private writeObservedToolParserChunk(transStream: PassThrough, chunk: any): void {
+    this.observeOpenAIChunk(chunk)
+    transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
+  }
+
+  private recordStreamCompletionDiagnostic(finishReason: string): void {
+    const hasOutput = this.transformedContentLength > 0
+      || this.transformedReasoningLength > 0
+      || this.transformedToolCallDeltaCount > 0
+    if (hasOutput) return
+
+    const event = {
+      type: 'provider_empty_output' as const,
+      providerId: 'deepseek',
+      model: this.model,
+      responseMode: 'streaming' as const,
+      contentLength: this.transformedContentLength,
+      reasoningLength: this.transformedReasoningLength,
+      fragmentTypes: [...this.streamFragmentTypes].sort(),
+      upstreamDoneSeen: this.streamUpstreamDoneSeen,
+      upstreamMessageIdPresent: !!this.messageId,
+      upstreamCurrentPath: this.currentPath,
+      upstreamRawChunkPreview: [...this.streamRawChunkPreview],
+      upstreamRawLinePreview: [...this.streamRawLinePreview],
+      upstreamParsedChunkCount: this.streamParsedChunkCount,
+      upstreamParseErrorCount: this.streamParseErrorCount,
+      transformedTextDeltaCount: this.transformedTextDeltaCount,
+      transformedReasoningDeltaCount: this.transformedReasoningDeltaCount,
+      transformedToolCallDeltaCount: this.transformedToolCallDeltaCount,
+      transformedFinishCount: this.transformedFinishCount,
+      finishReason,
+      contentSentToClient: hasOutput,
+      deepseekResponseMode: 'stream' as const,
+    }
+
+    recordToolDiagnosticEvent(event)
+
+    console.warn(
+      '[DeepSeekStreamHandler] Empty stream output diagnostics:',
+      JSON.stringify(event),
+    )
+  }
+
   async handleStream(stream: NodeJS.ReadableStream): Promise<NodeJS.ReadableStream> {
+    this.resetStreamDiagnostics()
     const transStream = new PassThrough()
     const isThinkingModel = this.isThinkingModel()
     const isSilentModel = this.isSilentModel()
@@ -198,7 +321,11 @@ export class DeepSeekStreamHandler {
     let buffer = ''
 
     stream.on('data', (chunk: Buffer) => {
-      buffer += chunk.toString()
+      const chunkText = chunk.toString()
+      if (this.streamRawChunkPreview.length < DIAGNOSTIC_RAW_CHUNK_LIMIT) {
+        this.streamRawChunkPreview.push(sanitizeDiagnosticPreview(chunkText))
+      }
+      buffer += chunkText
       const lines = buffer.split('\n')
       buffer = lines.pop() || ''
 
@@ -206,13 +333,21 @@ export class DeepSeekStreamHandler {
         if (!line.trim() || !line.startsWith('data:')) continue
 
         const data = line.slice(5).trim()
+        if (this.streamRawLinePreview.length < DIAGNOSTIC_RAW_LINE_LIMIT) {
+          this.streamRawLinePreview.push(sanitizeDiagnosticPreview(data))
+        }
         if (data === '[DONE]') {
+          this.streamUpstreamDoneSeen = true
           this.handleDone(transStream, isFoldModel, isSearchSilentModel)
           return
         }
 
         const parsed = this.parseSSE(data)
-        if (!parsed) continue
+        if (!parsed) {
+          this.streamParseErrorCount += 1
+          continue
+        }
+        this.streamParsedChunkCount += 1
 
         this.processChunk(parsed, transStream, isThinkingModel, isSilentModel, isFoldModel, isSearchSilentModel)
       }
@@ -250,6 +385,7 @@ export class DeepSeekStreamHandler {
       const fragments = chunk.v.response.fragments
       if (Array.isArray(fragments) && fragments.length > 0) {
         for (const fragment of fragments) {
+          this.observeFragmentType(fragment.type)
           if (Array.isArray(fragment.results)) {
             DeepSeekStreamHandler.mergeSearchResultsInto(this.searchResults, fragment.results)
           }
@@ -269,6 +405,7 @@ export class DeepSeekStreamHandler {
     } else if (chunk.p === 'response/fragments') {
       if (Array.isArray(chunk.v)) {
         for (const fragment of chunk.v) {
+          this.observeFragmentType(fragment.type)
           if (fragment.content) {
             const fragmentType = fragment.type
             const fragmentContent = fragment.content
@@ -360,7 +497,7 @@ export class DeepSeekStreamHandler {
       
       // Send any chunks generated by tool call processing
       for (const chunk of chunks) {
-        transStream.write(`data: ${JSON.stringify(chunk)}\n\n`)
+        this.writeObservedToolParserChunk(transStream, chunk)
         this.isFirstChunk = false
       }
       
@@ -411,7 +548,7 @@ export class DeepSeekStreamHandler {
     }
 
     if (shouldSendDelta && (delta.content !== undefined || delta.reasoning_content !== undefined)) {
-      transStream.write(this.createChunk(delta))
+      this.writeObservedChunk(transStream, delta)
       this.isFirstChunk = false
     }
   }
@@ -424,25 +561,26 @@ export class DeepSeekStreamHandler {
     const baseChunk = createBaseChunk(`${this.sessionId}@${this.messageId}`, this.model, this.created)
     const flushChunks = this.toolStreamParser?.flush(baseChunk) ?? []
     for (const outChunk of flushChunks) {
-      transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+      this.writeObservedToolParserChunk(transStream, outChunk)
     }
 
     if (isFoldModel && this.thinkingStarted) {
-      transStream.write(this.createChunk({ content: '</pre></details>' }))
+      this.writeObservedChunk(transStream, { content: '</pre></details>' })
     }
 
     if (this.searchResults.length > 0 && !isSearchSilentModel) {
       const citations = DeepSeekStreamHandler.formatSearchCitations(this.searchResults)
       
       if (citations) {
-        transStream.write(this.createChunk({ content: `\n\n${citations}` }))
+        this.writeObservedChunk(transStream, { content: `\n\n${citations}` })
       }
     }
 
     // Determine finish_reason based on whether we had tool calls
     const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
 
-    transStream.write(this.createChunk({}, finishReason))
+    this.writeObservedChunk(transStream, {}, finishReason)
+    this.recordStreamCompletionDiagnostic(finishReason)
     transStream.write('data: [DONE]\n\n')
     transStream.end()
     

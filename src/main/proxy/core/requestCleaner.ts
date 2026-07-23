@@ -34,6 +34,8 @@ export interface CleanedRequest {
   messages: ChatMessage[]
   /** Summary text from context compaction, or null */
   summaryText: string | null
+  /** Authoritative runtime recovery context, separate from narrative summary */
+  recoveryContextText: string | null
   /** Infrastructure prompt injected after compaction, or null */
   infrastructurePrompt: string | null
   /** Available tool definitions */
@@ -83,6 +85,7 @@ export function buildCleanedRequest(
 
   // 5. Extract summary text
   const summaryText = assembly.summaryText ?? null
+  const recoveryContextText = assembly.recoveryContextText ?? null
 
   // 6. Extract tool definitions and rendered tool contract from the tool manifest
   const toolDefinitions: ToolDef[] = extractToolDefinitions(assembly)
@@ -99,6 +102,7 @@ export function buildCleanedRequest(
   return {
     messages: truncatedMessages,
     summaryText,
+    recoveryContextText,
     infrastructurePrompt,
     toolDefinitions,
     toolContractText,

@@ -9,6 +9,9 @@ export interface OpenAISessionIdentity {
   providerConversationSessionKey: string
   providerSessionEpoch: string
   parentProviderConversationSessionKey?: string
+  recoverySessionId?: string
+  parentRecoverySessionId?: string
+  recoveryToolCallId?: string
   sessionBoundaryReason: SessionBoundaryReason
   source: 'header' | 'user' | 'metadata' | 'derived_hash' | 'process_fallback'
 }
@@ -163,6 +166,7 @@ export function applyOpenAISessionIdentity(
   const boundaryReason = context.sessionBoundaryReason && context.sessionBoundaryReason !== 'normal'
     ? context.sessionBoundaryReason
     : sessionIdentity.sessionBoundaryReason
+  const recoveryIdentity = buildRecoveryIdentity(sessionIdentity, request)
 
   return {
     ...context,
@@ -170,8 +174,99 @@ export function applyOpenAISessionIdentity(
     providerConversationSessionKey: sessionIdentity.providerConversationSessionKey,
     providerSessionEpoch: sessionIdentity.providerSessionEpoch,
     parentProviderConversationSessionKey: sessionIdentity.parentProviderConversationSessionKey,
+    ...recoveryIdentity,
     sessionBoundaryReason: boundaryReason,
   }
+}
+
+function buildRecoveryIdentity(
+  identity: OpenAISessionIdentity,
+  request: ChatCompletionRequest,
+): Pick<ProxyContext, 'recoverySessionId' | 'parentRecoverySessionId' | 'recoveryToolCallId'> {
+  if (identity.source !== 'header' && identity.source !== 'user' && identity.source !== 'metadata') {
+    return {}
+  }
+
+  if (identity.sessionBoundaryReason === 'tool_child') {
+    const recoveryToolCallId = findLatestToolCallId(request.messages)
+    const parentRecoverySessionId = deriveParentRecoverySessionId(identity)
+    const discriminator = recoveryToolCallId || epochValue(identity.providerSessionEpoch, 'tool')
+    if (!parentRecoverySessionId || !discriminator) return {}
+
+    return {
+      recoverySessionId: deriveChildRecoverySessionId(parentRecoverySessionId, 'tool_child', discriminator),
+      parentRecoverySessionId,
+      recoveryToolCallId,
+    }
+  }
+
+  if (identity.sessionBoundaryReason === 'subagent_child') {
+    const parentRecoverySessionId = identity.toolCatalogSessionKey
+    const discriminator = epochValue(identity.providerSessionEpoch, 'subagent')
+    if (!discriminator) return {}
+
+    return {
+      recoverySessionId: deriveChildRecoverySessionId(parentRecoverySessionId, 'subagent_child', discriminator),
+      parentRecoverySessionId,
+      recoveryToolCallId: findLatestToolCallId(request.messages),
+    }
+  }
+
+  return {
+    recoverySessionId: identity.toolCatalogSessionKey,
+    parentRecoverySessionId: identity.parentProviderConversationSessionKey,
+  }
+}
+
+function deriveParentRecoverySessionId(identity: OpenAISessionIdentity): string | undefined {
+  const mainRecoverySessionId = identity.toolCatalogSessionKey
+  const parentProviderKey = identity.parentProviderConversationSessionKey
+  if (!parentProviderKey || parentProviderKey === mainRecoverySessionId) {
+    return mainRecoverySessionId
+  }
+
+  const subagentPrefix = `${mainRecoverySessionId}:subagent:`
+  if (parentProviderKey.startsWith(subagentPrefix)) {
+    const subagentEpoch = parentProviderKey.slice(subagentPrefix.length).split(':')[0]
+    if (subagentEpoch) {
+      return deriveChildRecoverySessionId(mainRecoverySessionId, 'subagent_child', subagentEpoch)
+    }
+  }
+
+  return mainRecoverySessionId
+}
+
+function deriveChildRecoverySessionId(
+  parentRecoverySessionId: string,
+  childKind: 'tool_child' | 'subagent_child',
+  discriminator: string,
+): string {
+  return `${parentRecoverySessionId}:recovery:${childKind}:${hashStable({
+    parentRecoverySessionId,
+    childKind,
+    discriminator,
+  })}`
+}
+
+function epochValue(providerSessionEpoch: string, prefix: 'tool' | 'subagent'): string | undefined {
+  const marker = `${prefix}:`
+  if (!providerSessionEpoch.startsWith(marker)) return undefined
+  const value = providerSessionEpoch.slice(marker.length).trim()
+  return value.length > 0 ? value : undefined
+}
+
+function findLatestToolCallId(messages: ChatMessage[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message?.role === 'tool' && typeof message.tool_call_id === 'string' && message.tool_call_id.trim().length > 0) {
+      return message.tool_call_id.trim()
+    }
+    if (message?.role === 'assistant' && Array.isArray(message.tool_calls)) {
+      const call = [...message.tool_calls].reverse().find(toolCall => typeof toolCall.id === 'string' && toolCall.id.trim().length > 0)
+      if (call) return call.id.trim()
+    }
+  }
+  return undefined
 }
 
 function deriveBaseSessionIdentity(input: {

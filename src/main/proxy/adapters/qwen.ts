@@ -302,6 +302,7 @@ function buildQwenAssemblyRequestBody(input: QwenAssemblyRequestBodyInput): any 
   const finalContent = renderFinalPrompt({
     systemText: baseSystemPrompts.join('\n\n') || null,
     summaryText: includeSummary ? effectiveSummaryText : null,
+    recoveryContextText: includeSummary ? assembly.recoveryContextText : null,
     toolContractText: includeToolContract
       ? (assembly.toolManifest?.renderedPrompt ?? (legacyToolContractPrompts.join('\n\n') || null))
       : null,

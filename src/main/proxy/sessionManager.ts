@@ -5,6 +5,12 @@
 
 import { storeManager } from '../store/store'
 import { SessionRecord, SessionConfig, ChatMessage, DEFAULT_SESSION_CONFIG } from '../store/types'
+import {
+  createSessionRecoveryState,
+  type RecoveryEvent,
+  type SessionKind,
+  type SessionRecoveryState,
+} from './services/sessionRecoveryState.ts'
 
 export interface CreateSessionOptions {
   providerId: string
@@ -19,6 +25,17 @@ export interface SessionContext {
   parentMessageId: string | undefined
   messages: ChatMessage[]
   isNew: boolean
+}
+
+export interface EnsureRecoverySessionOptions {
+  sessionId: string
+  sessionKind: SessionKind
+  parentSessionId?: string
+  toolCallId?: string
+  providerSessionId?: string
+  providerId?: string
+  accountId?: string
+  model?: string
 }
 
 class SessionManagerClass {
@@ -115,6 +132,11 @@ class SessionManagerClass {
       status: 'active',
       model,
     }
+    session.recoveryState = createSessionRecoveryState({
+      sessionId: session.id,
+      sessionKind: 'main',
+      now,
+    })
     
     storeManager.addSession(session)
     return session
@@ -122,6 +144,36 @@ class SessionManagerClass {
 
   getSession(sessionId: string): SessionRecord | undefined {
     return storeManager.getSessionById(sessionId)
+  }
+
+  getSessionRecoveryState(sessionId: string): SessionRecoveryState {
+    const recoveryState = storeManager.getSessionRecoveryState(sessionId)
+    if (!recoveryState) {
+      throw new Error(`Session ${sessionId} has no recoveryState`)
+    }
+    return recoveryState
+  }
+
+  applyRecoveryEvent(sessionId: string, event: RecoveryEvent): SessionRecord {
+    return storeManager.applyRecoveryEventToSession(sessionId, event)
+  }
+
+  applyRecoveryEventWithCurrentVersion(
+    sessionId: string,
+    event: Omit<RecoveryEvent, 'expectedStateVersion'>,
+  ): SessionRecord {
+    const recoveryState = this.getSessionRecoveryState(sessionId)
+    return storeManager.applyRecoveryEventToSession(sessionId, {
+      ...event,
+      expectedStateVersion: recoveryState.stateVersion,
+    } as RecoveryEvent)
+  }
+
+  ensureRecoverySession(options: EnsureRecoverySessionOptions): SessionRecord {
+    return storeManager.ensureRecoverySessionRecord({
+      ...options,
+      now: Date.now(),
+    })
   }
 
   getAllActiveSessions(): SessionRecord[] {

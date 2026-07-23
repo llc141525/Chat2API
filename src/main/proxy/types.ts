@@ -236,6 +236,9 @@ export interface ProxyContext {
   providerConversationSessionKey?: string
   providerSessionEpoch?: string
   parentProviderConversationSessionKey?: string
+  recoverySessionId?: string
+  parentRecoverySessionId?: string
+  recoveryToolCallId?: string
   sessionBoundaryReason?: SessionBoundaryReason
   originalMessages?: ChatMessage[]
   summaryContaminated?: boolean

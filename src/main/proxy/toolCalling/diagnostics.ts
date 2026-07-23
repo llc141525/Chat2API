@@ -96,6 +96,16 @@ export interface ToolDiagnosticEvent {
   reasoningLength?: number
   fragmentTypes?: string[]
   upstreamDoneSeen?: boolean
+  upstreamMessageIdPresent?: boolean
+  upstreamCurrentPath?: string
+  upstreamRawChunkPreview?: string[]
+  upstreamRawLinePreview?: string[]
+  upstreamParsedChunkCount?: number
+  upstreamParseErrorCount?: number
+  transformedTextDeltaCount?: number
+  transformedReasoningDeltaCount?: number
+  transformedToolCallDeltaCount?: number
+  transformedFinishCount?: number
   finishReason?: string
   contentSentToClient?: boolean
   timestamp: number
@@ -134,6 +144,16 @@ export function recordToolDiagnosticEvent(event: Omit<ToolDiagnosticEvent, 'time
     reasoningLength: event.reasoningLength,
     fragmentTypes: event.fragmentTypes ? [...event.fragmentTypes] : undefined,
     upstreamDoneSeen: event.upstreamDoneSeen,
+    upstreamMessageIdPresent: event.upstreamMessageIdPresent,
+    upstreamCurrentPath: event.upstreamCurrentPath,
+    upstreamRawChunkPreview: event.upstreamRawChunkPreview ? [...event.upstreamRawChunkPreview] : undefined,
+    upstreamRawLinePreview: event.upstreamRawLinePreview ? [...event.upstreamRawLinePreview] : undefined,
+    upstreamParsedChunkCount: event.upstreamParsedChunkCount,
+    upstreamParseErrorCount: event.upstreamParseErrorCount,
+    transformedTextDeltaCount: event.transformedTextDeltaCount,
+    transformedReasoningDeltaCount: event.transformedReasoningDeltaCount,
+    transformedToolCallDeltaCount: event.transformedToolCallDeltaCount,
+    transformedFinishCount: event.transformedFinishCount,
     finishReason: event.finishReason,
     contentSentToClient: event.contentSentToClient,
     timestamp: Date.now(),
@@ -156,6 +176,8 @@ export function getToolDiagnosticEvents(): ToolDiagnosticEvent[] {
     driftKinds: event.driftKinds ? [...event.driftKinds] : undefined,
     toolSourceChain: event.toolSourceChain ? [...event.toolSourceChain] : undefined,
     fragmentTypes: event.fragmentTypes ? [...event.fragmentTypes] : undefined,
+    upstreamRawChunkPreview: event.upstreamRawChunkPreview ? [...event.upstreamRawChunkPreview] : undefined,
+    upstreamRawLinePreview: event.upstreamRawLinePreview ? [...event.upstreamRawLinePreview] : undefined,
   }))
 }
 

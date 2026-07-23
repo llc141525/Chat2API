@@ -25,6 +25,8 @@ export interface RequestAssembly {
   toolManifest: ToolManifest | null
   /** Summary text if summary compaction occurred, null otherwise */
   summaryText: string | null
+  /** Authoritative runtime recovery context projected from persisted session state, null otherwise */
+  recoveryContextText?: string | null
   /** Typed compact workflow state. Runtime/tool configuration never belongs here. */
   workflowDigest?: WorkflowStateDigest | null
   /** One-turn high-priority tool action constraint, when present */
@@ -39,6 +41,7 @@ export interface BuildRequestAssemblyInput {
   messages: ChatMessage[]
   toolManifest: ToolManifest | null
   summaryText?: string | null
+  recoveryContextText?: string | null
   workflowDigest?: WorkflowStateDigest | null
   sessionBoundaryReason?: SessionBoundaryReason | null
   contextResult?: {
@@ -129,6 +132,7 @@ export function buildRequestAssembly(input: BuildRequestAssemblyInput): RequestA
     summaryText: workflowDigest
       ? renderWorkflowDigestForProvider(workflowDigest)
       : input.summaryText ?? compatibilitySummary,
+    recoveryContextText: input.recoveryContextText ?? null,
     workflowDigest,
     toolActionConstraint: input.toolManifest?.actionConstraint ?? null,
     metadata: {

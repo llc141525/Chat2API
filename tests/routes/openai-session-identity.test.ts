@@ -820,6 +820,128 @@ test('explicit header identity is still assigned to both session dimensions for 
   assert.equal(context.providerSessionEpoch, 'main')
   assert.equal(context.toolCatalogSessionKey, context.providerConversationSessionKey)
   assert.match(context.toolCatalogSessionKey ?? '', /^openai-chat:[a-f0-9]{24}$/)
+  assert.equal(context.recoverySessionId, context.toolCatalogSessionKey)
+})
+
+test('recovery session bridge is explicit and only enabled for stable client identity', () => {
+  const stable = applyOpenAISessionIdentity(createContext(), createRequest([
+    { role: 'user', content: 'Continue stable task.' },
+  ]), {
+    'x-session-id': 'stable-client-session',
+  })
+  assert.equal(stable.recoverySessionId, stable.toolCatalogSessionKey)
+  assert.equal(stable.parentRecoverySessionId, undefined)
+
+  const fallback = applyOpenAISessionIdentity(createContext(), createRequest([
+    { role: 'user', content: 'No explicit stable session.' },
+  ]))
+  assert.equal(fallback.recoverySessionId, undefined)
+
+  const child = applyOpenAISessionIdentity(createContext(), createRequest([
+    { role: 'user', content: 'Use tool.' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{
+        id: 'call_read',
+        type: 'function',
+        function: { name: 'read', arguments: '{"filePath":"a.ts"}' },
+      }],
+    },
+    { role: 'tool', tool_call_id: 'call_read', content: 'result' },
+  ]), {
+    'x-session-id': 'stable-client-session',
+  })
+  assert.equal(child.sessionBoundaryReason, 'tool_child')
+  assert.notEqual(child.recoverySessionId, child.providerConversationSessionKey)
+  assert.equal(child.parentRecoverySessionId, stable.recoverySessionId)
+  assert.equal(child.recoveryToolCallId, 'call_read')
+})
+
+test('recovery session bridge keeps recovery identity isolated from provider epochs', () => {
+  const main = applyOpenAISessionIdentity(createContext(), createRequest([
+    { role: 'user', content: 'Stable main task.' },
+  ]), {
+    'x-session-id': 'stable-client-session',
+  })
+  const compactedMain = applyOpenAISessionIdentity(createContext(), createRequest([
+    { role: 'user', content: '/compact Stable main task summary.' },
+  ]), {
+    'x-session-id': 'stable-client-session',
+  })
+
+  assert.notEqual(compactedMain.providerConversationSessionKey, main.providerConversationSessionKey)
+  assert.equal(compactedMain.recoverySessionId, main.recoverySessionId)
+
+  const childA = applyOpenAISessionIdentity(createContext(), createRequest([
+    { role: 'user', content: 'Use tool.' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{
+        id: 'call_read',
+        type: 'function',
+        function: { name: 'read', arguments: '{"filePath":"a.ts"}' },
+      }],
+    },
+    { role: 'tool', tool_call_id: 'call_read', content: 'result' },
+  ]), {
+    'x-session-id': 'stable-client-session',
+  })
+  const childARetryDifferentProviderEpoch = applyOpenAISessionIdentity(createContext(), createRequest([
+    { role: 'system', content: 'different provider-only prompt prefix' },
+    { role: 'user', content: 'Use tool.' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{
+        id: 'call_read',
+        type: 'function',
+        function: { name: 'read', arguments: '{"filePath":"changed-provider-payload.ts"}' },
+      }],
+    },
+    { role: 'tool', tool_call_id: 'call_read', content: 'result' },
+  ]), {
+    'x-session-id': 'stable-client-session',
+  })
+  const childB = applyOpenAISessionIdentity(createContext(), createRequest([
+    { role: 'user', content: 'Use another tool.' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{
+        id: 'call_write',
+        type: 'function',
+        function: { name: 'write', arguments: '{"filePath":"a.ts"}' },
+      }],
+    },
+    { role: 'tool', tool_call_id: 'call_write', content: 'ok' },
+  ]), {
+    'x-session-id': 'stable-client-session',
+  })
+
+  assert.notEqual(childA.providerConversationSessionKey, childARetryDifferentProviderEpoch.providerConversationSessionKey)
+  assert.equal(childA.recoverySessionId, childARetryDifferentProviderEpoch.recoverySessionId)
+  assert.notEqual(childA.recoverySessionId, childA.providerConversationSessionKey)
+  assert.notEqual(childA.recoverySessionId, childB.recoverySessionId)
+  assert.equal(childA.parentRecoverySessionId, main.recoverySessionId)
+  assert.equal(childARetryDifferentProviderEpoch.parentRecoverySessionId, main.recoverySessionId)
+
+  const subagentA = applyOpenAISessionIdentity(createContext(), createRequest([
+    { role: 'user', content: 'Run subagent.' },
+  ], { metadata: { subagent_id: 'worker-a' } }), {
+    'x-session-id': 'stable-client-session',
+  })
+  const subagentARetry = applyOpenAISessionIdentity(createContext({ requestId: 'different-request-id' }), createRequest([
+    { role: 'user', content: 'Run subagent retry.' },
+  ], { metadata: { subagent_id: 'worker-a' } }), {
+    'x-session-id': 'stable-client-session',
+  })
+
+  assert.equal(subagentA.sessionBoundaryReason, 'subagent_child')
+  assert.notEqual(subagentA.recoverySessionId, subagentA.providerConversationSessionKey)
+  assert.equal(subagentA.recoverySessionId, subagentARetry.recoverySessionId)
+  assert.equal(subagentA.parentRecoverySessionId, main.recoverySessionId)
 })
 
 test('applyOpenAISessionIdentity preserves runtime-set server_summary boundary', () => {

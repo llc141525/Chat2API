@@ -89,6 +89,7 @@ export function renderQwenRequest(
   const finalContent = renderFinalPrompt({
     systemText: baseSystemPrompts.join('\n\n') || null,
     summaryText: includeSummary ? effectiveSummaryText : null,
+    recoveryContextText: includeSummary ? cleaned.recoveryContextText : null,
     toolContractText: includeToolContract ? (cleaned.toolContractText ?? null) : null,
     infrastructurePrompt: cleaned.infrastructurePrompt,
     conversationText: conversationParts.length > 0
@@ -106,6 +107,7 @@ export function renderQwenRequest(
     inputMessageCount: cleaned.messages.length,
     messageRoleCounts: countMessageRoles(cleaned.messages),
     summaryChars: cleaned.summaryText?.length ?? 0,
+    recoveryContextChars: cleaned.recoveryContextText?.length ?? 0,
     infrastructurePromptChars: cleaned.infrastructurePrompt?.length ?? 0,
     toolContractChars: cleaned.toolContractText?.length ?? 0,
     toolContractPresent: Boolean(cleaned.toolContractText),

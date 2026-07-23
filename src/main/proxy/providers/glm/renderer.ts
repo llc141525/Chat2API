@@ -220,6 +220,7 @@ function buildGLMFlatPrompt(cleaned: CleanedRequest): string {
   const parts = renderFinalPrompt({
     systemText: baseSystemPrompts.join('\n\n') || null,
     summaryText: effectiveSummaryText || null,
+    recoveryContextText: cleaned.recoveryContextText,
     toolContractText: cleaned.toolContractText ?? null,
     infrastructurePrompt: cleaned.infrastructurePrompt,
     conversationText: conversationParts.length > 0

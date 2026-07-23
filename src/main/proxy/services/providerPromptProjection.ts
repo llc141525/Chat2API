@@ -27,6 +27,7 @@ export function projectRequestAssemblyForPromptMode(
       messages: selectMinimalDelta(assembly.messages),
       summaryText: null,
       workflowDigest: null,
+      recoveryContextText: assembly.recoveryContextText ?? null,
       infrastructurePrompt,
     }
   }

@@ -157,6 +157,43 @@ test('DeepSeek stream handles upstream DONE followed by stream end once', async 
   assert.equal(countMatches(joined, /"finish_reason":"stop"/g), 1)
 })
 
+test('DeepSeek stream records bounded diagnostics when upstream completes without fragments', async () => {
+  clearToolDiagnosticEvents()
+  const handler = new DeepSeekStreamHandler('deepseek-v4-flash', 'session-empty-stream', undefined, false)
+  const source = rawSse([
+    `data: ${JSON.stringify({ response_message_id: 'msg-empty-stream', model_type: 'default' })}`,
+    'data: [DONE]',
+  ])
+
+  const output = await collect(await handler.handleStream(source))
+  const joined = output.join('')
+
+  assert.match(joined, /"finish_reason":"stop"/)
+  assert.match(joined, /data: \[DONE\]/)
+
+  const events = getToolDiagnosticEvents().filter((event) => event.type === 'provider_empty_output')
+  assert.equal(events.length, 1)
+  const event = events[0] as any
+  assert.equal(event.providerId, 'deepseek')
+  assert.equal(event.model, 'deepseek-v4-flash')
+  assert.equal(event.responseMode, 'streaming')
+  assert.equal(event.contentLength, 0)
+  assert.equal(event.reasoningLength, 0)
+  assert.equal(event.upstreamDoneSeen, true)
+  assert.equal(event.upstreamMessageIdPresent, true)
+  assert.deepEqual(event.fragmentTypes, [])
+  assert.equal(event.upstreamParsedChunkCount, 1)
+  assert.equal(event.upstreamParseErrorCount, 0)
+  assert.equal(event.transformedTextDeltaCount, 0)
+  assert.equal(event.transformedReasoningDeltaCount, 0)
+  assert.equal(event.transformedToolCallDeltaCount, 0)
+  assert.equal(event.transformedFinishCount, 1)
+  assert.equal(event.finishReason, 'stop')
+  assert.equal(event.contentSentToClient, false)
+  assert.equal(event.upstreamRawLinePreview.some((line: string) => line.includes('msg-empty-stream')), true)
+  assert.equal(JSON.stringify(event).includes('Bearer '), false)
+})
+
 test('DeepSeek search-silent stream suppresses citations', async () => {
   const handler = new DeepSeekStreamHandler('deepseek-v4-flash-search-silent', 'session-silent', undefined, true)
   const source = sse([

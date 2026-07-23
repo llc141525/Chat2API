@@ -42,6 +42,22 @@ import { normalizeRequestLogConfig } from '../requestLogs/types'
 import { normalizeToolCallingConfig } from '../../shared/toolCalling'
 import { AppLogManager } from '../appLogs/manager'
 import type { AppLogFilter } from '../appLogs/types'
+import {
+  addMessageToSessionsWithRecoveryState,
+  applyRecoveryEventToSessions,
+  ensureRecoverySessionRecordInSessions,
+  ensureSessionRecoveryState,
+  removeSessionById,
+  type EnsureRecoverySessionRecordInput,
+  type RecoveryEvent,
+} from './sessionRecoveryPersistence.ts'
+export {
+  addMessageToSessionsWithRecoveryState,
+  applyRecoveryEventToSessions,
+  ensureRecoverySessionRecordInSessions,
+  ensureSessionRecoveryState,
+  removeSessionById,
+} from './sessionRecoveryPersistence.ts'
 
 // Dynamically import electron-store (ESM module)
 let Store: any = null
@@ -1407,7 +1423,7 @@ class StoreManager {
    */
   getSessions(): SessionRecord[] {
     this.ensureInitialized()
-    return this.store!.get('sessions') || []
+    return (this.store!.get('sessions') || []).map((session: SessionRecord) => ensureSessionRecoveryState(session))
   }
 
   /**
@@ -1416,7 +1432,8 @@ class StoreManager {
   getSessionById(id: string): SessionRecord | undefined {
     this.ensureInitialized()
     const sessions = this.store!.get('sessions') || []
-    return sessions.find((s: SessionRecord) => s.id === id)
+    const session = sessions.find((s: SessionRecord) => s.id === id)
+    return session ? ensureSessionRecoveryState(session) : undefined
   }
 
   /**
@@ -1432,7 +1449,7 @@ class StoreManager {
     return sessions.filter((s: SessionRecord) => 
       s.status === 'active' && 
       (now - s.lastActiveAt) < timeoutMs
-    )
+    ).map((session: SessionRecord) => ensureSessionRecoveryState(session))
   }
 
   /**
@@ -1441,8 +1458,7 @@ class StoreManager {
   addSession(session: SessionRecord): void {
     this.ensureInitialized()
     const sessions = this.store!.get('sessions') || []
-    sessions.push(session)
-    this.store!.set('sessions', sessions)
+    this.store!.set('sessions', [...sessions, ensureSessionRecoveryState(session)])
   }
 
   /**
@@ -1457,13 +1473,46 @@ class StoreManager {
       return null
     }
     
-    sessions[index] = {
+    const updatedSession = ensureSessionRecoveryState({
       ...sessions[index],
       ...updates,
-    }
+    })
     
-    this.store!.set('sessions', sessions)
-    return sessions[index]
+    const nextSessions = sessions.map((session: SessionRecord) => session.id === id ? updatedSession : session)
+    this.store!.set('sessions', nextSessions)
+    return updatedSession
+  }
+
+  getSessionRecoveryState(sessionId: string): SessionRecord['recoveryState'] {
+    const session = this.getSessionById(sessionId)
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`)
+    }
+    return session.recoveryState
+  }
+
+  applyRecoveryEventToSession(sessionId: string, event: RecoveryEvent): SessionRecord {
+    this.ensureInitialized()
+    const sessions = this.store!.get('sessions') || []
+    const nextSessions = applyRecoveryEventToSessions(sessions, sessionId, event)
+    const updated = nextSessions.find((session: SessionRecord) => session.id === sessionId)
+    if (!updated) {
+      throw new Error(`Session ${sessionId} not found after applying recovery event`)
+    }
+    this.store!.set('sessions', nextSessions)
+    return updated
+  }
+
+  ensureRecoverySessionRecord(input: EnsureRecoverySessionRecordInput): SessionRecord {
+    this.ensureInitialized()
+    const sessions = this.store!.get('sessions') || []
+    const nextSessions = ensureRecoverySessionRecordInSessions(sessions, input)
+    const session = nextSessions.find((candidate: SessionRecord) => candidate.id === input.sessionId)
+    if (!session) {
+      throw new Error(`Recovery session ${input.sessionId} was not created`)
+    }
+    this.store!.set('sessions', nextSessions)
+    return session
   }
 
   /**
@@ -1472,25 +1521,21 @@ class StoreManager {
   addMessageToSession(sessionId: string, message: ChatMessage): SessionRecord | null {
     this.ensureInitialized()
     const sessions = this.store!.get('sessions') || []
-    const index = sessions.findIndex((s: SessionRecord) => s.id === sessionId)
-    
-    if (index === -1) {
+    const config = this.getSessionConfig()
+    const result = addMessageToSessionsWithRecoveryState(
+      sessions,
+      sessionId,
+      message,
+      config.maxMessagesPerSession,
+      Date.now(),
+    )
+
+    if (!result.session) {
       return null
     }
-    
-    const config = this.getSessionConfig()
-    const session = sessions[index]
-    
-    if (session.messages.length >= config.maxMessagesPerSession) {
-      session.messages = session.messages.slice(-config.maxMessagesPerSession + 1)
-    }
-    
-    session.messages.push(message)
-    session.lastActiveAt = Date.now()
-    
-    sessions[index] = session
-    this.store!.set('sessions', sessions)
-    return session
+
+    this.store!.set('sessions', result.sessions)
+    return result.session
   }
 
   /**
@@ -1505,8 +1550,7 @@ class StoreManager {
       return false
     }
     
-    sessions.splice(index, 1)
-    this.store!.set('sessions', sessions)
+    this.store!.set('sessions', removeSessionById(sessions, id))
     return true
   }
 
@@ -1574,7 +1618,7 @@ class StoreManager {
   getSessionsByAccountId(accountId: string): SessionRecord[] {
     this.ensureInitialized()
     const sessions = this.store!.get('sessions') || []
-    return sessions.filter((s: SessionRecord) => s.accountId === accountId)
+    return sessions.filter((s: SessionRecord) => s.accountId === accountId).map((session: SessionRecord) => ensureSessionRecoveryState(session))
   }
 
   /**
@@ -1583,7 +1627,7 @@ class StoreManager {
   getSessionsByProviderId(providerId: string): SessionRecord[] {
     this.ensureInitialized()
     const sessions = this.store!.get('sessions') || []
-    return sessions.filter((s: SessionRecord) => s.providerId === providerId)
+    return sessions.filter((s: SessionRecord) => s.providerId === providerId).map((session: SessionRecord) => ensureSessionRecoveryState(session))
   }
 
   /**

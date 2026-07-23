@@ -42,11 +42,7 @@ function Get-ProviderNameFromModel([string]$ModelName) {
 function Invoke-ProviderPreflight([string]$ModelName) {
     $providerName = Get-ProviderNameFromModel $ModelName
     if ([string]::IsNullOrWhiteSpace($providerName)) { return }
-    $configPath = ""
-    foreach ($c in @((Join-Path $HOME ".config\opencode\opencode.json"), (Join-Path $HOME ".config\opencode\opencode.jsonc"), ".\opencode.json", ".\opencode.jsonc")) {
-        if (Test-Path $c) { $configPath = (Resolve-Path $c).Path; break }
-    }
-    if ([string]::IsNullOrWhiteSpace($configPath)) { return }
+    $configPath = Resolve-OpenCodeConfigPath
     $apiKey = ""
     try {
         $config = Get-Content -Raw $configPath | ConvertFrom-Json
@@ -57,7 +53,11 @@ function Invoke-ProviderPreflight([string]$ModelName) {
         if ([string]::IsNullOrWhiteSpace($baseUrl) -or [string]::IsNullOrWhiteSpace($apiKey)) { return }
         $body = @{ model = $ModelName; stream = $false; messages = @(@{ role = "user"; content = "Reply exactly OK." }) } | ConvertTo-Json -Depth 10
         $uri = $baseUrl.TrimEnd("/") + "/chat/completions"
-        $response = Invoke-RestMethod -Method Post -Uri $uri -Headers @{ Authorization = "Bearer $apiKey"; "Content-Type" = "application/json" } -Body $body -TimeoutSec 60
+        $response = Invoke-ProviderPreflightWithRetry `
+            -Description "$ModelName via provider '$providerName'" `
+            -Request {
+                Invoke-RestMethod -Method Post -Uri $uri -Headers @{ Authorization = "Bearer $apiKey"; "Content-Type" = "application/json" } -Body $body -TimeoutSec 60
+            }
         $content = if ($response.choices -and $response.choices[0].message) { [string]$response.choices[0].message.content } else { ($response | ConvertTo-Json -Compress) }
         if ([string]::IsNullOrWhiteSpace($content)) { Fail "provider_preflight_failed: empty response" }
         if ($content -match 'Error:|错误|refresh|try again|rate.?limit|429') { Fail "provider_preflight_failed: $content" }
@@ -71,12 +71,8 @@ function Invoke-ProviderPreflight([string]$ModelName) {
 function Get-ProviderBaseUrlPort([string]$ModelName) {
     $providerName = Get-ProviderNameFromModel $ModelName
     if ([string]::IsNullOrWhiteSpace($providerName)) { return $null }
-    $configPath = ""
-    foreach ($c in @((Join-Path $HOME ".config\opencode\opencode.json"), (Join-Path $HOME ".config\opencode\opencode.jsonc"), ".\opencode.json", ".\opencode.jsonc")) {
-        if (Test-Path $c) { $configPath = (Resolve-Path $c).Path; break }
-    }
-    if ([string]::IsNullOrWhiteSpace($configPath)) { return $null }
     try {
+        $configPath = Resolve-OpenCodeConfigPath
         $config = Get-Content -Raw $configPath | ConvertFrom-Json
         $baseUrl = [string]$config.provider.$providerName.options.baseURL
         if ([string]::IsNullOrWhiteSpace($baseUrl)) { return $null }
@@ -179,8 +175,11 @@ function Test-HasCompactionEvidence([string]$LogText) {
     return ($hasSummaryTrim -or $hasSlidingTrim) -and ($hasForwarderEvidence -or $hasServerSummary)
 }
 
-function Invoke-SessionReportAudit([string]$LogText, [string]$EventsPath, [string]$ProbeDir) {
+function Invoke-SessionReportAudit([string]$LogText, [string]$EventsPath, [string]$ProbeDir, [string[]]$LogSourcePaths, [int]$RuntimeStructuredLogLineCount, [string]$ProbeRunMarkerId, [int]$ProbeRunStartMarkerCount, [int]$ProbeRunEndMarkerCount, $ProbeRunLockHandle) {
     if ([string]::IsNullOrWhiteSpace($LogText)) { Fail "session_report_failed: no per-run log text available" }
+    if ($RuntimeStructuredLogLineCount -lt 1) { Fail "session_report_failed: no runtime structured app/request records captured for this run" }
+    if ([string]::IsNullOrWhiteSpace($ProbeRunMarkerId)) { Fail "session_report_failed: no probe run log marker id captured" }
+    if ($ProbeRunStartMarkerCount -lt 1 -or $ProbeRunEndMarkerCount -lt 1) { Fail "session_report_failed: missing probe run structured log boundary markers" }
     $reportLogPath = Join-Path $ProbeDir "dev-log-slice.log"
     $reportDir = Join-Path $ProbeDir "session-reports"
     [System.IO.File]::WriteAllText($reportLogPath, $LogText, [System.Text.UTF8Encoding]::new($false))
@@ -195,6 +194,15 @@ function Invoke-SessionReportAudit([string]$LogText, [string]$EventsPath, [strin
     $json = Read-JsonFile $report.FullName
     if ($null -eq $json.sessions -or $json.sessionCount -lt 1) { Fail "session_report_failed: report has no sessions" }
     if ($json.issues -and $json.issues.Count -gt 0) { Fail "session_report_failed: report contains issues: $($json.issues -join '; ')" }
+    Update-SessionReportRunMetadata `
+        -ReportPath $report.FullName `
+        -ProbeDir $ProbeDir `
+        -LogSourcePaths $LogSourcePaths `
+        -RuntimeStructuredLogLineCount $RuntimeStructuredLogLineCount `
+        -ProbeRunMarkerId $ProbeRunMarkerId `
+        -ProbeRunStartMarkerCount $ProbeRunStartMarkerCount `
+        -ProbeRunEndMarkerCount $ProbeRunEndMarkerCount `
+        -ProbeRunLockHandle $ProbeRunLockHandle | Out-Null
     Pass "Session report generated: $($report.FullName)"
 }
 
@@ -217,6 +225,17 @@ $probeProxyPort = Get-ProviderBaseUrlPort $Model
 if ($null -eq $probeProxyPort) { $probeProxyPort = 48763 }
 $newLogText = ""
 $structuredLogSnapshots = @()
+$structuredLogSources = @()
+$probeDir = ""
+$probeRootArtifactSnapshots = @()
+$probeRootArtifactAuditCompleted = $false
+$probeRunLogMarkerId = ""
+$probeRunLockHandle = $null
+$probeRunStartMarkerWritten = $false
+$probeRunEndMarkerWritten = $false
+$probeRunSkillState = $null
+$opencodeConfigState = $null
+$opencodeModelName = ""
 $exitCode = 1
 
 try {
@@ -233,6 +252,8 @@ $stderrPath = "$probeDir/opencode-long-stderr.log"
 $notesPath = "$probeDir/white-ui-notes.txt"
 $decisionPath = "$probeDir/white-ui-decision.txt"
 $auditPath = "$probeDir/white-ui-audit.md"
+$probeRootArtifactSnapshots = Get-ProbeRootArtifactSnapshots $probeRoot
+$activeSkillPath = Join-Path (Resolve-Path ".").Path ".opencode\skills\white-ui-audit-probe\SKILL.md"
 
 if (-not (Test-Path $promptPath)) { Fail "Prompt file not found: $promptPath" }
 if (-not (Test-Path $LogPath)) {
@@ -241,6 +262,17 @@ if (-not (Test-Path $LogPath)) {
 if (-not (Test-Path $storeDir)) { Fail "Config store directory not found: $storeDir" }
 $opencodeExe = Resolve-OpencodeExe
 if (-not $opencodeExe) { Fail "opencode not found" }
+$opencodeConfigPath = Resolve-OpenCodeConfigPath
+$opencodeModelName = Resolve-OpenCodeRegisteredModelName -ConfigPath $opencodeConfigPath -RequestedModel $Model
+Pass "Resolved OpenCode --model '$Model' -> '$opencodeModelName'"
+$opencodeConfigState = Set-OpenCodeLocalProviderBaseUrlsForProbe -ConfigPath $opencodeConfigPath -Port $probeProxyPort
+Pass "Temporarily aligned $($opencodeConfigState.UpdatedCount) OpenCode local provider baseURL(s) to $($opencodeConfigState.ReplacementBaseUrl)"
+
+$probeRunLogMarkerId = New-ProbeRunLogMarker $probeDir
+$structuredLogSources = Get-StructuredLogSourcePaths $storeDir
+$probeRunLockHandle = Acquire-ProbeRunStructuredLogLock -StoreDir $storeDir -ProbeDir $probeDir -MarkerId $probeRunLogMarkerId -LogSourcePaths $structuredLogSources
+$probeRunSkillState = Set-ProbeRunSkillArtifactDirectory -SkillPath $activeSkillPath -ProbeDir $probeDir
+Pass "Prepared active OpenCode skill with run-specific artifact paths: $activeSkillPath"
 
 # Enable aggressive compaction
 $aggressiveState = @{
@@ -312,14 +344,17 @@ if (-not $SkipDevServerStart) {
 }
 if (-not $SkipProviderPreflight) { Invoke-ProviderPreflight $Model }
 
-$structuredLogSources = Get-StructuredLogSourcePaths $storeDir
 $structuredLogSnapshots = Get-LogLineSnapshots $structuredLogSources
+Write-StructuredLogRunMarker -Paths $structuredLogSources -ProbeDir $probeDir -MarkerId $probeRunLogMarkerId -Phase "start"
+$probeRunStartMarkerWritten = $true
 $beforeLogLines = @(Get-Content $LogPath)
 $prompt = ConvertTo-ProbeRunPrompt -Prompt (Get-Content -Raw $promptPath) -ProbeDir $probeDir
 
 Write-Host "Running OpenCode with white-ui-audit-probe..."
 
-$runResult = Invoke-OpencodeRun -Prompt $prompt -ModelName $Model -TimeoutSeconds $TimeoutSeconds
+$runResult = Invoke-OpencodeRun -Prompt $prompt -ModelName $opencodeModelName -TimeoutSeconds $TimeoutSeconds
+Write-StructuredLogRunMarker -Paths $structuredLogSources -ProbeDir $probeDir -MarkerId $probeRunLogMarkerId -Phase "end"
+$probeRunEndMarkerWritten = $true
 [System.IO.File]::WriteAllText($eventsPath, [string]$runResult.Stdout, [System.Text.UTF8Encoding]::new($false))
 [System.IO.File]::WriteAllText($stderrPath, [string]$runResult.Stderr, [System.Text.UTF8Encoding]::new($false))
 
@@ -348,6 +383,8 @@ Pass "OpenCode exited successfully"
 if (-not (Test-Path $notesPath)) { Fail "Missing $notesPath — Phase 1 incomplete" }
 if (-not (Test-Path $decisionPath)) { Fail "Missing $decisionPath — Phase 3 incomplete" }
 if (-not (Test-Path $auditPath)) { Fail "Missing $auditPath — Phase 4 incomplete" }
+Assert-NoProbeRootArtifactWrites -Snapshots $probeRootArtifactSnapshots -ProbeDir $probeDir
+$probeRootArtifactAuditCompleted = $true
 Pass "All 3 probe artifacts created"
 
 # ═══ Final marker check ═══
@@ -436,37 +473,21 @@ if ($moderateRepeats.Count -gt 0) {
 Pass "No raw XML leakage or repeated tool calls detected"
 
 # ═══ Phase 2: distinct files check ═══
-$phase1Reads = [System.Collections.Generic.HashSet[string]]::new()
-$phase2Reads = [System.Collections.Generic.HashSet[string]]::new()
-$phaseReadFound = $false
-$needDecisionSeen = $false
-foreach ($line in $eventLines) {
-    try { $evt = $line | ConvertFrom-Json } catch { Fail "Invalid NDJSON during phase read check: $($line.Substring(0, [Math]::Min(80, $line.Length)))" }
-    if ($evt.type -eq "text") {
-        $text = [string]$evt.part.text
-        if ($text.Contains("white-ui-decision.txt")) { $needDecisionSeen = $true }
-    }
-    if ($evt.type -eq "tool_use" -and [string]$evt.part.tool -eq "read") {
-        try {
-            $filePath = Get-OpenCodeReadFilePath $evt
-            if (-not [string]::IsNullOrWhiteSpace($filePath)) {
-                if (-not $needDecisionSeen) { $phase1Reads.Add($filePath) | Out-Null }
-                else { $phase2Reads.Add($filePath) | Out-Null }
-            }
-        } catch { Fail "Failed to parse read tool input during phase read check: $_" }
-    }
-}
-$phaseOverlap = $false
-foreach ($f in $phase2Reads) { if ($phase1Reads.Contains($f)) { $phaseOverlap = $true; break } }
-if ($phase1Reads.Count -ne 2) { Fail "Phase 1 must read exactly 2 component files, found $($phase1Reads.Count)" }
-if ($phase2Reads.Count -ne 2) { Fail "Phase 2 must read exactly 2 component files, found $($phase2Reads.Count)" }
-if ($phaseOverlap) { Fail "Phase 2 re-read a file from Phase 1" }
+$phaseReadAudit = Get-OpenCodeLongProbePhaseReadAudit $eventLines
+if (-not [bool]$phaseReadAudit.NotesWriteSeen) { Fail "Phase boundary missing: white-ui-notes.txt was not written" }
+if (-not [bool]$phaseReadAudit.NotesRecoveryReadSeen) { Fail "Phase boundary missing: white-ui-notes.txt was not re-read before Phase 2" }
+if (@($phaseReadAudit.Phase1Reads).Count -ne 2) { Fail "Phase 1 must read exactly 2 component files, found $(@($phaseReadAudit.Phase1Reads).Count)" }
+if (@($phaseReadAudit.Phase2Reads).Count -ne 2) { Fail "Phase 2 must read exactly 2 component files, found $(@($phaseReadAudit.Phase2Reads).Count)" }
+if (@($phaseReadAudit.PhaseOverlap).Count -gt 0) { Fail "Phase 2 re-read a file from Phase 1: $(@($phaseReadAudit.PhaseOverlap) -join ', ')" }
 Pass "Phase 1 and Phase 2 each read exactly 2 distinct component files"
 
 # ═══ Compaction evidence (non-fatal: complete workflow proves resilience) ═══
 $startupLogText = Get-NewLogText $LogPath $beforeLogLines.Count
-$newLogText = Get-StructuredLogDeltaText $structuredLogSnapshots
+$structuredLogAudit = Get-StructuredLogDeltaAudit $structuredLogSnapshots $probeDir $probeRunLogMarkerId
+$newLogText = [string]$structuredLogAudit.Text
 if ($newLogText.Length -eq 0) { Fail "No new structured app/request log content captured during probe" }
+if ([int]$structuredLogAudit.RuntimeStructuredLogLineCount -lt 1) { Fail "No runtime structured app/request records captured during probe" }
+if ([int]$structuredLogAudit.ProbeRunStartMarkerCount -lt 1 -or [int]$structuredLogAudit.ProbeRunEndMarkerCount -lt 1) { Fail "No matching probe run start/end markers captured in structured logs" }
 if (-not (Test-HasCompactionEvidence $newLogText)) {
     Write-Host "[WARN] No compaction evidence in structured app/request log slice — but 4-phase workflow completed successfully, proving post-compaction resilience"
 } else {
@@ -495,7 +516,16 @@ if ($sectionCount -ne 4) { Fail "white-ui-audit.md must contain exactly 4 sectio
 Pass "white-ui-audit.md contains substantive UI audit content ($sectionCount sections)"
 
 # ═══ Session report audit ═══
-Invoke-SessionReportAudit -LogText $newLogText -EventsPath $eventsPath -ProbeDir $probeDir
+Invoke-SessionReportAudit `
+    -LogText $newLogText `
+    -EventsPath $eventsPath `
+    -ProbeDir $probeDir `
+    -LogSourcePaths $structuredLogAudit.SourcePaths `
+    -RuntimeStructuredLogLineCount ([int]$structuredLogAudit.RuntimeStructuredLogLineCount) `
+    -ProbeRunMarkerId ([string]$structuredLogAudit.ProbeRunMarkerId) `
+    -ProbeRunStartMarkerCount ([int]$structuredLogAudit.ProbeRunStartMarkerCount) `
+    -ProbeRunEndMarkerCount ([int]$structuredLogAudit.ProbeRunEndMarkerCount) `
+    -ProbeRunLockHandle $probeRunLockHandle
 
 # ═══ PASS ═══
 Write-Host ""
@@ -507,10 +537,45 @@ $exitCode = 0
     if ($message.StartsWith("PROBE_FAIL::")) {
         $message = $message.Substring("PROBE_FAIL::".Length)
     }
+    if (-not $probeRootArtifactAuditCompleted -and -not [string]::IsNullOrWhiteSpace($probeDir) -and $null -ne $probeRootArtifactSnapshots) {
+        try {
+            Assert-NoProbeRootArtifactWrites -Snapshots $probeRootArtifactSnapshots -ProbeDir $probeDir
+            $probeRootArtifactAuditCompleted = $true
+        } catch {
+            $rootArtifactMessage = [string]$_.Exception.Message
+            if ($rootArtifactMessage.StartsWith("PROBE_FAIL::")) {
+                $rootArtifactMessage = $rootArtifactMessage.Substring("PROBE_FAIL::".Length)
+            }
+            $message = "$rootArtifactMessage; original_failure=$message"
+        }
+    }
     Write-Host "[FAIL] $message"
     Write-Host "LONG_CONVERSATION_PROBE_FAIL"
     $exitCode = 1
 } finally {
+    try {
+        Restore-OpenCodeConfigSnapshot $opencodeConfigState
+        if ($null -ne $opencodeConfigState) {
+            Pass "Restored original OpenCode config: $($opencodeConfigState.ConfigPath)"
+        }
+    } catch {
+        Write-Host "[WARN] Failed to restore original OpenCode config: $_"
+    }
+    if ($probeRunStartMarkerWritten -and -not $probeRunEndMarkerWritten) {
+        try {
+            Write-StructuredLogRunMarker -Paths $structuredLogSources -ProbeDir $probeDir -MarkerId $probeRunLogMarkerId -Phase "end"
+            $probeRunEndMarkerWritten = $true
+        } catch {
+            Write-Host "[WARN] Failed to write probe run end marker: $_"
+        }
+    }
+    try {
+        Restore-ProbeRunSkillArtifactDirectory $probeRunSkillState
+    } catch {
+        Write-Host "[WARN] Failed to restore active OpenCode skill: $_"
+    } finally {
+        Release-ProbeRunStructuredLogLock $probeRunLockHandle
+    }
     if ($contextConfigWasWritten -and $null -ne $originalState) {
         try {
             $env:CHAT2API_STORE_DIR = $storeDir

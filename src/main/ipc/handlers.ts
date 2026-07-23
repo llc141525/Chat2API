@@ -114,7 +114,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
 
       const config = storeManager.getConfig()
       const proxyPort = port || config.proxyPort
-      const proxyHost = config.proxyHost || '127.0.0.1'
+      const proxyHost = config.proxyHost || '0.0.0.0'
 
       proxyServer = new ProxyServer()
       const success = await proxyServer.start(proxyPort, proxyHost)

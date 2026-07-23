@@ -36,6 +36,11 @@ import { markProviderRequestStreamFinished, runThroughProviderRequestGate } from
 import { primeProviderStreamEvents } from './providerStreamGuard.ts'
 import { inspectStreamAssistantOutput } from '../toolCalling/outputInspection.ts'
 import { cleanupChildProviderSession } from './childSessionCleanup.ts'
+import type { RecoveryEvent, SessionKind } from './sessionRecoveryState.ts'
+import type { SessionRecoveryState } from './sessionRecoveryState.ts'
+import { renderRecoveryContextForProvider } from './recoveryPromptProjection.ts'
+
+const PROVIDER_ERROR_PREVIEW_LIMIT = 1000
 
 function requiresBufferedToolValidation(constraint: RequestAssembly['toolActionConstraint']): boolean {
   return constraint?.kind === 'first_skill_required' || constraint?.kind === 'next_required_tool'
@@ -44,6 +49,15 @@ function requiresBufferedToolValidation(constraint: RequestAssembly['toolActionC
 function isChildBoundary(context: ProxyContext): boolean {
   return context.sessionBoundaryReason === 'tool_child' || context.sessionBoundaryReason === 'subagent_child'
 }
+
+type RecoveryHandoffMetadata = {
+  recoveryHandoffId?: string
+  recoveryFromSessionId?: string
+  recoveryToSessionId?: string
+  recoveryChildKind?: Exclude<SessionKind, 'main'>
+}
+
+type RecoveryTrackedChildSessionHandoff = ChildSessionHandoff & RecoveryHandoffMetadata
 
 export type ReadSessionStateInput = {
   conversationStateKey: string
@@ -86,6 +100,26 @@ export type ProviderRuntimeOptions = {
   pluginResolver?: ProviderRuntimePluginResolver
   transport?: ProviderRuntimeTransport
   axiosInstance?: AxiosInstance
+  recoveryBridge?: ProviderRuntimeRecoveryBridge
+}
+
+export type ProviderRuntimeRecoverySessionInput = {
+  sessionId: string
+  sessionKind: SessionKind
+  parentSessionId?: string
+  toolCallId?: string
+  providerSessionId?: string
+  providerId?: string
+  accountId?: string
+  model?: string
+}
+
+export type ProviderRuntimeRecoveryEvent = Omit<RecoveryEvent, 'expectedStateVersion'>
+
+export interface ProviderRuntimeRecoveryBridge {
+  ensureSession(input: ProviderRuntimeRecoverySessionInput): void | Promise<void>
+  applyEvent(sessionId: string, event: ProviderRuntimeRecoveryEvent): void | Promise<void>
+  readState?(sessionId: string): SessionRecoveryState | undefined | null | Promise<SessionRecoveryState | undefined | null>
 }
 
 function getProviderSessionIdFromStateUpdate(update: Partial<ConversationState>): string | undefined {
@@ -104,6 +138,21 @@ function getProviderSessionIdFromStateUpdate(update: Partial<ConversationState>)
   return undefined
 }
 
+const defaultRecoveryBridge: ProviderRuntimeRecoveryBridge = {
+  async ensureSession(input) {
+    const { sessionManager } = await import('../sessionManager.ts')
+    sessionManager.ensureRecoverySession(input)
+  },
+  async applyEvent(sessionId, event) {
+    const { sessionManager } = await import('../sessionManager.ts')
+    sessionManager.applyRecoveryEventWithCurrentVersion(sessionId, event as Omit<RecoveryEvent, 'expectedStateVersion'>)
+  },
+  async readState(sessionId) {
+    const { sessionManager } = await import('../sessionManager.ts')
+    return sessionManager.getSessionRecoveryState(sessionId)
+  },
+}
+
 /**
  * ProviderRuntime provides a unified interface for reading and writing
  * provider conversation session state. It encapsulates:
@@ -118,6 +167,7 @@ export class ProviderRuntime {
   private readonly pluginResolver: ProviderRuntimePluginResolver
   private readonly transport: ProviderRuntimeTransport
   private readonly axiosInstance: AxiosInstance
+  private readonly recoveryBridge: ProviderRuntimeRecoveryBridge | null
 
   constructor(options: ProviderRuntimeOptions = {}) {
     this.axiosInstance = options.axiosInstance ?? axios.create({
@@ -127,6 +177,7 @@ export class ProviderRuntime {
     })
     this.pluginResolver = options.pluginResolver ?? defaultPluginResolver
     this.transport = options.transport ?? this.defaultTransport.bind(this)
+    this.recoveryBridge = options.recoveryBridge ?? defaultRecoveryBridge
   }
 
   async forward(input: ProviderRuntimeForwardInput): Promise<ForwardResult> {
@@ -140,6 +191,8 @@ export class ProviderRuntime {
         latency: Date.now() - startTime,
       }
     }
+
+    await this.ensureRecoverySession(input)
 
     const primaryPriorState = this.readSessionState({
       conversationStateKey: input.conversationStateKey,
@@ -178,7 +231,11 @@ export class ProviderRuntime {
       ? requestedSessionId ? 'request' : 'state'
       : 'fresh'
 
-    const providerAssemblyBase = projectRequestAssemblyForPromptMode(input.assembly, input.promptRefreshMode)
+    const recoveryContextText = await this.buildRecoveryContextText(input)
+    const assemblyWithRecoveryContext = recoveryContextText
+      ? { ...input.assembly, recoveryContextText }
+      : input.assembly
+    const providerAssemblyBase = projectRequestAssemblyForPromptMode(assemblyWithRecoveryContext, input.promptRefreshMode)
     const providerAssembly = sessionBoundaryPlan.providerSessionAction === 'consume_child_handoff'
       && priorState?.childSessionHandoff
       ? {
@@ -213,7 +270,9 @@ export class ProviderRuntime {
     const cleanedPromptChars = cleanedMessages.reduce(
       (total, message) => total + extractTextContent(message.content).length,
       0,
-    ) + (cleanedRequest.summaryText?.length ?? 0) + (cleanedRequest.toolContractText?.length ?? 0)
+    ) + (cleanedRequest.summaryText?.length ?? 0)
+      + (cleanedRequest.recoveryContextText?.length ?? 0)
+      + (cleanedRequest.toolContractText?.length ?? 0)
     const contextEconomy = buildContextEconomyDiagnostics(cleanedMessages, {
       boundary: sessionBoundaryPlan.boundary,
       promptRefreshMode: input.promptRefreshMode,
@@ -284,11 +343,18 @@ export class ProviderRuntime {
     }))
 
     if (status >= 400) {
+      const errorDiagnostics = await this.buildProviderHttpErrorDiagnostics(
+        response,
+        input,
+        plugin,
+        headers,
+      )
+      logger.error('[ProviderRuntime] Provider HTTP error response:', JSON.stringify(errorDiagnostics))
       return {
         success: false,
         status,
         headers,
-        error: this.extractResponseError(response),
+        error: this.extractResponseError(response, errorDiagnostics.upstreamErrorPreview),
         latency,
       }
     }
@@ -306,9 +372,10 @@ export class ProviderRuntime {
 
       this.writeRuntimeSessionState(input, {
         plugin,
-      webRequest: webRequest!,
-      sessionId: webRequest!.sessionId,
-      reqId: webRequest!.reqId,
+        webRequest: webRequest!,
+        sessionId: webRequest!.sessionId,
+        reqId: plugin.id === 'deepseek' ? '' : webRequest!.reqId,
+        allowSyntheticProviderParentReqId: plugin.id !== 'deepseek',
       })
 
       const observedEvents = this.withChildLifecycleOnStreamSettled(this.observeStreamEvents(
@@ -490,17 +557,21 @@ export class ProviderRuntime {
       headers,
       data: (response as any).data,
     })
+    const parentHandoff = this.buildSettledChildHandoff(
+      input,
+      parsed.response.data,
+      parsed.sessionId || webRequest!.sessionId,
+    )
     this.writeRuntimeSessionState(input, {
       plugin,
       webRequest: webRequest!,
       sessionId: parsed.sessionId || webRequest!.sessionId,
-      reqId: parsed.reqId || webRequest!.reqId,
-      parentHandoff: this.buildSettledChildHandoff(
-        input,
-        parsed.response.data,
-        parsed.sessionId || webRequest!.sessionId,
-      ),
+      reqId: parsed.reqId,
+      parentHandoff,
+      allowSyntheticProviderParentReqId: plugin.id !== 'deepseek',
     })
+    await this.recordRecoveryChildSettled(input, parentHandoff)
+    await this.recordRecoveryHandoffConsumed(input, consumedChildHandoff)
     await this.cleanupConsumedChildHandoff(input, plugin, consumedChildHandoff)
 
     return {
@@ -568,6 +639,137 @@ export class ProviderRuntime {
     }
   }
 
+  private async ensureRecoverySession(input: ProviderRuntimeForwardInput): Promise<void> {
+    const recoverySessionId = input.context.recoverySessionId?.trim()
+    if (!recoverySessionId || !this.recoveryBridge) return
+
+    await this.recoveryBridge.ensureSession({
+      sessionId: recoverySessionId,
+      sessionKind: this.getRecoverySessionKind(input.context),
+      parentSessionId: input.context.parentRecoverySessionId,
+      toolCallId: input.context.recoveryToolCallId,
+      providerSessionId: input.context.providerSessionId,
+      providerId: input.provider.id,
+      accountId: input.account.id,
+      model: input.actualModel,
+    })
+
+    await this.recordRecoveryChildCreate(input)
+  }
+
+  private async recordProviderSessionChange(input: ProviderRuntimeForwardInput, nextProviderSessionId: string): Promise<void> {
+    const recoverySessionId = input.context.recoverySessionId?.trim()
+    if (!recoverySessionId || !this.recoveryBridge) return
+
+    await this.recoveryBridge.applyEvent(recoverySessionId, {
+      type: 'provider_session_change',
+      eventId: `provider-session:${input.context.requestId}:${nextProviderSessionId}`,
+      sessionId: recoverySessionId,
+      occurredAt: Date.now(),
+      previousProviderSessionId: input.context.providerSessionId,
+      nextProviderSessionId,
+    })
+  }
+
+  private async buildRecoveryContextText(input: ProviderRuntimeForwardInput): Promise<string | null> {
+    const recoverySessionId = input.context.recoverySessionId?.trim()
+    if (!recoverySessionId || !this.recoveryBridge?.readState) return null
+    if (!this.shouldProjectRecoveryContext(input.context.sessionBoundaryReason)) return null
+
+    const state = await this.recoveryBridge.readState(recoverySessionId)
+    if (!state || state.sessionId !== recoverySessionId) return null
+    return renderRecoveryContextForProvider(state)
+  }
+
+  private shouldProjectRecoveryContext(boundary: ProxyContext['sessionBoundaryReason']): boolean {
+    return boundary === 'client_compact' || boundary === 'server_summary' || boundary === 'summary_generator'
+  }
+
+  private async recordRecoveryChildCreate(input: ProviderRuntimeForwardInput): Promise<void> {
+    const childSessionId = input.context.recoverySessionId?.trim()
+    const parentSessionId = input.context.parentRecoverySessionId?.trim()
+    const childKind = this.getRecoveryChildKind(input.context)
+    if (!childSessionId || !parentSessionId || !childKind || !this.recoveryBridge) return
+
+    await this.recoveryBridge.applyEvent(parentSessionId, {
+      type: 'child_create',
+      eventId: `child-create:${parentSessionId}:${childKind}:${childSessionId}`,
+      sessionId: parentSessionId,
+      occurredAt: Date.now(),
+      childSessionId,
+      childKind,
+      toolCallId: input.context.recoveryToolCallId,
+      providerSessionId: input.context.providerSessionId,
+    })
+  }
+
+  private async recordRecoveryChildSettled(input: ProviderRuntimeForwardInput, handoff?: ChildSessionHandoff): Promise<void> {
+    const metadata = handoff as RecoveryTrackedChildSessionHandoff | undefined
+    const parentSessionId = metadata?.recoveryToSessionId?.trim() || input.context.parentRecoverySessionId?.trim()
+    const childSessionId = metadata?.recoveryFromSessionId?.trim() || input.context.recoverySessionId?.trim()
+    const childKind = metadata?.recoveryChildKind || this.getRecoveryChildKind(input.context)
+    const handoffId = metadata?.recoveryHandoffId || this.buildRecoveryHandoffId(parentSessionId, childSessionId, childKind)
+    if (!parentSessionId || !childSessionId || !childKind || !handoffId || !this.recoveryBridge) return
+
+    const occurredAt = Date.now()
+    await this.recoveryBridge.applyEvent(parentSessionId, {
+      type: 'child_complete',
+      eventId: `child-complete:${parentSessionId}:${childKind}:${childSessionId}`,
+      sessionId: parentSessionId,
+      occurredAt,
+      childSessionId,
+      handoffId,
+    })
+    await this.recoveryBridge.applyEvent(parentSessionId, {
+      type: 'handoff_create',
+      eventId: `handoff-create:${handoffId}`,
+      sessionId: parentSessionId,
+      occurredAt,
+      handoffId,
+      fromSessionId: childSessionId,
+      toSessionId: parentSessionId,
+      childKind,
+    })
+  }
+
+  private async recordRecoveryHandoffConsumed(input: ProviderRuntimeForwardInput, handoff?: ChildSessionHandoff): Promise<void> {
+    const metadata = handoff as RecoveryTrackedChildSessionHandoff | undefined
+    const parentSessionId = input.context.recoverySessionId?.trim()
+    const childSessionId = metadata?.recoveryFromSessionId?.trim()
+    const handoffId = metadata?.recoveryHandoffId?.trim()
+    if (!parentSessionId || !childSessionId || !handoffId || !this.recoveryBridge) return
+
+    await this.recoveryBridge.applyEvent(parentSessionId, {
+      type: 'handoff_consume',
+      eventId: `handoff-consume:${handoffId}`,
+      sessionId: parentSessionId,
+      occurredAt: Date.now(),
+      handoffId,
+      fromSessionId: childSessionId,
+    })
+  }
+
+  private getRecoverySessionKind(context: ProxyContext): SessionKind {
+    if (context.sessionBoundaryReason === 'tool_child') return 'tool_child'
+    if (context.sessionBoundaryReason === 'subagent_child') return 'subagent_child'
+    return 'main'
+  }
+
+  private getRecoveryChildKind(context: ProxyContext): Exclude<SessionKind, 'main'> | undefined {
+    if (context.sessionBoundaryReason === 'tool_child') return 'tool_child'
+    if (context.sessionBoundaryReason === 'subagent_child') return 'subagent_child'
+    return undefined
+  }
+
+  private buildRecoveryHandoffId(
+    parentSessionId: string | undefined,
+    childSessionId: string | undefined,
+    childKind: Exclude<SessionKind, 'main'> | undefined,
+  ): string | undefined {
+    if (!parentSessionId || !childSessionId || !childKind) return undefined
+    return `handoff:${parentSessionId}:${childKind}:${childSessionId}`
+  }
+
   private async cleanupConsumedChildHandoff(input: ProviderRuntimeForwardInput, plugin: WebProviderPlugin, handoff?: ChildSessionHandoff): Promise<void> {
     if (!handoff) return
     const deleteSession = this.buildDeleteSessionCallback(plugin, input)
@@ -603,12 +805,27 @@ export class ProviderRuntime {
   }
 
   private buildSettledChildHandoff(input: ProviderRuntimeForwardInput, responseBody: any, childProviderSessionId?: string): ChildSessionHandoff | undefined {
-    return buildChildSessionHandoff({
+    const handoff = buildChildSessionHandoff({
       context: input.context,
       requestMessages: input.request.messages,
       responseBody,
       childProviderSessionId,
     })
+    if (!handoff) return undefined
+
+    const parentSessionId = input.context.parentRecoverySessionId?.trim()
+    const childSessionId = input.context.recoverySessionId?.trim()
+    const childKind = this.getRecoveryChildKind(input.context)
+    const handoffId = this.buildRecoveryHandoffId(parentSessionId, childSessionId, childKind)
+    if (!parentSessionId || !childSessionId || !childKind || !handoffId) return handoff
+
+    return {
+      ...handoff,
+      recoveryHandoffId: handoffId,
+      recoveryFromSessionId: childSessionId,
+      recoveryToSessionId: parentSessionId,
+      recoveryChildKind: childKind,
+    } as RecoveryTrackedChildSessionHandoff
   }
 
   private async *withChildLifecycleOnStreamSettled(
@@ -666,9 +883,11 @@ export class ProviderRuntime {
             reqId: latestReqId,
             parentHandoff,
           })
+          await this.recordRecoveryChildSettled(input, parentHandoff)
         }
       }
 
+      await this.recordRecoveryHandoffConsumed(input, consumedChildHandoff)
       await this.cleanupConsumedChildHandoff(input, plugin, consumedChildHandoff)
     }
   }
@@ -698,11 +917,14 @@ export class ProviderRuntime {
       sessionId: string
       reqId: string
       parentHandoff?: ChildSessionHandoff
+      allowSyntheticProviderParentReqId?: boolean
     },
   ): void {
+    const allowSyntheticProviderParentReqId = result.allowSyntheticProviderParentReqId ?? true
+    const providerParentReqId = result.reqId || (allowSyntheticProviderParentReqId ? result.webRequest.reqId : undefined)
     const update: Partial<ConversationState> = {
       providerSessionId: result.sessionId,
-      providerParentReqId: result.reqId || result.webRequest.reqId,
+      ...(providerParentReqId ? { providerParentReqId } : {}),
       ...(input.context.sessionBoundaryReason === 'normal'
         ? { childSessionHandoff: undefined }
         : {}),
@@ -710,7 +932,7 @@ export class ProviderRuntime {
         ? { conversationId: result.sessionId }
         : {}),
       ...(result.plugin.capabilities.supportsParentMessageId
-        ? { parentMessageId: result.reqId || result.webRequest.reqId }
+        ? (providerParentReqId ? { parentMessageId: providerParentReqId } : {})
         : {}),
     }
 
@@ -722,6 +944,8 @@ export class ProviderRuntime {
       update,
       parentHandoff: result.parentHandoff,
     })
+
+    void this.recordProviderSessionChange(input, result.sessionId)
 
     if ((input.context.sessionBoundaryReason === 'tool_child'
       || input.context.sessionBoundaryReason === 'subagent_child')
@@ -883,13 +1107,93 @@ export class ProviderRuntime {
     )
   }
 
-  private extractResponseError(response: ProviderWebResponse | AxiosResponse): string {
+  private async buildProviderHttpErrorDiagnostics(
+    response: ProviderWebResponse | AxiosResponse,
+    input: ProviderRuntimeForwardInput,
+    plugin: WebProviderPlugin,
+    headers: Record<string, string>,
+  ): Promise<Record<string, unknown> & { upstreamErrorPreview?: string }> {
+    const data = (response as any).data
+    const responseDataReadable = this.isReadableStream(data)
+    let upstreamErrorPreview: string | undefined
+
+    if (responseDataReadable) {
+      upstreamErrorPreview = await this.readProviderErrorStreamPreview(data, PROVIDER_ERROR_PREVIEW_LIMIT)
+      ;(response as any).data = upstreamErrorPreview
+    } else {
+      upstreamErrorPreview = this.previewProviderErrorData(data)
+    }
+
+    return {
+      providerPlugin: plugin.id,
+      providerId: input.provider.id,
+      model: input.actualModel,
+      correlationId: input.context.requestId,
+      status: Number((response as any).status ?? 0),
+      contentType: headers['content-type'] ?? null,
+      responseDataKind: data == null ? 'nullish' : typeof data,
+      responseDataReadable,
+      streamRequested: input.request.stream,
+      transportResponseType: responseDataReadable ? 'stream' : 'json',
+      upstreamErrorPreview,
+    }
+  }
+
+  private isReadableStream(value: unknown): value is NodeJS.ReadableStream {
+    return Boolean(value && typeof (value as any).on === 'function' && typeof (value as any).pipe === 'function')
+  }
+
+  private async readProviderErrorStreamPreview(stream: NodeJS.ReadableStream, limit: number): Promise<string> {
+    const chunks: Buffer[] = []
+    let total = 0
+
+    try {
+      for await (const chunk of stream as AsyncIterable<Buffer | string | Uint8Array>) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        const remaining = Math.max(0, limit - total)
+        if (remaining > 0) {
+          chunks.push(buffer.subarray(0, remaining))
+          total += Math.min(buffer.length, remaining)
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'failed to read provider error stream'
+      return this.sanitizeProviderErrorPreview(`[stream read failed: ${message}]`)
+    }
+
+    const suffix = total >= limit ? '... [truncated]' : ''
+    return this.sanitizeProviderErrorPreview(Buffer.concat(chunks).toString('utf8') + suffix)
+  }
+
+  private previewProviderErrorData(data: unknown): string | undefined {
+    if (typeof data === 'string') {
+      return this.sanitizeProviderErrorPreview(data.slice(0, PROVIDER_ERROR_PREVIEW_LIMIT))
+    }
+    if (data && typeof data === 'object') {
+      try {
+        return this.sanitizeProviderErrorPreview(JSON.stringify(data).slice(0, PROVIDER_ERROR_PREVIEW_LIMIT))
+      } catch {
+        return '[unserializable provider error body]'
+      }
+    }
+    return undefined
+  }
+
+  private sanitizeProviderErrorPreview(value: string): string {
+    return value
+      .replace(/("(?:authorization|cookie|token|api[_-]?key|secret|password|access_token|refresh_token)"\s*:\s*")[^"]*(")/gi, '$1[REDACTED]$2')
+      .replace(/(authorization|cookie|token|api[_-]?key|secret|password|access_token|refresh_token)(["'\s:=]+)([^"'\s,;}]+)/gi, '$1$2[REDACTED]')
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+  }
+
+  private extractResponseError(response: ProviderWebResponse | AxiosResponse, fallbackPreview?: string): string {
     const data = (response as any).data
     if (typeof data === 'string') return data
     if (data && typeof data === 'object') {
       const message = (data as any).error?.message ?? (data as any).message ?? (data as any).msg
       if (typeof message === 'string') return message
     }
+    if (fallbackPreview) return fallbackPreview
     return `Provider runtime request failed with status ${(response as any).status ?? 'unknown'}`
   }
 

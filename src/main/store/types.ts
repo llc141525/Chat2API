@@ -5,6 +5,7 @@
 
 import type { ProviderStatus } from '../../shared/types'
 import type { LegacyToolPromptConfig, ToolCallingConfig } from '../../shared/toolCalling.ts'
+import type { SessionRecoveryState } from '../proxy/services/sessionRecoveryState.ts'
 import { DEFAULT_TOOL_CALLING_CONFIG } from '../../shared/toolCalling.ts'
 
 /**
@@ -345,6 +346,8 @@ export interface SessionRecord {
   status: SessionStatus
   /** Model used */
   model?: string
+  /** Session-scoped persisted recovery checkpoint */
+  recoveryState?: SessionRecoveryState
   /** Session metadata */
   metadata?: {
     title?: string
@@ -856,7 +859,7 @@ export function sanitizeDeepSeekModelOverrides(
  */
 export const DEFAULT_CONFIG: AppConfig = {
   proxyPort: 48763,
-  proxyHost: '127.0.0.1',
+  proxyHost: '0.0.0.0',
   loadBalanceStrategy: 'round-robin',
   modelMappings: createDefaultModelMappings(),
   defaultModelMappingsSeeded: true,

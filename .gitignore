@@ -74,6 +74,9 @@ src/renderer/next-app/
 # Backup
 backup/
 
+# Probe scripts
+run-*-probe.cmd
+
 # Agent / probe artifacts
 .agent-probe/
 .test-user-data/

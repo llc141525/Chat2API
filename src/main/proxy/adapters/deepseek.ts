@@ -12,10 +12,14 @@
  */
 
 import axios, { AxiosResponse } from 'axios'
-import { getDeepSeekHash } from '../../lib/challenge.ts'
 import type { Account, Provider } from '../../store/types.ts'
 import { resolveDeepSeekChatOptions } from './providerModelOptions.ts'
 import { getProviderToolProfile } from '../toolCalling/providerProfiles.ts'
+import {
+  calculateDeepSeekPowResponse,
+  getDeepSeekPowChallenge,
+  type DeepSeekPowChallenge,
+} from '../providers/deepseek/pow.ts'
 
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api'
 
@@ -43,15 +47,6 @@ interface TokenInfo {
   accessToken: string
   refreshToken: string
   expiresAt: number
-}
-
-interface ChallengeResponse {
-  algorithm: string
-  challenge: string
-  salt: string
-  difficulty: number
-  expire_at: number
-  signature: string
 }
 
 interface DeepSeekMessage {
@@ -116,9 +111,7 @@ export class DeepSeekAdapter {
   constructor(provider: Provider, account: Account) {
     this.provider = provider
     this.account = account
-    console.log('[DeepSeek] Account credentials:', JSON.stringify(account.credentials, null, 2))
     this.token = account.credentials.token || account.credentials.apiKey || account.credentials.refreshToken || ''
-    console.log('[DeepSeek] Using token:', this.token.substring(0, 20) + '...')
   }
 
   private async acquireToken(): Promise<string> {
@@ -207,6 +200,10 @@ export class DeepSeekAdapter {
     return sessionId
   }
 
+  async ensureSession(): Promise<string> {
+    return this.createSession()
+  }
+
   async deleteSession(sessionId: string): Promise<boolean> {
     try {
       const token = await this.acquireToken()
@@ -239,56 +236,13 @@ export class DeepSeekAdapter {
     }
   }
 
-  private async getChallenge(targetPath: string): Promise<ChallengeResponse> {
+  private async getChallenge(targetPath: string): Promise<DeepSeekPowChallenge> {
     const token = await this.acquireToken()
-    const result = await axios.post(
-      `${DEEPSEEK_API_BASE}/v0/chat/create_pow_challenge`,
-      { target_path: targetPath },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...FAKE_HEADERS,
-        },
-        timeout: 15000,
-        validateStatus: () => true,
-      }
-    )
-
-    // Response structure: { code: 0, data: { biz_code: 0, biz_data: { challenge: {...} } } }
-    const bizData = result.data?.data?.biz_data || result.data?.biz_data
-    if (result.status !== 200 || !bizData?.challenge) {
-      throw new Error(`Failed to get challenge: ${result.data?.msg || result.data?.data?.biz_msg || result.status}`)
-    }
-
-    return bizData.challenge
+    return getDeepSeekPowChallenge(token, targetPath)
   }
 
-  private async calculateChallengeAnswer(challenge: ChallengeResponse): Promise<string> {
-    const { algorithm, challenge: challengeStr, salt, difficulty, expire_at, signature } = challenge
-    
-    if (algorithm !== 'DeepSeekHashV1') {
-      throw new Error(`Unsupported algorithm: ${algorithm}`)
-    }
-    
-    console.log('[DeepSeek] Challenge parameters:', { difficulty })
-    
-    const deepSeekHash = await getDeepSeekHash()
-    const answer = deepSeekHash.calculateHash(algorithm, challengeStr, salt, difficulty, expire_at)
-    
-    if (answer === undefined) {
-      throw new Error('Challenge calculation failed')
-    }
-    
-    console.log('[DeepSeek] Challenge answer found:', answer)
-
-    return Buffer.from(JSON.stringify({
-      algorithm,
-      challenge: challengeStr,
-      salt,
-      answer,
-      signature,
-      target_path: '/api/v0/chat/completion',
-    })).toString('base64')
+  private async calculateChallengeAnswer(challenge: DeepSeekPowChallenge): Promise<string> {
+    return calculateDeepSeekPowResponse(challenge)
   }
 
   private messagesToPrompt(messages: DeepSeekMessage[], isMultiTurn: boolean = false): string {

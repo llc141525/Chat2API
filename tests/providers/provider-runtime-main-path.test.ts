@@ -13,6 +13,11 @@ import { conversationStateCache } from '../../src/main/proxy/services/providerCo
 import { ToolCallingEngine } from '../../src/main/proxy/toolCalling/ToolCallingEngine.ts'
 import { QwenProviderPlugin } from '../../src/main/proxy/plugins/QwenProviderPlugin.ts'
 import { KimiProviderPlugin } from '../../src/main/proxy/plugins/KimiProviderPlugin.ts'
+import {
+  createSessionRecoveryState,
+  reduceRecoveryEvent,
+  type SessionRecoveryState,
+} from '../../src/main/proxy/services/sessionRecoveryState.ts'
 
 async function collect(stream: Readable): Promise<string> {
   let output = ''
@@ -252,6 +257,118 @@ test('ProviderRuntime.forward runs plugin build, transport, parseNonStream, and 
   assert.equal(conversationStateCache.get('provider-key')?.providerParentReqId, 'runtime-req')
 })
 
+test('ProviderRuntime recovery bridge keeps recoverySessionId separate from provider session ids', async () => {
+  conversationStateCache.clear()
+  const bridgeCalls: any[] = []
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => makeFakePlugin({}),
+    recoveryBridge: {
+      ensureSession: input => bridgeCalls.push({ type: 'ensure', ...input }),
+      applyEvent: (sessionId, event) => bridgeCalls.push({ type: 'event', sessionId, event }),
+    },
+    transport: async request => ({
+      status: 200,
+      headers: {},
+      data: { ok: true, sessionId: request.sessionId || 'provider-session-a', reqId: 'req-a' },
+    }),
+  } as any)
+
+  await runtime.forward(makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      recoverySessionId: 'recovery-main',
+      providerConversationSessionKey: 'provider-key-a',
+      providerSessionId: 'provider-session-a',
+    },
+    conversationStateKey: 'provider-key-a',
+  }))
+  await runtime.forward(makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      recoverySessionId: 'recovery-main',
+      providerConversationSessionKey: 'provider-key-b',
+      providerSessionId: 'provider-session-b',
+    },
+    conversationStateKey: 'provider-key-b',
+    request: {
+      model: 'Qwen3-Max',
+      messages: [{ role: 'user', content: 'retry' }],
+      sessionId: 'different-provider-session',
+    },
+  }))
+
+  const ensureCalls = bridgeCalls.filter(call => call.type === 'ensure')
+  const eventCalls = bridgeCalls.filter(call => call.type === 'event')
+  assert.deepEqual(ensureCalls.map(call => call.sessionId), ['recovery-main', 'recovery-main'])
+  assert.deepEqual(ensureCalls.map(call => call.providerSessionId), ['provider-session-a', 'provider-session-b'])
+  assert.equal(eventCalls.every(call => call.sessionId === 'recovery-main'), true)
+  assert.ok(eventCalls.some(call => call.event.type === 'provider_session_change' && call.event.nextProviderSessionId === 'runtime-session'))
+  assert.equal(eventCalls.some(call => call.sessionId === 'different-provider-session'), false)
+  assert.deepEqual(
+    eventCalls
+      .filter(call => call.event.type === 'provider_session_change')
+      .map(call => call.event.previousProviderSessionId),
+    ['provider-session-a', 'provider-session-b'],
+  )
+})
+
+test('ProviderRuntime recovery bridge derives isolated child recovery sessions and safely no-ops when missing', async () => {
+  conversationStateCache.clear()
+  const bridgeCalls: any[] = []
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => makeFakePlugin({}),
+    recoveryBridge: {
+      ensureSession: input => bridgeCalls.push({ type: 'ensure', ...input }),
+      applyEvent: (sessionId, event) => bridgeCalls.push({ type: 'event', sessionId, event }),
+    },
+    transport: async request => ({
+      status: 200,
+      headers: {},
+      data: { ok: true, sessionId: request.sessionId || 'provider-child-session', reqId: 'child-req' },
+    }),
+  } as any)
+
+  await runtime.forward(makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      recoverySessionId: 'recovery-child-a',
+      parentRecoverySessionId: 'recovery-parent',
+      recoveryToolCallId: 'call_a',
+      providerConversationSessionKey: 'provider-child-a',
+      parentProviderConversationSessionKey: 'provider-parent',
+      sessionBoundaryReason: 'tool_child',
+    },
+    conversationStateKey: 'provider-child-a',
+  }))
+  await runtime.forward(makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      recoverySessionId: 'recovery-child-b',
+      parentRecoverySessionId: 'recovery-parent',
+      recoveryToolCallId: 'call_b',
+      providerConversationSessionKey: 'provider-child-b',
+      parentProviderConversationSessionKey: 'provider-parent',
+      sessionBoundaryReason: 'subagent_child',
+    },
+    conversationStateKey: 'provider-child-b',
+  }))
+  await runtime.forward(makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      recoverySessionId: undefined,
+      providerConversationSessionKey: 'provider-no-recovery',
+    },
+    conversationStateKey: 'provider-no-recovery',
+  }))
+
+  const ensureCalls = bridgeCalls.filter(call => call.type === 'ensure')
+  assert.deepEqual(ensureCalls.map(call => [call.sessionId, call.sessionKind, call.parentSessionId, call.toolCallId]), [
+    ['recovery-child-a', 'tool_child', 'recovery-parent', 'call_a'],
+    ['recovery-child-b', 'subagent_child', 'recovery-parent', 'call_b'],
+  ])
+  assert.equal(bridgeCalls.some(call => call.sessionId === undefined), false)
+})
+
 test('ProviderRuntime.writeSessionState attaches the final provider session id onto a parent handoff for child boundaries', () => {
   conversationStateCache.clear()
   const runtime = new ProviderRuntime()
@@ -362,6 +479,91 @@ test('ProviderRuntime default transport merges plugin transportOptions for strea
   assert.equal(calls[0].timeout, 120000)
   assert.equal(calls[0].decompress, false)
   assert.equal(typeof calls[0].validateStatus, 'function')
+})
+
+test('ProviderRuntime reads bounded provider stream error bodies for HTTP diagnostics', async () => {
+  conversationStateCache.clear()
+  const plugin = makeFakePlugin({})
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => plugin,
+    transport: async () => ({
+      status: 422,
+      headers: { 'content-type': 'application/json' },
+      data: Readable.from([
+        '{"error":{"message":"invalid parent_message_id"},"authorization":"Bearer should-not-leak"}',
+      ]),
+    }),
+  })
+
+  const result = await runtime.forward(makeRuntimeInput({
+    request: {
+      model: 'deepseek-v4-flash',
+      messages: [{ role: 'user', content: 'stream error' }],
+      stream: true,
+    },
+    provider: { id: 'deepseek', name: 'DeepSeek' },
+    context: {
+      requestId: 'corr-deepseek-422',
+      providerConversationSessionKey: 'provider-deepseek-error',
+      toolCatalogSessionKey: 'tool-deepseek-error',
+      sessionBoundaryReason: 'normal',
+    },
+    conversationStateKey: 'provider-deepseek-error',
+    toolSessionKey: 'tool-deepseek-error',
+  }))
+
+  assert.equal(result.success, false)
+  assert.equal(result.status, 422)
+  assert.match(result.error, /invalid parent_message_id/)
+  assert.doesNotMatch(result.error, /should-not-leak/)
+})
+
+test('ProviderRuntime does not persist a synthetic DeepSeek parent message id before the stream reports one', async () => {
+  conversationStateCache.clear()
+  const plugin = makeFakePlugin({})
+  plugin.id = 'deepseek'
+  plugin.matches = provider => provider.id === 'deepseek'
+  plugin.buildRequest = async () => ({
+    url: 'https://runtime.test/deepseek',
+    method: 'POST',
+    headers: {},
+    body: {},
+    sessionId: 'deepseek-session',
+    reqId: 'synthetic-local-req',
+    transportOptions: { responseType: 'stream' },
+  })
+  plugin.parseStream = async function* () {
+    yield { type: 'text_delta', text: 'ok' }
+    yield { type: 'done', finishReason: 'stop' }
+  }
+
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => plugin,
+    transport: async () => ({ status: 200, headers: {}, data: Readable.from([]) }),
+  })
+
+  const result = await runtime.forward(makeRuntimeInput({
+    request: {
+      model: 'deepseek-v4-flash',
+      messages: [{ role: 'user', content: 'first stream without response_message_id' }],
+      stream: true,
+    },
+    provider: { id: 'deepseek', name: 'DeepSeek' },
+    context: {
+      requestId: 'corr-deepseek-no-response-message-id',
+      providerConversationSessionKey: 'provider-deepseek-no-parent',
+      toolCatalogSessionKey: 'tool-deepseek-no-parent',
+      sessionBoundaryReason: 'normal',
+    },
+    conversationStateKey: 'provider-deepseek-no-parent',
+    toolSessionKey: 'tool-deepseek-no-parent',
+  }))
+
+  assert.equal(result.success, true)
+  const state = conversationStateCache.get('provider-deepseek-no-parent')
+  assert.equal(state?.providerSessionId, 'deepseek-session')
+  assert.equal(state?.providerParentReqId, undefined)
+  assert.equal(state?.parentMessageId, undefined)
 })
 
 test('ProviderRuntime.forward normalizes plugin stream events into OpenAI SSE', async () => {
@@ -513,6 +715,7 @@ test('ProviderRuntime rejects constrained provider streams that finish with ordi
 test('ProviderRuntime writes child handoff and cleans it once after parent consumption', async () => {
   conversationStateCache.clear()
   const deleted: string[] = []
+  const bridgeCalls: any[] = []
   const childPlugin = makeFakePlugin({})
   childPlugin.deleteSession = async ({ sessionId }) => {
     deleted.push(sessionId)
@@ -520,6 +723,10 @@ test('ProviderRuntime writes child handoff and cleans it once after parent consu
   }
   const runtime = new ProviderRuntime({
     pluginResolver: async () => childPlugin,
+    recoveryBridge: {
+      ensureSession: input => bridgeCalls.push({ type: 'ensure', ...input }),
+      applyEvent: (sessionId, event) => bridgeCalls.push({ type: 'event', sessionId, event }),
+    },
     transport: async request => ({
       status: 200,
       headers: {},
@@ -543,6 +750,9 @@ test('ProviderRuntime writes child handoff and cleans it once after parent consu
       requestId: 'req-child',
       providerConversationSessionKey: 'provider-child',
       parentProviderConversationSessionKey: 'provider-parent',
+      recoverySessionId: 'recovery-child',
+      parentRecoverySessionId: 'recovery-parent',
+      recoveryToolCallId: 'call_read',
       sessionBoundaryReason: 'tool_child',
     },
     conversationStateKey: 'provider-child',
@@ -571,6 +781,8 @@ test('ProviderRuntime writes child handoff and cleans it once after parent consu
   assert.equal(handoff.status, 'ok')
   assert.equal(handoff.childProviderSessionId, 'runtime-session')
   assert.equal(JSON.stringify(handoff).includes('raw child output'), false)
+  assert.equal(JSON.stringify(bridgeCalls).includes('raw child output'), false)
+  assert.equal(JSON.stringify(bridgeCalls).includes('catalog_fingerprint'), false)
   assert.deepEqual(deleted, [], 'child session must not be deleted before parent consumes handoff')
 
   const parentInput = makeRuntimeInput({
@@ -578,6 +790,7 @@ test('ProviderRuntime writes child handoff and cleans it once after parent consu
       ...makeRuntimeInput().context,
       requestId: 'req-parent',
       providerConversationSessionKey: 'provider-parent',
+      recoverySessionId: 'recovery-parent',
       sessionBoundaryReason: 'normal',
     },
     conversationStateKey: 'provider-parent',
@@ -593,6 +806,328 @@ test('ProviderRuntime writes child handoff and cleans it once after parent consu
 
   assert.deepEqual(deleted, ['runtime-session'])
   assert.equal(conversationStateCache.get('provider-parent')?.childSessionHandoff, undefined)
+
+  const eventCalls = bridgeCalls.filter(call => call.type === 'event')
+  assert.deepEqual(eventCalls.map(call => [call.sessionId, call.event.type, call.event.sessionId]), [
+    ['recovery-parent', 'child_create', 'recovery-parent'],
+    ['recovery-child', 'provider_session_change', 'recovery-child'],
+    ['recovery-parent', 'child_complete', 'recovery-parent'],
+    ['recovery-parent', 'handoff_create', 'recovery-parent'],
+    ['recovery-parent', 'provider_session_change', 'recovery-parent'],
+    ['recovery-parent', 'handoff_consume', 'recovery-parent'],
+    ['recovery-parent', 'provider_session_change', 'recovery-parent'],
+  ])
+  assert.equal(eventCalls.find(call => call.event.type === 'child_create')?.event.childSessionId, 'recovery-child')
+  assert.equal(eventCalls.find(call => call.event.type === 'child_create')?.event.childKind, 'tool_child')
+  assert.equal(eventCalls.find(call => call.event.type === 'handoff_create')?.event.fromSessionId, 'recovery-child')
+  assert.equal(eventCalls.find(call => call.event.type === 'handoff_create')?.event.toSessionId, 'recovery-parent')
+  assert.equal(eventCalls.find(call => call.event.type === 'handoff_consume')?.event.fromSessionId, 'recovery-child')
+  const childAndHandoffEventIds = eventCalls
+    .filter(call => call.event.type !== 'provider_session_change')
+    .map(call => call.event.eventId)
+  assert.equal(new Set(childAndHandoffEventIds).size, childAndHandoffEventIds.length)
+  const parentProviderEventIds = eventCalls
+    .filter(call => call.event.type === 'provider_session_change' && call.sessionId === 'recovery-parent')
+    .map(call => call.event.eventId)
+  assert.equal(parentProviderEventIds[0], parentProviderEventIds[1])
+})
+
+test('ProviderRuntime does not cleanup child provider session when recovery handoff consume fails', async () => {
+  conversationStateCache.clear()
+  const deleted: string[] = []
+  const plugin = makeFakePlugin({})
+  plugin.deleteSession = async ({ sessionId }) => {
+    deleted.push(sessionId)
+    return { success: true }
+  }
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => plugin,
+    recoveryBridge: {
+      ensureSession: () => undefined,
+      applyEvent: (_sessionId, event) => {
+        if (event.type === 'handoff_consume') {
+          throw new Error('synthetic consume failure')
+        }
+      },
+    },
+    transport: async request => ({
+      status: 200,
+      headers: {},
+      data: {
+        sessionId: request.sessionId,
+        reqId: request.reqId,
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }],
+      },
+    }),
+  } as any)
+
+  await runtime.forward(makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      requestId: 'req-child-fail-consume',
+      providerConversationSessionKey: 'provider-child-fail-consume',
+      parentProviderConversationSessionKey: 'provider-parent-fail-consume',
+      recoverySessionId: 'recovery-child-fail-consume',
+      parentRecoverySessionId: 'recovery-parent-fail-consume',
+      recoveryToolCallId: 'call_fail_consume',
+      sessionBoundaryReason: 'tool_child',
+    },
+    conversationStateKey: 'provider-child-fail-consume',
+    request: {
+      model: 'Qwen3-Max',
+      stream: false,
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_fail_consume',
+            type: 'function',
+            function: { name: 'read', arguments: '{"filePath":"probe.txt"}' },
+          }],
+        },
+        { role: 'tool', tool_call_id: 'call_fail_consume', content: 'raw child output' },
+      ],
+    },
+  }))
+
+  await assert.rejects(() => runtime.forward(makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      requestId: 'req-parent-fail-consume',
+      providerConversationSessionKey: 'provider-parent-fail-consume',
+      recoverySessionId: 'recovery-parent-fail-consume',
+      sessionBoundaryReason: 'normal',
+    },
+    conversationStateKey: 'provider-parent-fail-consume',
+    request: {
+      model: 'Qwen3-Max',
+      stream: false,
+      messages: [{ role: 'user', content: 'Continue parent.' }],
+    },
+  })), /synthetic consume failure/)
+
+  assert.deepEqual(deleted, [])
+})
+
+test('ProviderRuntime records recovery handoff events for streamed subagent child settlement', async () => {
+  conversationStateCache.clear()
+  const bridgeCalls: any[] = []
+  const plugin = makeFakePlugin({})
+  plugin.parseStream = async function* () {
+    yield { type: 'session_update', sessionId: 'stream-child-provider-session', parentId: 'stream-child-req' }
+    yield { type: 'text_delta', text: 'Subagent completed. Next action: resume parent review.' }
+    yield { type: 'done', finishReason: 'stop' }
+  }
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => plugin,
+    recoveryBridge: {
+      ensureSession: input => bridgeCalls.push({ type: 'ensure', ...input }),
+      applyEvent: (sessionId, event) => bridgeCalls.push({ type: 'event', sessionId, event }),
+    },
+    transport: async () => ({ status: 200, headers: {}, data: Readable.from([]) }),
+  } as any)
+
+  const result = await runtime.forward(makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      requestId: 'req-stream-subagent-child',
+      providerConversationSessionKey: 'provider-stream-subagent-child',
+      parentProviderConversationSessionKey: 'provider-stream-parent',
+      recoverySessionId: 'recovery-stream-subagent-child',
+      parentRecoverySessionId: 'recovery-stream-parent',
+      sessionBoundaryReason: 'subagent_child',
+    },
+    conversationStateKey: 'provider-stream-subagent-child',
+    request: {
+      model: 'Qwen3-Max',
+      stream: true,
+      messages: [{ role: 'user', content: 'Run streamed subagent.' }],
+    },
+  }))
+
+  assert.equal(result.success, true)
+  await collect(result.stream as Readable)
+
+  const eventCalls = bridgeCalls.filter(call => call.type === 'event')
+  assert.deepEqual(
+    eventCalls
+      .filter(call => call.event.type !== 'provider_session_change')
+      .map(call => [call.sessionId, call.event.type, call.event.sessionId]),
+    [
+      ['recovery-stream-parent', 'child_create', 'recovery-stream-parent'],
+      ['recovery-stream-parent', 'child_complete', 'recovery-stream-parent'],
+      ['recovery-stream-parent', 'handoff_create', 'recovery-stream-parent'],
+    ],
+  )
+  assert.equal(eventCalls.filter(call => call.event.type === 'provider_session_change' && call.sessionId === 'recovery-stream-subagent-child').length, 3)
+  assert.equal(eventCalls.find(call => call.event.type === 'child_create')?.event.childKind, 'subagent_child')
+  assert.equal(eventCalls.find(call => call.event.type === 'handoff_create')?.event.childKind, 'subagent_child')
+  assert.equal(eventCalls.find(call => call.event.type === 'handoff_create')?.event.fromSessionId, 'recovery-stream-subagent-child')
+  assert.equal(JSON.stringify(bridgeCalls).includes('Run streamed subagent'), false)
+  assert.equal(JSON.stringify(bridgeCalls).includes('catalog_fingerprint'), false)
+})
+
+test('ProviderRuntime projects bounded persisted recovery context after compaction without trusting narrative summary', async () => {
+  conversationStateCache.clear()
+  let state: SessionRecoveryState = createSessionRecoveryState({ sessionId: 'recovery-main', sessionKind: 'main', now: 1 })
+  state = reduceRecoveryEvent(state, {
+    type: 'runtime_tool_call',
+    eventId: 'evt-call',
+    sessionId: 'recovery-main',
+    occurredAt: 2,
+    expectedStateVersion: state.stateVersion,
+    toolCallId: 'call_read',
+    toolName: 'read',
+    description: 'Read verified file',
+  })
+  state = reduceRecoveryEvent(state, {
+    type: 'runtime_tool_result',
+    eventId: 'evt-result',
+    sessionId: 'recovery-main',
+    occurredAt: 3,
+    expectedStateVersion: state.stateVersion,
+    toolCallId: 'call_read',
+    toolName: 'read',
+    success: true,
+    description: 'Executed read against src/main/proxy/forwarder.ts',
+  })
+  state = reduceRecoveryEvent(state, {
+    type: 'verification',
+    eventId: 'evt-verify',
+    sessionId: 'recovery-main',
+    occurredAt: 4,
+    expectedStateVersion: state.stateVersion,
+    factId: 'tool-call:call_read',
+    verified: true,
+  })
+  state = {
+    ...state,
+    constraints: [{
+      id: 'constraint-runtime',
+      text: 'Do not modify RequestAssembly in this task.',
+      source: 'runtime',
+      createdAt: 5,
+    }],
+    pendingWork: [{
+      id: 'work-next',
+      text: 'Run focused recovery projection test.',
+      status: 'pending',
+      createdAt: 5,
+      updatedAt: 5,
+    }],
+    next: { kind: 'tool', description: 'Run node --test targeted suite', toolName: 'node', toolCallId: 'call_test' },
+  }
+
+  const records: { input?: ProviderRuntimeRequest; webRequest?: ProviderWebRequest } = {}
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => makeFakePlugin(records),
+    recoveryBridge: {
+      ensureSession: () => undefined,
+      applyEvent: () => undefined,
+      readState: sessionId => sessionId === 'recovery-main' ? state : undefined,
+    },
+    transport: async request => {
+      records.webRequest = request
+      return { status: 200, headers: {}, data: { sessionId: request.sessionId, reqId: request.reqId, choices: [] } }
+    },
+  } as any)
+
+  await runtime.forward(makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      requestId: 'req-compact-recovery',
+      recoverySessionId: 'recovery-main',
+      providerConversationSessionKey: 'provider-compact-a',
+      providerSessionEpoch: 'compact:abc',
+      sessionBoundaryReason: 'client_compact',
+    },
+    conversationStateKey: 'provider-compact-a',
+    assembly: makeAssembly([{ role: 'user', content: 'Continue after compact.' }]) as any,
+    request: {
+      model: 'Qwen3-Max',
+      stream: false,
+      messages: [{ role: 'user', content: 'Continue after compact.' }],
+    },
+  }))
+
+  const projected = `${records.input?.assembly.recoveryContextText ?? ''}\n${records.input?.cleanedRequest?.recoveryContextText ?? ''}`
+  assert.match(projected, /Session recovery context/)
+  assert.match(projected, /verified facts/i)
+  assert.match(projected, /tool-call:call_read/)
+  assert.match(projected, /Do not modify RequestAssembly/)
+  assert.match(projected, /Run node --test targeted suite/)
+  assert.doesNotMatch(projected, /fake verified narrative/i)
+  assert.equal((projected.match(/Session recovery context/g) ?? []).length, 2)
+})
+
+test('ProviderRuntime recovery projection safely no-ops for legacy state and keeps identity stable across provider compaction keys', async () => {
+  conversationStateCache.clear()
+  const state = createSessionRecoveryState({ sessionId: 'recovery-main-stable', sessionKind: 'main', now: 1 })
+  const seenPrompts: string[] = []
+  const seenRecoveryIds: Array<string | undefined> = []
+  const runtime = new ProviderRuntime({
+    pluginResolver: async () => ({
+      ...makeFakePlugin({}),
+      async buildRequest(input: ProviderRuntimeRequest) {
+        seenRecoveryIds.push(input.assembly.recoveryContextText?.includes('recovery-main-stable') ? 'recovery-main-stable' : undefined)
+        seenPrompts.push(`${input.assembly.recoveryContextText ?? ''}\n${input.cleanedRequest?.recoveryContextText ?? ''}`)
+        return {
+          url: 'https://runtime.test/chat',
+          method: 'POST' as const,
+          headers: {},
+          body: {},
+          sessionId: 'provider-session',
+          reqId: 'provider-req',
+        }
+      },
+    }),
+    recoveryBridge: {
+      ensureSession: () => undefined,
+      applyEvent: () => undefined,
+      readState: sessionId => sessionId === 'recovery-main-stable' ? state : undefined,
+    },
+    transport: async request => ({ status: 200, headers: {}, data: { sessionId: request.sessionId, reqId: request.reqId, choices: [] } }),
+  } as any)
+
+  for (const providerConversationSessionKey of ['provider-compact-a', 'provider-compact-b']) {
+    await runtime.forward(makeRuntimeInput({
+      context: {
+        ...makeRuntimeInput().context,
+        recoverySessionId: 'recovery-main-stable',
+        providerConversationSessionKey,
+        providerSessionEpoch: `compact:${providerConversationSessionKey}`,
+        sessionBoundaryReason: 'client_compact',
+      },
+      conversationStateKey: providerConversationSessionKey,
+      request: {
+        model: 'Qwen3-Max',
+        stream: false,
+        messages: [{ role: 'user', content: 'Continue after compact.' }],
+      },
+    }))
+  }
+
+  await runtime.forward(makeRuntimeInput({
+    context: {
+      ...makeRuntimeInput().context,
+      recoverySessionId: undefined,
+      providerConversationSessionKey: 'provider-legacy-no-recovery',
+      sessionBoundaryReason: 'client_compact',
+    },
+    conversationStateKey: 'provider-legacy-no-recovery',
+    request: {
+      model: 'Qwen3-Max',
+      stream: false,
+      messages: [{ role: 'user', content: 'Legacy compact.' }],
+    },
+  }))
+
+  assert.deepEqual(seenRecoveryIds, ['recovery-main-stable', 'recovery-main-stable', undefined])
+  assert.equal(seenPrompts.slice(0, 2).every(prompt => prompt.includes('Session recovery context')), true)
+  assert.equal(seenPrompts[0].includes('provider-compact-a'), false)
+  assert.equal(seenPrompts[1].includes('provider-compact-b'), false)
+  assert.equal(seenPrompts[2].includes('Session recovery context'), false)
 })
 
 test('ProviderRuntime aggregates provider SSE into non-stream OpenAI tool_calls', async () => {

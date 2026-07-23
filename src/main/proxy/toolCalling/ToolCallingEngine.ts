@@ -398,6 +398,7 @@ function extractWorkflowNextStepFromInstructionBlock(block: string): WorkflowNex
   const numberedStepMatch = block.match(/^\d+\.\s+([\s\S]+)$/)
   const instruction = (numberedStepMatch?.[1] ?? block).trim()
   const directMatch = instruction.match(/^(Read|Re-read|Write|Glob|Bash|Run)\s+`([^`]+)`/i)
+    ?? instruction.match(/^(Read|Re-read|Write|Glob|Bash|Run)\b[\s\S]*?`([^`]+)`/i)
   if (directMatch) {
     const toolName = normalizeWorkflowStepToolName(directMatch[1])
     return {
@@ -449,32 +450,34 @@ function inspectCheckpointWorkflowNext(messages: ChatMessage[]): CheckpointInspe
     if (!text.includes('[Active skill workflow state checkpoint]')) continue
     checkpointCount += 1
     checkpointChars += text.length
-    const toolMatch = text.match(RE_CHECKPOINT_NEXT_TOOL)
-    if (!toolMatch) continue
     const skillStepBlock = extractCheckpointNextSkillStepBlock(text)
     const skillStep = skillStepBlock
       ? extractWorkflowNextStepFromInstructionBlock(skillStepBlock)
       : null
-    if (skillStep && Object.keys(skillStep.args).length > 0) {
+    if (skillStep) {
+      const hasConcreteArguments = Object.keys(skillStep.args).length > 0
       return {
         checkpointCount,
         checkpointChars,
-        status: 'parsed',
-        reason: 'next_required_skill_step',
+        status: hasConcreteArguments ? 'parsed' : 'missing_arguments',
+        reason: hasConcreteArguments
+          ? 'next_required_skill_step'
+          : 'next_required_skill_step_without_concrete_arguments',
         nextStep: skillStep,
       }
     }
+    const toolMatch = text.match(RE_CHECKPOINT_NEXT_TOOL)
+    if (!toolMatch) continue
     const argumentMatch = text.match(/Required next tool arguments:\s*(filePath|command)=([\s\S]+?)(?:\s+(?:Do not call|Next required skill step:|Only the|Latest pinned|Do not repeat|Latest pinned skill|Listed read\/bash\/write)|$)/i)
     if (!argumentMatch) {
-      const fallbackToolName = skillStep?.toolName ?? toolMatch[1].toLowerCase()
       return {
         checkpointCount,
         checkpointChars,
         status: 'missing_arguments',
         reason: skillStepBlock
-          ? 'next_required_skill_step_without_concrete_arguments'
+          ? 'next_required_skill_step_unparseable'
           : 'required_action_without_arguments',
-        nextStep: { toolName: fallbackToolName, args: {} },
+        nextStep: { toolName: toolMatch[1].toLowerCase(), args: {} },
       }
     }
 

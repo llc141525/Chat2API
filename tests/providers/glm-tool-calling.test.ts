@@ -353,6 +353,139 @@ test('ToolCallingEngine enforces a workflow checkpoint carried by a tool result 
   assert.equal(transformed.toolManifest?.actionConstraint?.arguments.command, 'node compute-result.mjs')
 })
 
+test('ToolCallingEngine prefers explicit multiline checkpoint next skill step over stale required action', () => {
+  const engine = new ToolCallingEngine()
+  const workflowTools: ChatCompletionRequest['tools'] = [
+    { type: 'function', function: { name: 'skill', description: 'Load a skill', parameters: {} } },
+    { type: 'function', function: { name: 'read', description: 'Read a file', parameters: {} } },
+    { type: 'function', function: { name: 'bash', description: 'Run a command', parameters: {} } },
+  ]
+
+  const transformed = engine.transformRequest({
+    request: {
+      model: 'GLM-4.7',
+      messages: [{
+        role: 'tool',
+        tool_call_id: 'tool_handoff',
+        content: [
+          '[Active skill workflow state checkpoint]',
+          'Required next action: call the read tool for this exact skill step now.',
+          'Next required skill step:',
+          '2. Bash `node scripts/verify-checkpoint.mjs`',
+          'Use the command exactly as shown.',
+        ].join('\n'),
+      }],
+      tools: workflowTools,
+      stream: true,
+    },
+    provider: glmProvider,
+    actualModel: 'GLM-4.7',
+  })
+
+  assert.equal(transformed.toolManifest?.actionConstraint?.kind, 'next_required_tool')
+  assert.equal(transformed.toolManifest?.actionConstraint?.toolName, 'bash')
+  assert.deepEqual(transformed.toolManifest?.actionConstraint?.arguments, { command: 'node scripts/verify-checkpoint.mjs' })
+})
+
+test('ToolCallingEngine parses checkpoint next skill step without legacy required action line', () => {
+  const engine = new ToolCallingEngine()
+  const workflowTools: ChatCompletionRequest['tools'] = [
+    { type: 'function', function: { name: 'skill', description: 'Load a skill', parameters: {} } },
+    { type: 'function', function: { name: 'read', description: 'Read a file', parameters: {} } },
+    { type: 'function', function: { name: 'bash', description: 'Run a command', parameters: {} } },
+  ]
+
+  const transformed = engine.transformRequest({
+    request: {
+      model: 'GLM-4.7',
+      messages: [{
+        role: 'assistant',
+        content: [
+          '[Active skill workflow state checkpoint]',
+          'server_summary/tool_handoff preserved the active skill state.',
+          'Next required skill step:',
+          '4. Bash',
+          '`node tests/agent-capability/checkpoint-k3.mjs --model kimi-k3`',
+          'Latest pinned skill state follows.',
+        ].join('\n'),
+      }],
+      tools: workflowTools,
+      stream: true,
+    },
+    provider: glmProvider,
+    actualModel: 'GLM-4.7',
+  })
+
+  assert.equal(transformed.toolManifest?.actionConstraint?.kind, 'next_required_tool')
+  assert.equal(transformed.toolManifest?.actionConstraint?.toolName, 'bash')
+  assert.deepEqual(transformed.toolManifest?.actionConstraint?.arguments, { command: 'node tests/agent-capability/checkpoint-k3.mjs --model kimi-k3' })
+})
+
+test('ToolCallingEngine keeps next skill step tool name when checkpoint arguments are missing', () => {
+  const engine = new ToolCallingEngine()
+  const workflowTools: ChatCompletionRequest['tools'] = [
+    { type: 'function', function: { name: 'skill', description: 'Load a skill', parameters: {} } },
+    { type: 'function', function: { name: 'read', description: 'Read a file', parameters: {} } },
+    { type: 'function', function: { name: 'bash', description: 'Run a command', parameters: {} } },
+  ]
+
+  for (const role of ['user', 'assistant'] as const) {
+    const transformed = engine.transformRequest({
+      request: {
+        model: 'GLM-4.7',
+        messages: [{
+          role,
+          content: [
+            '[Active skill workflow state checkpoint]',
+            'Required next action: call the read tool for this exact skill step now.',
+            'Next required skill step:',
+            '3. Bash the existing verification command from the handoff.',
+            'Only the bash tool is valid for this turn.',
+          ].join('\n'),
+        } as ChatMessage],
+        tools: workflowTools,
+        stream: true,
+      },
+      provider: glmProvider,
+      actualModel: 'GLM-4.7',
+    })
+
+    assert.equal(transformed.toolManifest?.actionConstraint?.kind, 'next_required_tool')
+    assert.equal(transformed.toolManifest?.actionConstraint?.toolName, 'bash')
+    assert.deepEqual(transformed.toolManifest?.actionConstraint?.arguments, {})
+  }
+})
+
+test('ToolCallingEngine does not convert parameterless checkpoint guidance into read constraint', () => {
+  const engine = new ToolCallingEngine()
+  const workflowTools: ChatCompletionRequest['tools'] = [
+    { type: 'function', function: { name: 'skill', description: 'Load a skill', parameters: {} } },
+    { type: 'function', function: { name: 'read', description: 'Read a file', parameters: {} } },
+    { type: 'function', function: { name: 'bash', description: 'Run a command', parameters: {} } },
+  ]
+
+  const transformed = engine.transformRequest({
+    request: {
+      model: 'GLM-4.7',
+      messages: [{
+        role: 'user',
+        content: [
+          '[Active skill workflow state checkpoint]',
+          'Review the saved state and continue with the next useful tool.',
+          'Guidance: read carefully before making changes.',
+        ].join('\n'),
+      }],
+      tools: workflowTools,
+      stream: true,
+    },
+    provider: glmProvider,
+    actualModel: 'GLM-4.7',
+  })
+
+  assert.equal(transformed.toolManifest?.actionConstraint, null)
+  assert.deepEqual([...transformed.plan.allowedToolNames].sort(), ['bash', 'read', 'skill'])
+})
+
 test('ToolCallingEngine maps direct-verb workflow steps to namespaced catalog tools', () => {
   const engine = new ToolCallingEngine()
   const request: ChatCompletionRequest = {
